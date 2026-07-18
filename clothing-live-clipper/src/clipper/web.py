@@ -11,7 +11,7 @@ from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 
-from clipper.config import Settings
+from clipper.config import Settings, asr_status
 from clipper.media import which_ffmpeg
 from clipper.pipeline import run_pipeline
 
@@ -36,9 +36,71 @@ def _read_json(path: Path) -> Any:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+def _write_meta(d: Path, meta: dict) -> None:
+    (d / "job_meta.json").write_text(
+        json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+
+
 def _safe_name(name: str | None, default: str) -> str:
     raw = Path(name or default).name
     return raw if raw else default
+
+
+def _settings_for_target(target_seconds: int) -> Settings:
+    base = Settings.from_env()
+    return Settings(
+        target_duration_s=target_seconds,
+        golden_s=min(20, max(8, target_seconds // 3)),
+        cta_s=min(10, max(5, target_seconds // 6)),
+        min_clip_ms=base.min_clip_ms,
+        max_clip_ms=base.max_clip_ms,
+        golden_weight_ratio=base.golden_weight_ratio,
+        llm_api_key=base.llm_api_key,
+        llm_base_url=base.llm_base_url,
+        llm_model=base.llm_model,
+    )
+
+
+def _status_from_result(result: Any) -> str:
+    if result.plan and result.output_mp4:
+        return "success"
+    if result.plan:
+        return "success_partial"
+    return "failed"
+
+
+def _apply_result_meta(
+    meta: dict[str, Any],
+    result: Any,
+    *,
+    has_vid: bool,
+    status: str,
+) -> None:
+    meta.update(
+        {
+            "status": status,
+            "finished_at": _utc_now(),
+            "has_video": has_vid,
+            "has_final": bool(result.output_mp4),
+            "output_mp4": bool(result.output_mp4),
+            "render_skipped": result.meta.get("render_skipped"),
+            "render_error": result.meta.get("render_error"),
+            "golden20_passed": bool(result.plan.golden20_passed) if result.plan else False,
+            "duration_s": (result.plan.total_duration_ms / 1000.0) if result.plan else 0,
+            "warnings": result.plan.warnings if result.plan else [],
+            "selected_clips": len(result.plan.all_slots()) if result.plan else 0,
+        }
+    )
+
+
+def _find_uploaded_video(uploads: Path) -> Path | None:
+    if not uploads.exists():
+        return None
+    for p in uploads.iterdir():
+        if p.is_file() and p.suffix.lower() in ALLOWED_VIDEO:
+            return p
+    return None
 
 
 def create_app() -> FastAPI:
@@ -57,10 +119,13 @@ def create_app() -> FastAPI:
 
     @app.get("/api/health")
     def health() -> dict[str, Any]:
+        a = asr_status()
         return {
             "ok": True,
             "ffmpeg": bool(which_ffmpeg()),
             "sample_transcript": SAMPLE_TRANSCRIPT.exists(),
+            "asr_configured": a["asr_configured"],
+            "asr_note": a.get("asr_note"),
             "time": _utc_now(),
         }
 
@@ -158,26 +223,20 @@ def create_app() -> FastAPI:
             "target_seconds": target_seconds,
             "render_requested": render,
             "error": None,
+            "has_video": False,
+            "has_final": False,
         }
-        (d / "job_meta.json").write_text(
-            json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8"
-        )
+        _write_meta(d, meta)
 
         try:
-            # transcript
-            transcript_path: Path
+            transcript_path: Path | None = None
             if use_sample:
                 if not SAMPLE_TRANSCRIPT.exists():
                     raise HTTPException(status_code=500, detail="sample transcript missing")
                 transcript_path = uploads / "transcript.json"
                 shutil.copy2(SAMPLE_TRANSCRIPT, transcript_path)
                 meta["transcript_source"] = "sample"
-            else:
-                if transcript is None or not transcript.filename:
-                    raise HTTPException(
-                        status_code=400,
-                        detail="请上传转写文件（json/srt），或勾选使用示例转写",
-                    )
+            elif transcript is not None and transcript.filename:
                 suffix = Path(transcript.filename).suffix.lower()
                 if suffix not in ALLOWED_TRANSCRIPT:
                     raise HTTPException(
@@ -200,23 +259,45 @@ def create_app() -> FastAPI:
                 video_path = uploads / _safe_name(video.filename, f"video{suffix}")
                 await _save_upload(video, video_path)
                 meta["video_source"] = video.filename
+                meta["has_video"] = True
             else:
                 meta["video_source"] = None
 
-            # if no video, cannot render
+            has_tr = transcript_path is not None
+            has_vid = video_path is not None
+
+            if not has_tr and not has_vid:
+                raise HTTPException(
+                    status_code=400,
+                    detail="请上传视频或转写，或勾选示例转写",
+                )
+
+            if has_vid and not has_tr:
+                a = asr_status()
+                meta.update(
+                    {
+                        "status": "needs_transcript",
+                        "has_video": True,
+                        "has_final": False,
+                        "finished_at": _utc_now(),
+                        "asr_configured": a["asr_configured"],
+                        "asr_note": a.get("asr_note")
+                        if a.get("asr_note") is not None
+                        else ("not_implemented" if a["asr_configured"] else a.get("asr_note")),
+                    }
+                )
+                # v1: no real ASR — always needs_transcript for video-only
+                if a["asr_configured"]:
+                    meta["asr_note"] = "not_implemented"
+                _write_meta(d, meta)
+                return get_job(job_id)
+
+            # has transcript → processing path
+            meta["status"] = "processing"
+            _write_meta(d, meta)
+
             do_render = bool(render and video_path is not None)
-            settings = Settings.from_env()
-            settings = Settings(
-                target_duration_s=target_seconds,
-                golden_s=min(20, max(8, target_seconds // 3)),
-                cta_s=min(10, max(5, target_seconds // 6)),
-                min_clip_ms=settings.min_clip_ms,
-                max_clip_ms=settings.max_clip_ms,
-                golden_weight_ratio=settings.golden_weight_ratio,
-                llm_api_key=settings.llm_api_key,
-                llm_base_url=settings.llm_base_url,
-                llm_model=settings.llm_model,
-            )
+            settings = _settings_for_target(target_seconds)
 
             result = run_pipeline(
                 video=video_path,
@@ -226,43 +307,91 @@ def create_app() -> FastAPI:
                 render=do_render,
             )
 
-            meta.update(
-                {
-                    "status": "success",
-                    "finished_at": _utc_now(),
-                    "output_mp4": bool(result.output_mp4),
-                    "render_skipped": result.meta.get("render_skipped"),
-                    "render_error": result.meta.get("render_error"),
-                    "golden20_passed": bool(result.plan.golden20_passed)
-                    if result.plan
-                    else False,
-                    "duration_s": (result.plan.total_duration_ms / 1000.0)
-                    if result.plan
-                    else 0,
-                    "warnings": result.plan.warnings if result.plan else [],
-                    "selected_clips": len(result.plan.all_slots()) if result.plan else 0,
-                }
-            )
-        except HTTPException:
-            meta["status"] = "failed"
-            meta["finished_at"] = _utc_now()
-            (d / "job_meta.json").write_text(
-                json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8"
-            )
+            status = _status_from_result(result)
+            _apply_result_meta(meta, result, has_vid=has_vid, status=status)
+        except HTTPException as he:
+            # Only mark failed for true error paths; re-raise 400s that happen
+            # before a terminal needs_transcript write without wiping that path.
+            if meta.get("status") not in {"needs_transcript", "success", "success_partial"}:
+                meta["status"] = "failed"
+                meta["finished_at"] = _utc_now()
+                if he.detail and not meta.get("error"):
+                    meta["error"] = str(he.detail)
+                _write_meta(d, meta)
             raise
         except Exception as e:  # noqa: BLE001 - surface to UI
             meta["status"] = "failed"
             meta["error"] = str(e)
             meta["finished_at"] = _utc_now()
-            (d / "job_meta.json").write_text(
-                json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8"
-            )
+            _write_meta(d, meta)
             raise HTTPException(status_code=500, detail=str(e)) from e
 
-        (d / "job_meta.json").write_text(
-            json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8"
+        _write_meta(d, meta)
+        return get_job(job_id)
+
+    @app.post("/api/jobs/{job_id}/transcript")
+    async def attach_transcript(
+        job_id: str,
+        transcript: UploadFile = File(...),
+        render: bool = Form(default=True),
+        target_seconds: int | None = Form(default=None),
+    ) -> dict[str, Any]:
+        d = _job_dir(job_id)
+        meta_path = d / "job_meta.json"
+        if not meta_path.exists():
+            raise HTTPException(status_code=404, detail="job not found")
+        meta = _read_json(meta_path)
+        if meta.get("status") != "needs_transcript":
+            raise HTTPException(status_code=400, detail="job is not waiting for transcript")
+
+        uploads = d / "uploads"
+        uploads.mkdir(parents=True, exist_ok=True)
+
+        if not transcript.filename:
+            raise HTTPException(status_code=400, detail="请上传转写文件（json/srt）")
+        suffix = Path(transcript.filename).suffix.lower()
+        if suffix not in ALLOWED_TRANSCRIPT:
+            raise HTTPException(status_code=400, detail="转写仅支持 .json / .srt")
+
+        transcript_path = uploads / _safe_name(transcript.filename, "transcript.json")
+        if transcript_path.suffix.lower() not in ALLOWED_TRANSCRIPT:
+            transcript_path = uploads / f"transcript{suffix}"
+        await _save_upload(transcript, transcript_path)
+        meta["transcript_source"] = transcript.filename
+
+        video_path = _find_uploaded_video(uploads)
+        has_vid = video_path is not None
+
+        ts = int(target_seconds) if target_seconds is not None else int(
+            meta.get("target_seconds") or 60
         )
-        # return detail payload
+        if ts < 15 or ts > 180:
+            raise HTTPException(status_code=400, detail="target_seconds must be 15-180")
+
+        meta["status"] = "processing"
+        meta["error"] = None
+        _write_meta(d, meta)
+
+        try:
+            do_render = bool(render and video_path is not None)
+            settings = _settings_for_target(ts)
+            result = run_pipeline(
+                video=video_path,
+                transcript_path=transcript_path,
+                out_dir=d,
+                settings=settings,
+                render=do_render,
+            )
+            status = _status_from_result(result)
+            _apply_result_meta(meta, result, has_vid=has_vid, status=status)
+        except Exception as e:  # noqa: BLE001 - surface to UI
+            meta["status"] = "failed"
+            meta["error"] = str(e)
+            meta["finished_at"] = _utc_now()
+            _write_meta(d, meta)
+            raise HTTPException(status_code=500, detail=str(e)) from e
+
+        _write_meta(d, meta)
         return get_job(job_id)
 
     return app

@@ -27,3 +27,16 @@ class Settings:
             llm_base_url=os.getenv("CLIPPER_LLM_BASE_URL", "https://api.openai.com/v1"),
             llm_model=os.getenv("CLIPPER_LLM_MODEL", "gpt-4o-mini"),
         )
+
+
+def asr_status() -> dict:
+    """Read-only ASR probe. Never claim ready if provider not implemented."""
+    enabled = (os.getenv("CLIPPER_ASR_ENABLED") or "false").lower() in {"1", "true", "yes"}
+    provider = (os.getenv("CLIPPER_ASR_PROVIDER") or "none").strip().lower()
+    # v1: no real provider implemented
+    implemented = False
+    configured = bool(enabled and provider not in {"", "none"} and implemented)
+    note = None
+    if enabled and provider not in {"", "none"} and not implemented:
+        note = "not_implemented"
+    return {"asr_configured": configured, "asr_note": note, "asr_provider": provider}

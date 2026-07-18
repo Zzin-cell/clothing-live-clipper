@@ -12,7 +12,7 @@
       <div>
         <p class="eyebrow">Clothing Live Clipper · MVP</p>
         <h1>服装带货直播智能切片</h1>
-        <p class="sub">上传口播转写（+ 可选视频），自动提取卖点并重排<strong>黄金 20 秒</strong>，生成约 60 秒带货切片。</p>
+        <p class="sub">以<strong>视频为主</strong>上传直播成片；口播转写可选，也可稍后补传。自动提取卖点并重排<strong>黄金 20 秒</strong>，生成约 60 秒带货切片。</p>
       </div>
       <div class="health" id="health">检查环境中…</div>
     </header>
@@ -22,18 +22,18 @@
         <h2>新建任务</h2>
         <form id="job-form">
           <label class="field">
-            <span>转写文件（.json / .srt）</span>
+            <span>源视频（主）</span>
+            <input type="file" name="video" id="video" accept="video/*,.mp4,.mov,.mkv,.webm" />
+          </label>
+
+          <label class="field">
+            <span>转写文件（可选，.json / .srt，可后补）</span>
             <input type="file" name="transcript" id="transcript" accept=".json,.srt,application/json,text/plain" />
           </label>
 
           <label class="check">
             <input type="checkbox" name="use_sample" id="use_sample" />
             <span>使用内置示例转写（不用上传，可先看效果）</span>
-          </label>
-
-          <label class="field">
-            <span>源视频（可选，有 ffmpeg 才出成片）</span>
-            <input type="file" name="video" id="video" accept="video/*,.mp4,.mov,.mkv,.webm" />
           </label>
 
           <div class="row">
@@ -48,7 +48,7 @@
           </div>
 
           <button type="submit" id="submit-btn" class="btn primary">开始切片</button>
-          <p class="hint" id="form-hint">没有视频也可以只生成 plan / review。时间戳需与视频对齐。</p>
+          <p class="hint" id="form-hint">可只上传视频，保存后补传转写再继续；也可只生成 plan / review（需转写或示例）。时间戳需与视频对齐。</p>
           <p class="error" id="form-error" hidden></p>
         </form>
       </section>
@@ -61,6 +61,13 @@
         <div id="result-empty" class="empty">提交任务后，这里显示黄金开头、时间轴和预览。</div>
         <div id="result-panel" hidden>
           <div class="stats" id="stats"></div>
+          <div id="attach-panel" class="attach" hidden>
+            <h3>待补转写</h3>
+            <p class="hint">已保存视频。上传 .json/.srt 后继续处理。</p>
+            <input type="file" id="attach-transcript" accept=".json,.srt,application/json" />
+            <button type="button" class="btn primary" id="attach-btn">继续处理</button>
+            <p class="error" id="attach-error" hidden></p>
+          </div>
           <div class="actions" id="actions"></div>
           <video id="preview" class="preview" controls playsinline hidden></video>
           <div class="columns">

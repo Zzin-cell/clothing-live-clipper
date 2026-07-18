@@ -210,6 +210,40 @@ h1 {
 
 .chip.ok { color: var(--ok); border-color: rgba(62, 207, 142, 0.35); }
 .chip.warn { color: var(--warn); border-color: rgba(240, 180, 41, 0.35); }
+.chip.needs {
+  color: #7ec8ff;
+  border-color: rgba(126, 200, 255, 0.45);
+  background: rgba(126, 200, 255, 0.08);
+}
+
+.attach {
+  border: 1px dashed rgba(126, 200, 255, 0.45);
+  background: rgba(126, 200, 255, 0.06);
+  border-radius: 14px;
+  padding: 14px;
+  margin-bottom: 14px;
+}
+
+.attach h3 {
+  margin-top: 0;
+  color: #7ec8ff;
+}
+
+.attach input[type="file"] {
+  display: block;
+  width: 100%;
+  color: var(--text);
+  background: #121820;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 10px 12px;
+  margin: 8px 0 10px;
+}
+
+.attach .btn.primary {
+  width: auto;
+  min-width: 140px;
+}
 
 .actions {
   display: flex;
@@ -289,8 +323,12 @@ h3 {
 }
 
 .job-item:hover { border-color: rgba(61, 214, 198, 0.45); }
+.job-item.status-ok { border-color: rgba(62, 207, 142, 0.35); }
+.job-item.status-warn { border-color: rgba(240, 180, 41, 0.35); }
+.job-item.status-needs { border-color: rgba(126, 200, 255, 0.4); }
 .job-item .id { font-family: ui-monospace, Consolas, monospace; font-size: 12px; }
 .job-item .muted { color: var(--muted); font-size: 12px; }
+.job-item .chip { display: inline-block; margin-right: 2px; vertical-align: middle; }
 
 footer {
   margin-top: 22px;

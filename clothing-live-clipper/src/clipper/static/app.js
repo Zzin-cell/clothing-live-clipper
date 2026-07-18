@@ -36,30 +36,279 @@ function statusChipClass(status) {
   return "";
 }
 
-async function loadHealth() {
+function applyLights(lights) {
+  const root = $("status-lights");
+  if (!root || !lights) return;
+  root.querySelectorAll(".light").forEach((el) => {
+    const k = el.getAttribute("data-k");
+    const v = lights[k] || "yellow";
+    el.classList.remove("green", "yellow", "red");
+    el.classList.add(v);
+  });
+}
+
+function row(label, ok, detail) {
+  const cls = ok === true ? "ok" : ok === false ? "bad" : "warn";
+  const mark = ok === true ? "✓" : ok === false ? "!" : "·";
+  return `<div class="check-row ${cls}"><span class="mark">${mark}</span><div><strong>${escapeHtml(
+    label
+  )}</strong><div class="muted">${escapeHtml(detail || "")}</div></div></div>`;
+}
+
+function renderStatus(st) {
+  window.__lastStatus = st;
+  applyLights(st.lights || {});
+  const asrOk = !!(st.asr && st.asr.configured);
+  const banner = $("setup-banner");
+  if (banner) banner.hidden = asrOk;
+
   const el = $("health");
-  try {
-    const res = await fetch("/api/health");
-    const data = await res.json();
-    const asrOk = data.asr_configured === true;
-    el.className = "pill-status " + (data.ok && asrOk ? "ok" : data.ok ? "warn" : "bad");
-    if (!asrOk && data.ok) {
-      // soften: keep pill-status without .ok
-      el.className = "pill-status";
-    }
-    el.title = [
-      `服务：${data.ok ? "正常" : "异常"}`,
-      `ffmpeg：${data.ffmpeg ? "已检测到" : "未找到"}`,
-      `智能口播 ASR：${asrOk ? "已配置" : data.asr_note || "未配置 API Key"}`,
-    ].join("\n");
-    el.innerHTML = `<strong>${asrOk ? "可自动听写" : "待配置 ASR"}</strong> · ${
-      data.ffmpeg ? "ffmpeg✓" : "ffmpeg·"
-    } · ${asrOk ? "Whisper✓" : "Whisper·"}`;
-  } catch (e) {
-    el.className = "pill-status bad";
-    el.title = String(e);
-    el.textContent = "无法连接后端";
+  if (el) {
+    el.className = "pill-status " + (asrOk ? "ok" : "");
+    el.innerHTML = `<strong>${asrOk ? "可自动听写" : "待配置 API"}</strong>`;
+    el.title = `Whisper: ${asrOk ? "已配置" : st.asr?.note || "missing"} | ffmpeg: ${
+      st.ffmpeg?.ok ? "ok" : "no"
+    }`;
   }
+
+  const list = [];
+  list.push(row("Web 服务", st.service?.ok, `${st.service?.host}:${st.service?.port}`));
+  list.push(row("ffmpeg", st.ffmpeg?.ok, st.ffmpeg?.version || st.ffmpeg?.path || "未找到"));
+  list.push(row("ffprobe", st.ffprobe?.ok, st.ffprobe?.path || "可选"));
+  list.push(
+    row(
+      "Whisper 听写",
+      st.asr?.ok === true ? true : st.asr?.configured ? null : false,
+      st.asr?.configured
+        ? `${st.asr.model} · ${st.asr.base_url} · ${st.asr.source || ""}${
+            st.asr.ok === true ? " · 探测通过" : st.asr.ok === false ? " · 探测失败" : ""
+          }`
+        : st.asr?.note || "未配置 API Key"
+    )
+  );
+  list.push(
+    row(
+      "LLM（可选）",
+      st.llm?.ok === true ? true : st.llm?.configured ? null : null,
+      st.llm?.configured ? `${st.llm.model}` : "未配置（规则降级）"
+    )
+  );
+  list.push(
+    row(
+      "输出目录",
+      st.storage?.ok,
+      `${st.storage?.path || ""} · 剩余 ${st.storage?.free_gb ?? "?"} GB`
+    )
+  );
+  list.push(
+    row(
+      "最近任务",
+      st.recent_health?.ok,
+      st.recent_health?.failed_count
+        ? `失败 ${st.recent_health.failed_count} 条`
+        : "近期正常"
+    )
+  );
+  const cl = $("checklist");
+  if (cl) cl.innerHTML = list.join("");
+
+  const compat = $("compat-box");
+  if (compat && st.compat) {
+    compat.innerHTML = [
+      `<div><strong>听写 ASR</strong><ul>${(st.compat.asr || [])
+        .map((x) => `<li>${escapeHtml(x)}</li>`)
+        .join("")}</ul></div>`,
+      `<div><strong>对话 LLM</strong><ul>${(st.compat.llm || [])
+        .map((x) => `<li>${escapeHtml(x)}</li>`)
+        .join("")}</ul></div>`,
+    ].join("");
+  }
+
+  const env = $("env-box");
+  if (env) {
+    env.textContent = JSON.stringify(
+      {
+        python: st.deps?.python,
+        platform: st.deps?.platform,
+        packages: st.deps?.packages,
+        storage: st.storage,
+        ffmpeg: st.ffmpeg,
+        config: st.config,
+        checked_at: st.checked_at,
+      },
+      null,
+      2
+    );
+  }
+
+  const rj = $("recent-jobs");
+  if (rj) {
+    const jobs = st.recent_jobs || [];
+    if (!jobs.length) rj.innerHTML = "<div class='empty'>暂无任务</div>";
+    else {
+      rj.innerHTML = jobs
+        .map((j) => {
+          return `<div class="job-item" data-id="${escapeHtml(j.job_id)}">
+            <div>
+              <div class="id">${escapeHtml(j.job_id)}</div>
+              <div class="muted">${escapeHtml(j.status || "")} ${
+            j.error ? "· " + escapeHtml(j.error) : ""
+          }</div>
+            </div>
+            <div class="muted">${escapeHtml(j.created_at || "")}</div>
+          </div>`;
+        })
+        .join("");
+      rj.querySelectorAll(".job-item").forEach((n) =>
+        n.addEventListener("click", () => {
+          closeSettings();
+          showJob(n.dataset.id);
+        })
+      );
+    }
+  }
+
+  // fill config form defaults
+  const cfg = st.config || {};
+  if ($("cfg-base-url") && !$("cfg-base-url").dataset.touched) {
+    $("cfg-base-url").value = cfg.base_url || "";
+  }
+  if ($("cfg-asr-model") && !$("cfg-asr-model").dataset.touched) {
+    $("cfg-asr-model").value = cfg.asr_model || "whisper-1";
+  }
+  if ($("cfg-llm-model") && !$("cfg-llm-model").dataset.touched) {
+    $("cfg-llm-model").value = cfg.llm_model || "gpt-4o-mini";
+  }
+  if ($("cfg-key-hint")) {
+    $("cfg-key-hint").textContent = cfg.has_api_key
+      ? `已配置 · 末尾 ${cfg.api_key_hint || "****"} · 来源 ${cfg.source || ""}`
+      : "未配置 API Key";
+  }
+  if ($("cfg-llm-enabled")) $("cfg-llm-enabled").checked = cfg.llm_enabled !== false;
+}
+
+async function loadSystemStatus() {
+  const res = await fetch("/api/system/status");
+  if (!res.ok) throw new Error("status failed");
+  const st = await res.json();
+  renderStatus(st);
+  return st;
+}
+
+async function loadHealth() {
+  try {
+    await loadSystemStatus();
+  } catch (e) {
+    const el = $("health");
+    if (el) {
+      el.className = "pill-status bad";
+      el.textContent = "无法连接后端";
+      el.title = String(e);
+    }
+  }
+}
+
+function openSettings() {
+  $("drawer-backdrop").hidden = false;
+  $("settings-drawer").hidden = false;
+  document.body.classList.add("drawer-open");
+  loadSystemStatus().catch(() => {});
+}
+
+function closeSettings() {
+  $("drawer-backdrop").hidden = true;
+  $("settings-drawer").hidden = true;
+  document.body.classList.remove("drawer-open");
+}
+
+function setupSettings() {
+  $("open-settings")?.addEventListener("click", openSettings);
+  $("close-settings")?.addEventListener("click", closeSettings);
+  $("drawer-backdrop")?.addEventListener("click", closeSettings);
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") closeSettings();
+  });
+
+  document.querySelectorAll(".drawer-tabs .tab").forEach((tab) => {
+    tab.addEventListener("click", () => {
+      document.querySelectorAll(".drawer-tabs .tab").forEach((t) => t.classList.remove("active"));
+      document.querySelectorAll(".tab-panel").forEach((p) => p.classList.remove("active"));
+      tab.classList.add("active");
+      const id = "tab-" + tab.dataset.tab;
+      $(id)?.classList.add("active");
+    });
+  });
+
+  ["cfg-base-url", "cfg-asr-model", "cfg-llm-model", "cfg-api-key"].forEach((id) => {
+    $(id)?.addEventListener("input", () => {
+      $(id).dataset.touched = "1";
+    });
+  });
+
+  $("btn-refresh-status")?.addEventListener("click", () => loadSystemStatus());
+  $("btn-probe-whisper")?.addEventListener("click", async () => {
+    const res = await fetch("/api/system/probe", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ target: "whisper" }),
+    });
+    const data = await res.json();
+    if (data.status) renderStatus(data.status);
+    alert(
+      data.probe?.ok
+        ? "Whisper 探测通过"
+        : "Whisper 探测失败：" + (data.probe?.error || data.probe?.detail || "")
+    );
+  });
+  $("btn-probe-llm")?.addEventListener("click", async () => {
+    const res = await fetch("/api/system/probe", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ target: "llm" }),
+    });
+    const data = await res.json();
+    if (data.status) renderStatus(data.status);
+    alert(
+      data.probe?.ok
+        ? "LLM 探测通过"
+        : "LLM 探测失败：" + (data.probe?.error || data.probe?.detail || "")
+    );
+  });
+
+  $("config-form")?.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const err = $("cfg-error");
+    const ok = $("cfg-ok");
+    err.hidden = true;
+    ok.hidden = true;
+    const body = {
+      persist: !!$("cfg-persist")?.checked,
+      base_url: $("cfg-base-url")?.value || undefined,
+      asr_model: $("cfg-asr-model")?.value || undefined,
+      llm_model: $("cfg-llm-model")?.value || undefined,
+      llm_enabled: !!$("cfg-llm-enabled")?.checked,
+      asr_enabled: true,
+      asr_provider: "openai_whisper",
+    };
+    const key = ($("cfg-api-key")?.value || "").trim();
+    if (key) body.api_key = key;
+    try {
+      const res = await fetch("/api/system/config", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.detail || "保存失败");
+      if (data.status) renderStatus(data.status);
+      if ($("cfg-api-key")) $("cfg-api-key").value = "";
+      ok.hidden = false;
+      ok.textContent = body.persist ? "已保存到本机 .env" : "已应用到当前会话";
+    } catch (ex) {
+      err.hidden = false;
+      err.textContent = String(ex.message || ex);
+    }
+  });
 }
 
 async function loadJobs() {
@@ -269,3 +518,4 @@ $("refresh-jobs").addEventListener("click", loadJobs);
 loadHealth();
 loadJobs();
 setupForm();
+setupSettings();

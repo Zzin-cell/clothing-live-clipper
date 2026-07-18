@@ -11,10 +11,12 @@ from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 
-from clipper.config import Settings, asr_status
+from clipper.config import Settings, apply_config_update, asr_status, public_config
 from clipper.media import which_ffmpeg
 from clipper.pipeline import run_pipeline
+from clipper.system_status import build_status, run_probe
 from clipper.whisper_asr import ASRError, transcribe_video_to_json
+from pydantic import BaseModel, Field
 
 APP_ROOT = Path(__file__).resolve().parents[2]
 STATIC_DIR = Path(__file__).resolve().parent / "static"
@@ -23,6 +25,21 @@ SAMPLE_TRANSCRIPT = APP_ROOT / "tests" / "fixtures" / "sample_transcript.json"
 
 ALLOWED_TRANSCRIPT = {".json", ".srt"}
 ALLOWED_VIDEO = {".mp4", ".mov", ".mkv", ".webm", ".avi"}
+
+
+class ConfigUpdate(BaseModel):
+    persist: bool = True
+    api_key: str | None = None
+    base_url: str | None = None
+    asr_model: str | None = None
+    llm_model: str | None = None
+    llm_enabled: bool | None = None
+    asr_enabled: bool | None = None
+    asr_provider: str | None = None
+
+
+class ProbeBody(BaseModel):
+    target: str = Field(default="all")
 
 
 def _utc_now() -> str:
@@ -121,14 +138,55 @@ def create_app() -> FastAPI:
     @app.get("/api/health")
     def health() -> dict[str, Any]:
         a = asr_status()
+        st = build_status()
         return {
             "ok": True,
             "ffmpeg": bool(which_ffmpeg()),
             "sample_transcript": SAMPLE_TRANSCRIPT.exists(),
             "asr_configured": a["asr_configured"],
             "asr_note": a.get("asr_note"),
+            "lights": st.get("lights"),
             "time": _utc_now(),
         }
+
+    @app.get("/api/system/status")
+    def system_status() -> dict[str, Any]:
+        return build_status()
+
+    @app.get("/api/system/config")
+    def system_config_get() -> dict[str, Any]:
+        return public_config()
+
+    @app.put("/api/system/config")
+    def system_config_put(body: ConfigUpdate) -> dict[str, Any]:
+        try:
+            cfg = apply_config_update(body.model_dump(exclude_none=True))
+        except OSError as e:
+            raise HTTPException(status_code=500, detail=f"写入配置失败: {e}") from e
+        return {"ok": True, "config": cfg, "status": build_status()}
+
+    @app.post("/api/system/probe")
+    def system_probe(body: ProbeBody) -> dict[str, Any]:
+        result = run_probe(body.target)
+        # refresh lights after probe where possible
+        status = build_status()
+        if body.target in {"whisper", "all"} and isinstance(result, dict):
+            w = result if body.target == "whisper" else result.get("whisper") or {}
+            if isinstance(w, dict) and w.get("ok") is True:
+                status["asr"]["ok"] = True
+                status["lights"]["asr"] = "green"
+            elif isinstance(w, dict) and w.get("ok") is False:
+                status["asr"]["ok"] = False
+                status["lights"]["asr"] = "red"
+        if body.target in {"llm", "all"} and isinstance(result, dict):
+            lm = result if body.target == "llm" else result.get("llm") or {}
+            if isinstance(lm, dict) and lm.get("ok") is True:
+                status["llm"]["ok"] = True
+                status["lights"]["llm"] = "green"
+            elif isinstance(lm, dict) and lm.get("ok") is False and lm.get("error") != "missing_api_key":
+                status["llm"]["ok"] = False
+                status["lights"]["llm"] = "red"
+        return {"ok": True, "probe": result, "status": status}
 
     @app.get("/api/jobs")
     def list_jobs(limit: int = 30) -> dict[str, Any]:

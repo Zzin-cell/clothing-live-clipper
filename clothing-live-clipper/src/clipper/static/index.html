@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>服装带货智能切片</title>
-  <link rel="stylesheet" href="/static/styles.css?v=asr1" />
+  <link rel="stylesheet" href="/static/styles.css?v=status1" />
 </head>
 <body>
   <div class="app-shell">
@@ -24,9 +24,98 @@
         </div>
       </div>
       <div class="titlebar-right">
+        <div class="status-lights" id="status-lights" title="系统状态">
+          <span class="light" data-k="service" title="服务">服</span>
+          <span class="light" data-k="ffmpeg" title="ffmpeg">F</span>
+          <span class="light" data-k="asr" title="Whisper 听写">W</span>
+          <span class="light" data-k="llm" title="LLM（可选）">L</span>
+          <span class="light" data-k="disk" title="磁盘">盘</span>
+        </div>
         <div class="pill-status" id="health">检查环境…</div>
+        <button type="button" class="btn ghost settings-btn" id="open-settings">设置</button>
       </div>
     </header>
+
+    <div class="drawer-backdrop" id="drawer-backdrop" hidden></div>
+    <aside class="drawer" id="settings-drawer" hidden aria-label="系统设置">
+      <div class="drawer-head">
+        <div>
+          <h2>系统状态与 API</h2>
+          <p class="card-desc">配置密钥 · 全链路自检 · 兼容模型</p>
+        </div>
+        <button type="button" class="btn ghost" id="close-settings">关闭</button>
+      </div>
+
+      <div class="drawer-tabs">
+        <button type="button" class="tab active" data-tab="overview">总览</button>
+        <button type="button" class="tab" data-tab="api">API</button>
+        <button type="button" class="tab" data-tab="env">环境</button>
+        <button type="button" class="tab" data-tab="jobs">任务</button>
+      </div>
+
+      <div class="drawer-body">
+        <section class="tab-panel active" id="tab-overview">
+          <div class="drawer-actions">
+            <button type="button" class="btn" id="btn-refresh-status">一键自检</button>
+            <button type="button" class="btn" id="btn-probe-whisper">测试 Whisper</button>
+            <button type="button" class="btn" id="btn-probe-llm">测试 LLM</button>
+          </div>
+          <div id="checklist" class="checklist">加载中…</div>
+          <div class="compat-card">
+            <h3>兼容模型提示</h3>
+            <div id="compat-box" class="compat-box"></div>
+          </div>
+        </section>
+
+        <section class="tab-panel" id="tab-api">
+          <form id="config-form" class="config-form">
+            <label class="field">
+              <span>API Key</span>
+              <input type="password" id="cfg-api-key" placeholder="sk-... 或中转密钥" autocomplete="off" />
+              <span class="hint" id="cfg-key-hint">未配置</span>
+            </label>
+            <label class="field">
+              <span>Base URL</span>
+              <input type="text" id="cfg-base-url" placeholder="https://api.openai.com/v1" />
+            </label>
+            <label class="field">
+              <span>Whisper 模型</span>
+              <input type="text" id="cfg-asr-model" placeholder="whisper-1" />
+            </label>
+            <label class="field">
+              <span>LLM 模型（可选）</span>
+              <input type="text" id="cfg-llm-model" placeholder="gpt-4o-mini" />
+            </label>
+            <label class="row-field toggle-row" style="padding:0;border:0">
+              <span class="row-label">
+                <span class="row-title">记住本机（写入 .env）</span>
+                <span class="row-sub">关闭则仅当前服务进程会话</span>
+              </span>
+              <input type="checkbox" id="cfg-persist" class="ios-toggle" checked />
+            </label>
+            <label class="row-field toggle-row" style="padding:0;border:0;margin-top:10px">
+              <span class="row-label">
+                <span class="row-title">启用 LLM</span>
+                <span class="row-sub">关闭则卖点用本地规则</span>
+              </span>
+              <input type="checkbox" id="cfg-llm-enabled" class="ios-toggle" checked />
+            </label>
+            <button type="submit" class="btn primary" id="cfg-save">保存配置</button>
+            <p class="hint">官方：whisper-1 / gpt-4o-mini。中转请改 Base URL，模型名以服务商为准。需支持 transcriptions 的 verbose_json segments。</p>
+            <p class="error" id="cfg-error" hidden></p>
+            <p class="hint" id="cfg-ok" hidden style="color:var(--ok)"></p>
+          </form>
+        </section>
+
+        <section class="tab-panel" id="tab-env">
+          <pre id="env-box" class="review env-box">加载中…</pre>
+        </section>
+
+        <section class="tab-panel" id="tab-jobs">
+          <div id="recent-jobs" class="job-list">加载中…</div>
+        </section>
+      </div>
+    </aside>
 
     <div class="page">
       <section class="hero">
@@ -94,8 +183,11 @@
               </div>
             </details>
 
+            <div id="setup-banner" class="setup-banner" hidden>
+              请先点右上角 <strong>设置</strong> 填写 API Key 并自检 Whisper，再上传视频。
+            </div>
             <button type="submit" id="submit-btn" class="btn primary">上传并自动切片</button>
-            <p class="hint" id="form-hint">需配置 Whisper API Key（OPENAI_API_KEY 或 CLIPPER_ASR_API_KEY）。处理时会先听写打轴，再出 plan / 成片。</p>
+            <p class="hint" id="form-hint">只传视频即可：自动智能口播打轴 → 黄金 20 秒重排 → 成片。API 在「设置」中配置。</p>
             <p class="error" id="form-error" hidden></p>
           </form>
         </section>
@@ -152,6 +244,6 @@
       </footer>
     </div>
   </div>
-  <script src="/static/app.js?v=asr1"></script>
+  <script src="/static/app.js?v=status1"></script>
 </body>
 </html>

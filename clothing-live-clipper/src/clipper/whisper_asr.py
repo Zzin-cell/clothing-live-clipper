@@ -46,21 +46,14 @@ def extract_audio_wav(video: str | Path, wav_out: str | Path) -> Path:
 
 
 def _api_config() -> tuple[str, str, str]:
-    key = (
-        os.getenv("CLIPPER_ASR_API_KEY")
-        or os.getenv("OPENAI_API_KEY")
-        or os.getenv("CLIPPER_LLM_API_KEY")
-        or ""
-    ).strip()
-    base = (
-        os.getenv("CLIPPER_ASR_BASE_URL")
-        or os.getenv("CLIPPER_LLM_BASE_URL")
-        or "https://api.openai.com/v1"
-    ).rstrip("/")
-    model = (os.getenv("CLIPPER_ASR_MODEL") or "whisper-1").strip()
+    from clipper.config import resolve_api_key, resolve_asr_base_url, resolve_asr_model
+
+    key = resolve_api_key()
+    base = resolve_asr_base_url()
+    model = resolve_asr_model()
     if not key:
         raise ASRError(
-            "未配置 ASR API Key。请在 .env 设置 CLIPPER_ASR_API_KEY 或 OPENAI_API_KEY"
+            "未配置 ASR API Key。请在设置中填写，或 .env 设置 CLIPPER_ASR_API_KEY / OPENAI_API_KEY"
         )
     return key, base, model
 

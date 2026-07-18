@@ -41,22 +41,24 @@ async function loadHealth() {
   try {
     const res = await fetch("/api/health");
     const data = await res.json();
-    el.className = "health " + (data.ok ? "ok" : "bad");
     const asr =
       data.asr_configured === true
-        ? "已配置"
-        : data.asr_configured === false
-          ? "未配置/未实现"
-          : "未配置/未实现";
-    el.innerHTML = [
-      `<div><strong>服务</strong>：正常</div>`,
-      `<div><strong>ffmpeg</strong>：${data.ffmpeg ? "已检测到" : "未找到（只能出计划）"}</div>`,
-      `<div><strong>示例转写</strong>：${data.sample_transcript ? "可用" : "缺失"}</div>`,
-      `<div><strong>ASR</strong>：${asr}</div>`,
-    ].join("");
+        ? "ASR✓"
+        : "ASR·";
+    el.className = "pill-status " + (data.ok ? "ok" : "bad");
+    el.title = [
+      `服务：${data.ok ? "正常" : "异常"}`,
+      `ffmpeg：${data.ffmpeg ? "已检测到" : "未找到（只能出计划）"}`,
+      `示例转写：${data.sample_transcript ? "可用" : "缺失"}`,
+      `ASR：${data.asr_configured ? "已配置" : "未配置/未实现"}`,
+    ].join("\n");
+    el.innerHTML = `<strong>就绪</strong> · ${data.ffmpeg ? "ffmpeg✓" : "ffmpeg·"} · 示例${
+      data.sample_transcript ? "✓" : "·"
+    } · ${asr}`;
   } catch (e) {
-    el.className = "health bad";
-    el.textContent = "无法连接后端：" + e;
+    el.className = "pill-status bad";
+    el.title = String(e);
+    el.textContent = "无法连接后端";
   }
 }
 

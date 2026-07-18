@@ -4,99 +4,164 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>服装带货智能切片</title>
-  <link rel="stylesheet" href="/static/styles.css" />
+  <link rel="stylesheet" href="/static/styles.css?v=mac2" />
 </head>
 <body>
-  <div class="page">
-    <header class="hero">
-      <div>
-        <p class="eyebrow">Clothing Live Clipper</p>
-        <h1>服装带货直播智能切片</h1>
-        <p class="sub">以<strong>视频为主</strong>上传直播成片；口播转写可选，也可稍后补传。自动提取卖点并重排<strong>黄金 20 秒</strong>，生成约 60 秒带货切片。</p>
+  <div class="app-shell">
+    <header class="titlebar">
+      <div class="titlebar-left">
+        <div class="traffic" aria-hidden="true">
+          <span class="dot red"></span>
+          <span class="dot yellow"></span>
+          <span class="dot green"></span>
+        </div>
+        <div class="brand">
+          <span class="brand-mark" aria-hidden="true"></span>
+          <div class="brand-text">
+            <strong>Clipper</strong>
+            <span>服装带货直播切片</span>
+          </div>
+        </div>
       </div>
-      <div class="health" id="health">检查环境中…</div>
+      <div class="titlebar-right">
+        <div class="pill-status" id="health">检查环境…</div>
+      </div>
     </header>
 
-    <main class="grid">
-      <section class="card">
-        <h2>新建任务</h2>
-        <form id="job-form">
-          <label class="field">
-            <span>源视频（主）</span>
-            <input type="file" name="video" id="video" accept="video/*,.mp4,.mov,.mkv,.webm" />
-          </label>
-
-          <label class="field">
-            <span>转写文件（可选，.json / .srt，可后补）</span>
-            <input type="file" name="transcript" id="transcript" accept=".json,.srt,application/json,text/plain" />
-          </label>
-
-          <label class="check">
-            <input type="checkbox" name="use_sample" id="use_sample" />
-            <span>使用内置示例转写（不用上传，可先看效果）</span>
-          </label>
-
-          <div class="row">
-            <label class="field grow">
-              <span>目标时长（秒）</span>
-              <input type="number" name="target_seconds" id="target_seconds" value="60" min="15" max="180" />
-            </label>
-            <label class="check mid">
-              <input type="checkbox" name="render" id="render" checked />
-              <span>尝试渲染成片</span>
-            </label>
-          </div>
-
-          <button type="submit" id="submit-btn" class="btn primary">开始切片</button>
-          <p class="hint" id="form-hint">可只上传视频，保存后补传转写再继续；也可只生成 plan / review（需转写或示例）。时间戳需与视频对齐。</p>
-          <p class="error" id="form-error" hidden></p>
-        </form>
-      </section>
-
-      <section class="card">
-        <div class="card-head">
-          <h2>任务结果</h2>
-          <button type="button" class="btn ghost" id="refresh-jobs">刷新列表</button>
-        </div>
-        <div id="result-empty" class="empty">提交任务后，这里显示黄金开头、时间轴和预览。</div>
-        <div id="result-panel" hidden>
-          <div class="stats" id="stats"></div>
-          <div id="attach-panel" class="attach" hidden>
-            <h3>待补转写</h3>
-            <p class="hint">已保存视频。上传 .json/.srt 后继续处理。</p>
-            <input type="file" id="attach-transcript" accept=".json,.srt,application/json" />
-            <button type="button" class="btn primary" id="attach-btn">继续处理</button>
-            <p class="error" id="attach-error" hidden></p>
-          </div>
-          <div class="actions" id="actions"></div>
-          <video id="preview" class="preview" controls playsinline hidden></video>
-          <div class="columns">
-            <div>
-              <h3>黄金开头</h3>
-              <ol id="golden-list" class="slots"></ol>
-              <h3>信任建设</h3>
-              <ol id="trust-list" class="slots"></ol>
-              <h3>促单收尾</h3>
-              <ol id="cta-list" class="slots"></ol>
-            </div>
-            <div>
-              <h3>Review</h3>
-              <pre id="review-md" class="review"></pre>
-            </div>
-          </div>
+    <div class="page">
+      <section class="hero">
+        <div class="hero-copy">
+          <p class="eyebrow">Local Studio</p>
+          <h1>上传视频，剪出黄金 20 秒</h1>
+          <p class="sub">以<strong>视频为主</strong>。转写可选，也可稍后补传。自动提取卖点并重排，生成约 <strong>60 秒</strong> 带货切片。</p>
         </div>
       </section>
 
-      <section class="card full">
-        <h2>历史任务</h2>
-        <div id="job-list" class="job-list">加载中…</div>
-      </section>
-    </main>
+      <main class="grid">
+        <section class="card">
+          <div class="card-head">
+            <div>
+              <h2>新建任务</h2>
+              <p class="card-desc">从直播回放开始</p>
+            </div>
+          </div>
 
-    <footer>
-      <span>本地工具 · 数据不出本机（上传文件仅存 output/web_jobs）</span>
-    </footer>
+          <form id="job-form">
+            <div class="inset-group">
+              <label class="row-field">
+                <span class="row-label">
+                  <span class="row-title">源视频</span>
+                  <span class="row-sub">主入口 · mp4 / mov</span>
+                </span>
+                <input type="file" name="video" id="video" accept="video/*,.mp4,.mov,.mkv,.webm" />
+              </label>
+              <label class="row-field">
+                <span class="row-label">
+                  <span class="row-title">口播转写</span>
+                  <span class="row-sub">可选 · json / srt · 可后补</span>
+                </span>
+                <input type="file" name="transcript" id="transcript" accept=".json,.srt,application/json,text/plain" />
+              </label>
+              <label class="row-field toggle-row">
+                <span class="row-label">
+                  <span class="row-title">示例转写</span>
+                  <span class="row-sub">不上传也能先看效果</span>
+                </span>
+                <input type="checkbox" name="use_sample" id="use_sample" class="ios-toggle" />
+              </label>
+            </div>
+
+            <div class="inset-group">
+              <label class="row-field">
+                <span class="row-label">
+                  <span class="row-title">目标时长</span>
+                  <span class="row-sub">默认 60 秒</span>
+                </span>
+                <div class="stepper">
+                  <input type="number" name="target_seconds" id="target_seconds" value="60" min="15" max="180" />
+                  <span class="unit">秒</span>
+                </div>
+              </label>
+              <label class="row-field toggle-row">
+                <span class="row-label">
+                  <span class="row-title">渲染成片</span>
+                  <span class="row-sub">需要本机 ffmpeg</span>
+                </span>
+                <input type="checkbox" name="render" id="render" class="ios-toggle" checked />
+              </label>
+            </div>
+
+            <button type="submit" id="submit-btn" class="btn primary">开始切片</button>
+            <p class="hint" id="form-hint">可只上传视频，保存后再补转写；也可只生成 plan / review。时间戳需与视频对齐。</p>
+            <p class="error" id="form-error" hidden></p>
+          </form>
+        </section>
+
+        <section class="card">
+          <div class="card-head">
+            <div>
+              <h2>任务结果</h2>
+              <p class="card-desc">预览、时间轴与下载</p>
+            </div>
+            <button type="button" class="btn ghost" id="refresh-jobs">刷新</button>
+          </div>
+
+          <div id="result-empty" class="empty">
+            <div class="empty-icon" aria-hidden="true"></div>
+            <p>提交任务后，这里显示黄金开头、时间轴和预览。</p>
+          </div>
+
+          <div id="result-panel" hidden>
+            <div class="stats" id="stats"></div>
+
+            <div id="attach-panel" class="attach" hidden>
+              <div class="attach-head">
+                <div>
+                  <h3>待补转写</h3>
+                  <p class="hint">视频已保存。上传 .json / .srt 后继续处理。</p>
+                </div>
+              </div>
+              <input type="file" id="attach-transcript" accept=".json,.srt,application/json" />
+              <button type="button" class="btn primary compact" id="attach-btn">继续处理</button>
+              <p class="error" id="attach-error" hidden></p>
+            </div>
+
+            <div class="actions" id="actions"></div>
+            <video id="preview" class="preview" controls playsinline hidden></video>
+
+            <div class="columns">
+              <div class="panel">
+                <h3>黄金开头</h3>
+                <ol id="golden-list" class="slots"></ol>
+                <h3>信任建设</h3>
+                <ol id="trust-list" class="slots"></ol>
+                <h3>促单收尾</h3>
+                <ol id="cta-list" class="slots"></ol>
+              </div>
+              <div class="panel">
+                <h3>Review</h3>
+                <pre id="review-md" class="review"></pre>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section class="card full">
+          <div class="card-head">
+            <div>
+              <h2>历史任务</h2>
+              <p class="card-desc">自动保存在本机，可回看与下载</p>
+            </div>
+          </div>
+          <div id="job-list" class="job-list">加载中…</div>
+        </section>
+      </main>
+
+      <footer>
+        <span>本地工具 · 数据仅存 output/web_jobs · 不出本机</span>
+      </footer>
+    </div>
   </div>
-  <script src="/static/app.js"></script>
+  <script src="/static/app.js?v=mac2"></script>
 </body>
 </html>

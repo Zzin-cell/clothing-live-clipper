@@ -8,14 +8,16 @@ from typing import Any
 
 from dotenv import load_dotenv
 
-load_dotenv()
-
 # Process-level overrides (session-only settings from UI)
 _SESSION: dict[str, str] = {}
 
 # Project root: clothing-live-clipper/
 _PKG_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_ENV_PATH = _PKG_ROOT / ".env"
+
+# Always load project .env (not only CWD)
+load_dotenv(DEFAULT_ENV_PATH, override=False)
+load_dotenv(override=False)
 
 _ENV_KEYS = {
     "api_key": ("CLIPPER_ASR_API_KEY", "OPENAI_API_KEY"),

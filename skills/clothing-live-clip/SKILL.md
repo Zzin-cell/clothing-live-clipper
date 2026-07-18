@@ -1,22 +1,66 @@
 ---
 name: clothing-live-clip
-description: Use when clipping clothing livestream VODs into short selling videos, when host-speech-based fit/fabric/selling-point extraction is needed, when size charts and sentimental storytelling must stay out of the cut, when targeting about 60s clips with the strongest first ~20s, or when improving those clipping rules via cases and eval.
+description: Use when clipping clothing livestream VODs into short selling videos, when the user says 处理队列 or process queue for the Web job queue, when host-speech-based fit/fabric/selling-point extraction is needed, when size charts and sentimental storytelling must stay out of the cut, or when targeting about 60s clips with the strongest first ~20s.
 ---
 
 # Clothing Live Clip
 
 ## Overview
 
-Turn a clothing livestream **video** into a ~60s selling cut whose **first ~20s** carry the strongest buy reasons. Judge components from **host speech** (fit / fabric / selling points). **Hard-exclude** size advice and pure sentiment. Orchestrate external ASR + `clothing-live-clipper`. Improve via cases, feedback, and golden eval.
+Turn a clothing livestream **video** into a ~60s selling cut whose **first ~20s** carry the strongest buy reasons. Judge components from **host speech** (fit / fabric / selling points). **Hard-exclude** size advice and pure sentiment. Orchestrate smart-speech timeline + `clothing-live-clipper`.  
+
+**Web architecture:** Browser only submits jobs. **You (the Agent) are the worker.** When the user says **处理队列** / **process queue**, claim queued Web jobs and process them end-to-end.
 
 **REQUIRED details:** read files under `references/` when executing the matching step. **REQUIRED learning rules:** `references/learning-loop.md`.
 
 ## When to use
 
+- User says **处理队列** / process queue (Web uploaded videos waiting)
 - Clothing livestream VOD → short selling clip
 - Need golden hook ~20s + total ~60s
 - Need speech-based 版型/布料/卖点 and no 尺码/情怀 in the cut
-- Need to record mistakes into cases and promote rules safely
+
+## Process queue (Web worker mode)
+
+Default Web base: `http://127.0.0.1:8787`
+
+1. `GET /api/agent/next`  
+   - If `job` is null → tell user queue empty  
+   - Else note `paths.job_dir`, `paths.video`, `job.target_seconds`, `job.render_requested`
+2. **Smart speech timeline** from `paths.video` (do **not** invent timestamps):  
+   - Use any working ASR you have (local whisper, other APIs, tools).  
+   - Midpoint provider without whisper models is OK to skip; use what works.  
+   - Write `job_dir/transcript_asr.json` as array:  
+     `[{ "utt_id", "text", "t0_ms", "t1_ms" }, ...]`
+3. Host filter + claims + hard exclude (this skill steps 2–4)  
+   - Write `transcript_for_clipper.json` into `job_dir`
+4. Run clipper into **same** `job_dir`:
+
+```bat
+cd /d C:\Users\MR\AppData\grok\clothing-live-clipper
+set PYTHONPATH=src
+set PATH=%LOCALAPPDATA%\ffmpeg\bin;%PATH%
+python -m clipper run --video "{paths.video}" --transcript "{job_dir}\transcript_for_clipper.json" --out "{job_dir}" --target-seconds {target_seconds}
+```
+
+If render not requested, add `--no-render`.
+
+5. Validate plan exclusions (scripts/check_plan_exclusions.py on `job_dir/plan.json`)
+6. Complete:
+
+```bat
+curl -s -X POST http://127.0.0.1:8787/api/agent/jobs/{job_id}/complete -H "Content-Type: application/json" -d "{\"status\":\"success\",\"transcript_source\":\"agent_skill\"}"
+```
+
+On failure:
+
+```bat
+curl -s -X POST http://127.0.0.1:8787/api/agent/jobs/{job_id}/fail -H "Content-Type: application/json" -d "{\"error\":\"...\"}"
+```
+
+7. Loop `GET /api/agent/next` until queue empty. Summarize for user.
+
+**Do not** call Web's in-process Whisper path for queue jobs — Web only stores files.
 
 ## Hard gates (never violate)
 

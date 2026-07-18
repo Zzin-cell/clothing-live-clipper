@@ -42,6 +42,17 @@ class ProbeBody(BaseModel):
     target: str = Field(default="all")
 
 
+class AgentCompleteBody(BaseModel):
+    status: str = "success"
+    error: str | None = None
+    message: str | None = None
+    transcript_source: str | None = None
+
+
+class AgentFailBody(BaseModel):
+    error: str = "agent_failed"
+
+
 def _utc_now() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
@@ -262,6 +273,108 @@ def create_app() -> FastAPI:
         data = await upload.read()
         dest.write_bytes(data)
 
+    def _list_job_dirs() -> list[Path]:
+        if not JOBS_DIR.exists():
+            return []
+        return sorted(
+            [p for p in JOBS_DIR.iterdir() if p.is_dir()],
+            key=lambda p: p.stat().st_mtime,
+        )
+
+    @app.get("/api/agent/next")
+    def agent_next() -> dict[str, Any]:
+        """Claim oldest queued job for Agent + skill processing."""
+        for d in _list_job_dirs():
+            meta_path = d / "job_meta.json"
+            if not meta_path.exists():
+                continue
+            meta = _read_json(meta_path)
+            if meta.get("status") != "queued":
+                continue
+            meta["status"] = "claimed"
+            meta["claimed_at"] = _utc_now()
+            meta["worker"] = "agent_skill"
+            _write_meta(d, meta)
+            video = _find_uploaded_video(d / "uploads")
+            return {
+                "job": meta,
+                "paths": {
+                    "job_dir": str(d.resolve()),
+                    "uploads": str((d / "uploads").resolve()),
+                    "video": str(video.resolve()) if video else None,
+                    "meta": str(meta_path.resolve()),
+                },
+                "instructions": (
+                    "Use clothing-live-clip skill: smart speech timeline from video, "
+                    "claims, golden 20s / ~60s plan, optional final.mp4 via clipper; "
+                    "write outputs into job_dir then POST /api/agent/jobs/{id}/complete"
+                ),
+            }
+        return {"job": None, "message": "queue empty"}
+
+    @app.post("/api/agent/jobs/{job_id}/complete")
+    def agent_complete(job_id: str, body: AgentCompleteBody) -> dict[str, Any]:
+        d = _job_dir(job_id)
+        meta_path = d / "job_meta.json"
+        if not meta_path.exists():
+            raise HTTPException(status_code=404, detail="job not found")
+        meta = _read_json(meta_path)
+        status = body.status if body.status in {
+            "success",
+            "success_partial",
+            "failed",
+        } else "success"
+        # derive from files if present
+        has_plan = (d / "plan.json").exists()
+        has_final = (d / "final.mp4").exists()
+        if status != "failed":
+            if has_plan and has_final:
+                status = "success"
+            elif has_plan:
+                status = "success_partial"
+            elif not has_plan:
+                status = "failed"
+                meta["error"] = body.error or "complete called but plan.json missing"
+        meta["status"] = status
+        meta["finished_at"] = _utc_now()
+        meta["has_final"] = has_final
+        meta["output_mp4"] = has_final
+        meta["worker"] = "agent_skill"
+        if body.transcript_source:
+            meta["transcript_source"] = body.transcript_source
+        if body.message:
+            meta["agent_message"] = body.message
+        if body.error:
+            meta["error"] = body.error
+        if has_plan:
+            try:
+                plan = _read_json(d / "plan.json")
+                meta["golden20_passed"] = bool(plan.get("golden20_passed"))
+                meta["duration_s"] = (plan.get("total_duration_ms") or 0) / 1000.0
+                slots = (plan.get("golden") or []) + (plan.get("trust") or []) + (
+                    plan.get("cta") or []
+                )
+                meta["selected_clips"] = len(slots)
+                meta["warnings"] = plan.get("warnings") or []
+            except Exception:
+                pass
+        _write_meta(d, meta)
+        return get_job(job_id)
+
+    @app.post("/api/agent/jobs/{job_id}/fail")
+    def agent_fail(job_id: str, body: AgentFailBody) -> dict[str, Any]:
+        d = _job_dir(job_id)
+        meta_path = d / "job_meta.json"
+        if not meta_path.exists():
+            raise HTTPException(status_code=404, detail="job not found")
+        meta = _read_json(meta_path)
+        meta["status"] = "failed"
+        meta["error"] = body.error
+        meta["finished_at"] = _utc_now()
+        meta["worker"] = "agent_skill"
+        _write_meta(d, meta)
+        return get_job(job_id)
+
     @app.post("/api/jobs")
     async def create_job(
         transcript: UploadFile | None = File(default=None),
@@ -269,10 +382,15 @@ def create_app() -> FastAPI:
         use_sample: bool = Form(default=False),
         target_seconds: int = Form(default=60),
         render: bool = Form(default=True),
+        mode: str = Form(default="agent"),
     ) -> dict[str, Any]:
+        """Default mode=agent: queue only. mode=local: legacy in-process pipeline."""
         target_seconds = int(target_seconds)
         if target_seconds < 15 or target_seconds > 180:
             raise HTTPException(status_code=400, detail="target_seconds must be 15-180")
+        mode = (mode or "agent").strip().lower()
+        if mode not in {"agent", "local"}:
+            mode = "agent"
 
         job_id = datetime.now().strftime("%Y%m%d_%H%M%S") + "_" + uuid.uuid4().hex[:8]
         d = _job_dir(job_id)
@@ -281,13 +399,15 @@ def create_app() -> FastAPI:
 
         meta: dict[str, Any] = {
             "job_id": job_id,
-            "status": "processing",
+            "status": "queued",
             "created_at": _utc_now(),
             "target_seconds": target_seconds,
             "render_requested": render,
             "error": None,
             "has_video": False,
             "has_final": False,
+            "process_mode": mode,
+            "user_hint": "在 Agent 对话发送：处理队列",
         }
         _write_meta(d, meta)
 
@@ -332,61 +452,35 @@ def create_app() -> FastAPI:
             if not has_tr and not has_vid:
                 raise HTTPException(
                     status_code=400,
-                    detail="请上传直播视频（将自动智能口播打轴）",
+                    detail="请上传直播视频",
                 )
 
-            # Primary path: video only → ASR (Whisper API) → pipeline
-            if has_vid and not has_tr:
-                a = asr_status()
-                meta["asr_configured"] = a["asr_configured"]
-                meta["asr_note"] = a.get("asr_note")
-                meta["asr_provider"] = a.get("asr_provider")
-                if not a["asr_configured"]:
-                    note = a.get("asr_note") or "missing_api_key"
-                    raise HTTPException(
-                        status_code=400,
-                        detail=(
-                            "仅上传视频需要配置 Whisper API。"
-                            "请在 .env 设置 CLIPPER_ASR_API_KEY 或 OPENAI_API_KEY，"
-                            f"并保证 CLIPPER_ASR_ENABLED=true（当前: {note}）"
-                        ),
-                    )
-                if not which_ffmpeg():
-                    raise HTTPException(
-                        status_code=400,
-                        detail="自动听写需要 ffmpeg 抽音频，请先安装 ffmpeg",
-                    )
-                meta["status"] = "transcribing"
+            # ---- Default: agent queue (Web does not run Whisper/pipeline) ----
+            if mode == "agent" and has_vid and not use_sample:
+                meta["status"] = "queued"
+                meta["process_mode"] = "agent"
+                meta["queue_hint"] = "在 Agent 对话发送：处理队列"
+                meta["has_final"] = False
                 _write_meta(d, meta)
-                try:
-                    transcript_path = d / "transcript_asr.json"
-                    transcribe_video_to_json(
-                        video_path,
-                        transcript_path,
-                        work_dir=d / "asr_work",
-                        language="zh",
-                    )
-                    # also keep a copy under uploads for inspection
-                    shutil.copy2(transcript_path, uploads / "transcript_asr.json")
-                    meta["transcript_source"] = "whisper_api"
-                    has_tr = True
-                except ASRError as e:
-                    meta["status"] = "failed"
-                    meta["error"] = str(e)
-                    meta["finished_at"] = _utc_now()
-                    _write_meta(d, meta)
-                    raise HTTPException(status_code=500, detail=str(e)) from e
+                return get_job(job_id)
+
+            # ---- Local debug path (optional): needs transcript or sample ----
+            if mode == "agent" and use_sample and not has_vid:
+                # sample demo without video still can run local plan
+                mode = "local"
 
             if not has_tr or transcript_path is None:
-                raise HTTPException(status_code=400, detail="缺少口播时间轴，无法切片")
+                raise HTTPException(
+                    status_code=400,
+                    detail="本地模式需要转写或示例；默认请只上传视频并用 Agent 处理队列",
+                )
 
-            # timeline ready → clip pipeline
             meta["status"] = "processing"
+            meta["process_mode"] = "local"
             _write_meta(d, meta)
 
             do_render = bool(render and video_path is not None)
             settings = _settings_for_target(target_seconds)
-
             result = run_pipeline(
                 video=video_path,
                 transcript_path=transcript_path,
@@ -394,14 +488,16 @@ def create_app() -> FastAPI:
                 settings=settings,
                 render=do_render,
             )
-
             status = _status_from_result(result)
             _apply_result_meta(meta, result, has_vid=has_vid, status=status)
             meta["transcript_source"] = meta.get("transcript_source") or "upload"
         except HTTPException as he:
-            # Only mark failed for true error paths; re-raise 400s that happen
-            # before a terminal needs_transcript write without wiping that path.
-            if meta.get("status") not in {"needs_transcript", "success", "success_partial"}:
+            if meta.get("status") not in {
+                "queued",
+                "claimed",
+                "success",
+                "success_partial",
+            }:
                 meta["status"] = "failed"
                 meta["finished_at"] = _utc_now()
                 if he.detail and not meta.get("error"):

@@ -120,9 +120,9 @@
     <div class="page">
       <section class="hero">
         <div class="hero-copy">
-          <p class="eyebrow">Like CapCut smart speech</p>
-          <h1>只上传视频，自动打轴切片</h1>
-          <p class="sub">系统会先<strong>智能口播听写</strong>（Whisper）给每句话打时间戳，再按卖点重排<strong>黄金 20 秒</strong>，生成约 <strong>60 秒</strong> 成片。无需手动上传口播稿。</p>
+          <p class="eyebrow">Web 提交 · Agent 干活</p>
+          <h1>只上传视频，队列交给 Agent</h1>
+          <p class="sub">本页只负责<strong>提交与查看</strong>。真正的智能口播打轴、黄金 20 秒重排与成片，由对话里的 Agent 调用 <strong>clothing-live-clip skill</strong> 完成。</p>
         </div>
       </section>
 
@@ -131,7 +131,7 @@
           <div class="card-head">
             <div>
               <h2>新建任务</h2>
-              <p class="card-desc">主路径：只传直播视频</p>
+              <p class="card-desc">只传视频入队 · Agent 处理</p>
             </div>
           </div>
 
@@ -140,7 +140,7 @@
               <label class="row-field">
                 <span class="row-label">
                   <span class="row-title">直播视频</span>
-                  <span class="row-sub">必填 · 自动抽音 + 智能口播打轴</span>
+                  <span class="row-sub">必填 · 上传后进入排队</span>
                 </span>
                 <input type="file" name="video" id="video" accept="video/*,.mp4,.mov,.mkv,.webm" required />
               </label>
@@ -186,8 +186,8 @@
             <div id="setup-banner" class="setup-banner" hidden>
               请先点右上角 <strong>设置</strong> 填写 API Key 并自检 Whisper，再上传视频。
             </div>
-            <button type="submit" id="submit-btn" class="btn primary">上传并自动切片</button>
-            <p class="hint" id="form-hint">只传视频即可：自动智能口播打轴 → 黄金 20 秒重排 → 成片。API 在「设置」中配置。</p>
+            <button type="submit" id="submit-btn" class="btn primary">上传并排队</button>
+            <p class="hint" id="form-hint">上传成功后，请在 Agent 对话发送「处理队列」。处理完成后点刷新查看预览与下载。</p>
             <p class="error" id="form-error" hidden></p>
           </form>
         </section>

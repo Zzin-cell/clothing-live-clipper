@@ -1,6 +1,8 @@
 const $ = (id) => document.getElementById(id);
 
 const STATUS_LABEL = {
+  queued: "排队中",
+  claimed: "Agent处理中",
   needs_transcript: "待补转写",
   processing: "处理中",
   success: "完成",
@@ -30,6 +32,7 @@ function escapeHtml(str) {
 
 function statusChipClass(status) {
   if (status === "success") return "ok";
+  if (status === "queued" || status === "claimed") return "needs";
   if (status === "needs_transcript") return "needs";
   if (status === "failed") return "warn";
   if (status === "success_partial" || status === "processing") return "warn";
@@ -58,17 +61,18 @@ function row(label, ok, detail) {
 function renderStatus(st) {
   window.__lastStatus = st;
   applyLights(st.lights || {});
-  const asrOk = !!(st.asr && st.asr.configured);
   const banner = $("setup-banner");
-  if (banner) banner.hidden = asrOk;
+  if (banner) {
+    banner.hidden = false;
+    banner.innerHTML =
+      "Web 只负责提交。上传后状态为<strong>排队中</strong>，请在 Agent 对话发送：<code>处理队列</code>";
+  }
 
   const el = $("health");
   if (el) {
-    el.className = "pill-status " + (asrOk ? "ok" : "");
-    el.innerHTML = `<strong>${asrOk ? "可自动听写" : "待配置 API"}</strong>`;
-    el.title = `Whisper: ${asrOk ? "已配置" : st.asr?.note || "missing"} | ffmpeg: ${
-      st.ffmpeg?.ok ? "ok" : "no"
-    }`;
+    el.className = "pill-status ok";
+    el.innerHTML = "<strong>提交台就绪</strong>";
+    el.title = `ffmpeg: ${st.ffmpeg?.ok ? "ok" : "no"} · 处理请 Agent 执行 skill`;
   }
 
   const list = [];
@@ -365,6 +369,12 @@ function renderJob(data) {
   if (data.duration_s != null) {
     chips.push(`<span class="chip">成片规划 ${Number(data.duration_s).toFixed(1)}s</span>`);
   }
+  if (data.queue_hint && (status === "queued" || status === "claimed")) {
+    chips.push(`<span class="chip needs">${escapeHtml(data.queue_hint)}</span>`);
+  }
+  if (data.process_mode) {
+    chips.push(`<span class="chip">模式 ${escapeHtml(data.process_mode)}</span>`);
+  }
   if (data.transcript_source) {
     chips.push(
       `<span class="chip">口播 ${escapeHtml(
@@ -372,9 +382,13 @@ function renderJob(data) {
       )}</span>`
     );
   }
-  chips.push(
-    `<span class="chip ${data.golden20_passed ? "ok" : "warn"}">黄金20 ${data.golden20_passed ? "通过" : "待审"}</span>`
-  );
+  if (status !== "queued" && status !== "claimed") {
+    chips.push(
+      `<span class="chip ${data.golden20_passed ? "ok" : "warn"}">黄金20 ${
+        data.golden20_passed ? "通过" : "待审"
+      }</span>`
+    );
+  }
   if (data.selected_clips != null) {
     chips.push(`<span class="chip">选中 ${data.selected_clips} 段</span>`);
   }
@@ -440,7 +454,14 @@ function renderJob(data) {
   $("golden-list").innerHTML = slotHtml(plan.golden);
   $("trust-list").innerHTML = slotHtml(plan.trust);
   $("cta-list").innerHTML = slotHtml(plan.cta);
-  $("review-md").textContent = data.review_md || "（无 review）";
+  if (status === "queued") {
+    $("review-md").textContent =
+      "任务已入队。\n\n请在 Agent 对话发送：\n  处理队列\n\nAgent 将调用 clothing-live-clip skill 完成智能口播打轴与切片，完成后此处自动可刷新查看。";
+  } else if (status === "claimed") {
+    $("review-md").textContent = "Agent 正在处理，请稍候后点刷新…";
+  } else {
+    $("review-md").textContent = data.review_md || "（无 review）";
+  }
 }
 
 async function showJob(jobId) {
@@ -473,20 +494,21 @@ function setupForm() {
     err.hidden = true;
     err.textContent = "";
     btn.disabled = true;
-    btn.textContent = "智能口播处理中…";
+    btn.textContent = "上传中…";
 
     try {
       const fd = new FormData();
       fd.append("use_sample", useSample && useSample.checked ? "true" : "false");
       fd.append("target_seconds", $("target_seconds").value || "60");
       fd.append("render", $("render").checked ? "true" : "false");
+      fd.append("mode", "agent");
 
       const video = $("video");
       const hasVideo = !!(video.files && video.files[0]);
       const hasTranscript = !!(transcript && transcript.files && transcript.files[0]);
 
       if (!hasVideo && !(useSample && useSample.checked) && !hasTranscript) {
-        throw new Error("请上传直播视频（将自动智能口播打轴）");
+        throw new Error("请上传直播视频");
       }
 
       if (hasVideo) {
@@ -508,12 +530,24 @@ function setupForm() {
       err.textContent = String(ex.message || ex);
     } finally {
       btn.disabled = false;
-      btn.textContent = "上传并自动切片";
+      btn.textContent = "上传并排队";
     }
   });
 }
 
 $("refresh-jobs").addEventListener("click", loadJobs);
+
+// Auto-refresh while waiting for Agent
+setInterval(() => {
+  const st = $("result-panel")?.dataset?.jobId;
+  const panelHidden = $("result-panel")?.hidden;
+  if (!st || panelHidden) return;
+  const chips = $("stats")?.textContent || "";
+  if (chips.includes("排队") || chips.includes("Agent处理")) {
+    showJob(st).catch(() => {});
+    loadJobs().catch(() => {});
+  }
+}, 5000);
 
 loadHealth();
 loadJobs();

@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import io
 from pathlib import Path
-from unittest.mock import patch
 
 import pytest
 from fastapi.testclient import TestClient
@@ -18,87 +17,89 @@ def client(tmp_path, monkeypatch):
     jobs = tmp_path / "web_jobs"
     jobs.mkdir()
     monkeypatch.setattr(webmod, "JOBS_DIR", jobs)
-    # default: no API key unless test sets it
-    monkeypatch.delenv("CLIPPER_ASR_API_KEY", raising=False)
-    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
-    monkeypatch.delenv("CLIPPER_LLM_API_KEY", raising=False)
-    monkeypatch.setenv("CLIPPER_ASR_ENABLED", "true")
-    monkeypatch.setenv("CLIPPER_ASR_PROVIDER", "openai_whisper")
     app = create_app()
     with TestClient(app) as c:
         yield c, jobs
 
 
-def test_health_has_asr_configured(client, monkeypatch):
+def test_health_ok(client):
     c, _ = client
     r = c.get("/api/health")
     assert r.status_code == 200
-    body = r.json()
-    assert body["ok"] is True
-    assert "ffmpeg" in body
-    assert "asr_configured" in body
-    # no key in fixture env
-    assert body["asr_configured"] is False
-
-    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
-    r2 = c.get("/api/health")
-    assert r2.json()["asr_configured"] is True
+    assert r.json()["ok"] is True
 
 
-def test_create_video_only_without_key_400(client):
-    c, _ = client
-    video_bytes = b"\x00\x00\x00\x18ftypmp42fake"
-    r = c.post(
-        "/api/jobs",
-        data={"target_seconds": "60", "render": "false"},
-        files={"video": ("demo.mp4", io.BytesIO(video_bytes), "video/mp4")},
-    )
-    assert r.status_code == 400
-    assert "API" in (r.json().get("detail") or "")
-
-
-def test_create_video_only_auto_asr(client, monkeypatch, tmp_path):
+def test_create_video_queues_for_agent(client):
     c, jobs = client
-    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
-    monkeypatch.setattr(webmod, "which_ffmpeg", lambda: "ffmpeg")
-
-    def fake_transcribe(video, transcript_json, work_dir=None, language="zh"):
-        src = FIXTURE.read_text(encoding="utf-8")
-        Path(transcript_json).parent.mkdir(parents=True, exist_ok=True)
-        Path(transcript_json).write_text(src, encoding="utf-8")
-        return Path(transcript_json)
-
-    monkeypatch.setattr(webmod, "transcribe_video_to_json", fake_transcribe)
-
     video_bytes = b"\x00\x00\x00\x18ftypmp42fake"
     r = c.post(
         "/api/jobs",
-        data={"target_seconds": "60", "render": "false"},
+        data={"target_seconds": "60", "render": "true", "mode": "agent"},
         files={"video": ("demo.mp4", io.BytesIO(video_bytes), "video/mp4")},
     )
     assert r.status_code == 200, r.text
     body = r.json()
-    assert body["status"] in {"success", "success_partial"}
-    assert body.get("transcript_source") == "whisper_api"
+    assert body["status"] == "queued"
+    assert body.get("process_mode") == "agent"
     job_id = body["job_id"]
-    assert (jobs / job_id / "plan.json").exists()
-    assert (jobs / job_id / "transcript_asr.json").exists()
+    assert list((jobs / job_id / "uploads").glob("*.mp4"))
+
+
+def test_agent_next_claim_and_complete(client):
+    c, jobs = client
+    video_bytes = b"\x00\x00\x00\x18ftypmp42fake"
+    r = c.post(
+        "/api/jobs",
+        data={"target_seconds": "60", "render": "false", "mode": "agent"},
+        files={"video": ("demo.mp4", io.BytesIO(video_bytes), "video/mp4")},
+    )
+    job_id = r.json()["job_id"]
+
+    nxt = c.get("/api/agent/next")
+    assert nxt.status_code == 200
+    payload = nxt.json()
+    assert payload["job"]["job_id"] == job_id
+    assert payload["job"]["status"] == "claimed"
+    assert payload["paths"]["video"]
+
+    # empty second claim
+    nxt2 = c.get("/api/agent/next")
+    assert nxt2.json()["job"] is None
+
+    # agent writes plan
+    plan = {
+        "golden": [{"clip_id": "c1", "t0_ms": 0, "t1_ms": 2000, "text": "显瘦", "role": "hook", "score": 1}],
+        "trust": [],
+        "cta": [],
+        "total_duration_ms": 2000,
+        "golden20_passed": True,
+        "warnings": [],
+    }
+    import json
+
+    (jobs / job_id / "plan.json").write_text(
+        json.dumps(plan, ensure_ascii=False), encoding="utf-8"
+    )
+    done = c.post(f"/api/agent/jobs/{job_id}/complete", json={"status": "success_partial"})
+    assert done.status_code == 200
+    assert done.json()["status"] == "success_partial"
+    assert done.json()["files"]["plan"] is True
 
 
 def test_empty_submit_400(client):
     c, _ = client
-    r = c.post("/api/jobs", data={"render": "false"})
+    r = c.post("/api/jobs", data={"render": "false", "mode": "agent"})
     assert r.status_code == 400
 
 
-def test_list_jobs_includes_new(client):
+def test_list_jobs_includes_queued(client):
     c, _ = client
+    video_bytes = b"\x00\x00\x00\x18ftypmp42fake"
     r = c.post(
         "/api/jobs",
-        data={"use_sample": "true", "target_seconds": "60", "render": "false"},
+        data={"target_seconds": "60", "mode": "agent"},
+        files={"video": ("demo.mp4", io.BytesIO(video_bytes), "video/mp4")},
     )
-    assert r.status_code == 200
     job_id = r.json()["job_id"]
-    lst = c.get("/api/jobs").json()["jobs"]
-    ids = {j["job_id"] for j in lst}
+    ids = {j["job_id"] for j in c.get("/api/jobs").json()["jobs"]}
     assert job_id in ids

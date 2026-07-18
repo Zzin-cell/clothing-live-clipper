@@ -1,0 +1,27 @@
+# Local agent / SDD scratch
+.superpowers/
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+*.egg-info/
+.venv/
+venv/
+
+# Secrets & env
+.env
+**/.env
+
+# Media / job outputs
+*.mp4
+*.mov
+*.wav
+*.mp3
+clothing-live-clipper/output/*
+!clothing-live-clipper/output/.gitkeep
+
+# OS
+.DS_Store
+Thumbs.db

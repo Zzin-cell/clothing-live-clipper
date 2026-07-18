@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ClothingLiveTranscript",
+  "type": "array",
+  "items": {
+    "type": "object",
+    "required": ["utt_id", "text", "t0_ms", "t1_ms"],
+    "properties": {
+      "utt_id": { "type": "string" },
+      "text": { "type": "string" },
+      "t0_ms": { "type": "integer", "minimum": 0 },
+      "t1_ms": { "type": "integer", "minimum": 0 },
+      "confidence": { "type": ["number", "null"] }
+    }
+  }
+}

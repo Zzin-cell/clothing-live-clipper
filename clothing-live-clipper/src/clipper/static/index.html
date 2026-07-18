@@ -1,0 +1,95 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>服装带货智能切片</title>
+  <link rel="stylesheet" href="/static/styles.css" />
+</head>
+<body>
+  <div class="page">
+    <header class="hero">
+      <div>
+        <p class="eyebrow">Clothing Live Clipper · MVP</p>
+        <h1>服装带货直播智能切片</h1>
+        <p class="sub">上传口播转写（+ 可选视频），自动提取卖点并重排<strong>黄金 20 秒</strong>，生成约 60 秒带货切片。</p>
+      </div>
+      <div class="health" id="health">检查环境中…</div>
+    </header>
+
+    <main class="grid">
+      <section class="card">
+        <h2>新建任务</h2>
+        <form id="job-form">
+          <label class="field">
+            <span>转写文件（.json / .srt）</span>
+            <input type="file" name="transcript" id="transcript" accept=".json,.srt,application/json,text/plain" />
+          </label>
+
+          <label class="check">
+            <input type="checkbox" name="use_sample" id="use_sample" />
+            <span>使用内置示例转写（不用上传，可先看效果）</span>
+          </label>
+
+          <label class="field">
+            <span>源视频（可选，有 ffmpeg 才出成片）</span>
+            <input type="file" name="video" id="video" accept="video/*,.mp4,.mov,.mkv,.webm" />
+          </label>
+
+          <div class="row">
+            <label class="field grow">
+              <span>目标时长（秒）</span>
+              <input type="number" name="target_seconds" id="target_seconds" value="60" min="15" max="180" />
+            </label>
+            <label class="check mid">
+              <input type="checkbox" name="render" id="render" checked />
+              <span>尝试渲染成片</span>
+            </label>
+          </div>
+
+          <button type="submit" id="submit-btn" class="btn primary">开始切片</button>
+          <p class="hint" id="form-hint">没有视频也可以只生成 plan / review。时间戳需与视频对齐。</p>
+          <p class="error" id="form-error" hidden></p>
+        </form>
+      </section>
+
+      <section class="card">
+        <div class="card-head">
+          <h2>任务结果</h2>
+          <button type="button" class="btn ghost" id="refresh-jobs">刷新列表</button>
+        </div>
+        <div id="result-empty" class="empty">提交任务后，这里显示黄金开头、时间轴和预览。</div>
+        <div id="result-panel" hidden>
+          <div class="stats" id="stats"></div>
+          <div class="actions" id="actions"></div>
+          <video id="preview" class="preview" controls playsinline hidden></video>
+          <div class="columns">
+            <div>
+              <h3>黄金开头</h3>
+              <ol id="golden-list" class="slots"></ol>
+              <h3>信任建设</h3>
+              <ol id="trust-list" class="slots"></ol>
+              <h3>促单收尾</h3>
+              <ol id="cta-list" class="slots"></ol>
+            </div>
+            <div>
+              <h3>Review</h3>
+              <pre id="review-md" class="review"></pre>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="card full">
+        <h2>历史任务</h2>
+        <div id="job-list" class="job-list">加载中…</div>
+      </section>
+    </main>
+
+    <footer>
+      <span>本地工具 · 数据不出本机（上传文件仅存 output/web_jobs）</span>
+    </footer>
+  </div>
+  <script src="/static/app.js"></script>
+</body>
+</html>

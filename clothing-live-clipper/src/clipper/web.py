@@ -14,6 +14,7 @@ from fastapi.staticfiles import StaticFiles
 from clipper.config import Settings, asr_status
 from clipper.media import which_ffmpeg
 from clipper.pipeline import run_pipeline
+from clipper.whisper_asr import ASRError, transcribe_video_to_json
 
 APP_ROOT = Path(__file__).resolve().parents[2]
 STATIC_DIR = Path(__file__).resolve().parent / "static"
@@ -165,6 +166,9 @@ def create_app() -> FastAPI:
             "clips": (d / "clips.json").exists(),
             "final": (d / "final.mp4").exists(),
             "result": (d / "result.json").exists(),
+            "transcript": (d / "transcript.json").exists()
+            or (d / "transcript_asr.json").exists(),
+            "transcript_asr": (d / "transcript_asr.json").exists(),
         }
         return meta
 
@@ -176,6 +180,7 @@ def create_app() -> FastAPI:
             "clips.json",
             "claims.json",
             "transcript.json",
+            "transcript_asr.json",
             "result.json",
             "final.mp4",
             "job_meta.json",
@@ -269,30 +274,55 @@ def create_app() -> FastAPI:
             if not has_tr and not has_vid:
                 raise HTTPException(
                     status_code=400,
-                    detail="请上传视频或转写，或勾选示例转写",
+                    detail="请上传直播视频（将自动智能口播打轴）",
                 )
 
+            # Primary path: video only → ASR (Whisper API) → pipeline
             if has_vid and not has_tr:
                 a = asr_status()
-                meta.update(
-                    {
-                        "status": "needs_transcript",
-                        "has_video": True,
-                        "has_final": False,
-                        "finished_at": _utc_now(),
-                        "asr_configured": a["asr_configured"],
-                        "asr_note": a.get("asr_note")
-                        if a.get("asr_note") is not None
-                        else ("not_implemented" if a["asr_configured"] else a.get("asr_note")),
-                    }
-                )
-                # v1: no real ASR — always needs_transcript for video-only
-                if a["asr_configured"]:
-                    meta["asr_note"] = "not_implemented"
+                meta["asr_configured"] = a["asr_configured"]
+                meta["asr_note"] = a.get("asr_note")
+                meta["asr_provider"] = a.get("asr_provider")
+                if not a["asr_configured"]:
+                    note = a.get("asr_note") or "missing_api_key"
+                    raise HTTPException(
+                        status_code=400,
+                        detail=(
+                            "仅上传视频需要配置 Whisper API。"
+                            "请在 .env 设置 CLIPPER_ASR_API_KEY 或 OPENAI_API_KEY，"
+                            f"并保证 CLIPPER_ASR_ENABLED=true（当前: {note}）"
+                        ),
+                    )
+                if not which_ffmpeg():
+                    raise HTTPException(
+                        status_code=400,
+                        detail="自动听写需要 ffmpeg 抽音频，请先安装 ffmpeg",
+                    )
+                meta["status"] = "transcribing"
                 _write_meta(d, meta)
-                return get_job(job_id)
+                try:
+                    transcript_path = d / "transcript_asr.json"
+                    transcribe_video_to_json(
+                        video_path,
+                        transcript_path,
+                        work_dir=d / "asr_work",
+                        language="zh",
+                    )
+                    # also keep a copy under uploads for inspection
+                    shutil.copy2(transcript_path, uploads / "transcript_asr.json")
+                    meta["transcript_source"] = "whisper_api"
+                    has_tr = True
+                except ASRError as e:
+                    meta["status"] = "failed"
+                    meta["error"] = str(e)
+                    meta["finished_at"] = _utc_now()
+                    _write_meta(d, meta)
+                    raise HTTPException(status_code=500, detail=str(e)) from e
 
-            # has transcript → processing path
+            if not has_tr or transcript_path is None:
+                raise HTTPException(status_code=400, detail="缺少口播时间轴，无法切片")
+
+            # timeline ready → clip pipeline
             meta["status"] = "processing"
             _write_meta(d, meta)
 
@@ -309,6 +339,7 @@ def create_app() -> FastAPI:
 
             status = _status_from_result(result)
             _apply_result_meta(meta, result, has_vid=has_vid, status=status)
+            meta["transcript_source"] = meta.get("transcript_source") or "upload"
         except HTTPException as he:
             # Only mark failed for true error paths; re-raise 400s that happen
             # before a terminal needs_transcript write without wiping that path.

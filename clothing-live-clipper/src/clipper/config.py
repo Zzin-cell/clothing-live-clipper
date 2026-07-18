@@ -30,13 +30,44 @@ class Settings:
 
 
 def asr_status() -> dict:
-    """Read-only ASR probe. Never claim ready if provider not implemented."""
-    enabled = (os.getenv("CLIPPER_ASR_ENABLED") or "false").lower() in {"1", "true", "yes"}
-    provider = (os.getenv("CLIPPER_ASR_PROVIDER") or "none").strip().lower()
-    # v1: no real provider implemented
-    implemented = False
-    configured = bool(enabled and provider not in {"", "none"} and implemented)
-    note = None
-    if enabled and provider not in {"", "none"} and not implemented:
-        note = "not_implemented"
-    return {"asr_configured": configured, "asr_note": note, "asr_provider": provider}
+    """Whether OpenAI-compatible Whisper ASR can run (key present)."""
+    enabled_raw = (os.getenv("CLIPPER_ASR_ENABLED") or "true").lower()
+    enabled = enabled_raw in {"1", "true", "yes"}
+    provider = (os.getenv("CLIPPER_ASR_PROVIDER") or "openai_whisper").strip().lower()
+    key = (
+        os.getenv("CLIPPER_ASR_API_KEY")
+        or os.getenv("OPENAI_API_KEY")
+        or os.getenv("CLIPPER_LLM_API_KEY")
+        or ""
+    ).strip()
+    base = (
+        os.getenv("CLIPPER_ASR_BASE_URL")
+        or os.getenv("CLIPPER_LLM_BASE_URL")
+        or "https://api.openai.com/v1"
+    )
+    model = os.getenv("CLIPPER_ASR_MODEL") or "whisper-1"
+
+    if not enabled or provider in {"", "none"}:
+        return {
+            "asr_configured": False,
+            "asr_note": "disabled",
+            "asr_provider": provider or "none",
+            "asr_model": model,
+            "asr_base_url": base,
+        }
+    if not key:
+        return {
+            "asr_configured": False,
+            "asr_note": "missing_api_key",
+            "asr_provider": provider,
+            "asr_model": model,
+            "asr_base_url": base,
+        }
+    # Implemented: openai-compatible /audio/transcriptions
+    return {
+        "asr_configured": True,
+        "asr_note": None,
+        "asr_provider": provider,
+        "asr_model": model,
+        "asr_base_url": base,
+    }

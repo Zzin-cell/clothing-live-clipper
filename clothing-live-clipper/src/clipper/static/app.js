@@ -41,20 +41,20 @@ async function loadHealth() {
   try {
     const res = await fetch("/api/health");
     const data = await res.json();
-    const asr =
-      data.asr_configured === true
-        ? "ASR✓"
-        : "ASR·";
-    el.className = "pill-status " + (data.ok ? "ok" : "bad");
+    const asrOk = data.asr_configured === true;
+    el.className = "pill-status " + (data.ok && asrOk ? "ok" : data.ok ? "warn" : "bad");
+    if (!asrOk && data.ok) {
+      // soften: keep pill-status without .ok
+      el.className = "pill-status";
+    }
     el.title = [
       `服务：${data.ok ? "正常" : "异常"}`,
-      `ffmpeg：${data.ffmpeg ? "已检测到" : "未找到（只能出计划）"}`,
-      `示例转写：${data.sample_transcript ? "可用" : "缺失"}`,
-      `ASR：${data.asr_configured ? "已配置" : "未配置/未实现"}`,
+      `ffmpeg：${data.ffmpeg ? "已检测到" : "未找到"}`,
+      `智能口播 ASR：${asrOk ? "已配置" : data.asr_note || "未配置 API Key"}`,
     ].join("\n");
-    el.innerHTML = `<strong>就绪</strong> · ${data.ffmpeg ? "ffmpeg✓" : "ffmpeg·"} · 示例${
-      data.sample_transcript ? "✓" : "·"
-    } · ${asr}`;
+    el.innerHTML = `<strong>${asrOk ? "可自动听写" : "待配置 ASR"}</strong> · ${
+      data.ffmpeg ? "ffmpeg✓" : "ffmpeg·"
+    } · ${asrOk ? "Whisper✓" : "Whisper·"}`;
   } catch (e) {
     el.className = "pill-status bad";
     el.title = String(e);
@@ -116,11 +116,16 @@ function renderJob(data) {
   if (data.duration_s != null) {
     chips.push(`<span class="chip">成片规划 ${Number(data.duration_s).toFixed(1)}s</span>`);
   }
-  if (status !== "needs_transcript") {
+  if (data.transcript_source) {
     chips.push(
-      `<span class="chip ${data.golden20_passed ? "ok" : "warn"}">黄金20 ${data.golden20_passed ? "通过" : "待审"}</span>`
+      `<span class="chip">口播 ${escapeHtml(
+        data.transcript_source === "whisper_api" ? "智能听写" : String(data.transcript_source)
+      )}</span>`
     );
   }
+  chips.push(
+    `<span class="chip ${data.golden20_passed ? "ok" : "warn"}">黄金20 ${data.golden20_passed ? "通过" : "待审"}</span>`
+  );
   if (data.selected_clips != null) {
     chips.push(`<span class="chip">选中 ${data.selected_clips} 段</span>`);
   }
@@ -138,14 +143,7 @@ function renderJob(data) {
   $("stats").innerHTML = chips.join("");
 
   const attach = $("attach-panel");
-  const attachErr = $("attach-error");
-  if (status === "needs_transcript") {
-    attach.hidden = false;
-    attachErr.hidden = true;
-    attachErr.textContent = "";
-  } else {
-    attach.hidden = true;
-  }
+  if (attach) attach.hidden = true;
 
   const files = data.files || {};
   const actions = [];
@@ -164,22 +162,24 @@ function renderJob(data) {
       `<a class="btn" href="/api/jobs/${encodeURIComponent(data.job_id)}/files/clips.json" target="_blank">clips.json</a>`
     );
   }
+  if (files.transcript_asr) {
+    actions.push(
+      `<a class="btn" href="/api/jobs/${encodeURIComponent(data.job_id)}/files/transcript_asr.json" target="_blank">智能口播</a>`
+    );
+  } else if (files.transcript) {
+    actions.push(
+      `<a class="btn" href="/api/jobs/${encodeURIComponent(data.job_id)}/files/transcript.json" target="_blank">口播轴</a>`
+    );
+  }
   if (files.final) {
     actions.push(
       `<a class="btn primary" style="width:auto" href="/api/jobs/${encodeURIComponent(data.job_id)}/files/final.mp4" download>下载 final.mp4</a>`
     );
   }
-  $("actions").innerHTML =
-    actions.join("") ||
-    (status === "needs_transcript"
-      ? "<span class='muted'>等待补传转写后继续</span>"
-      : "<span class='muted'>无文件</span>");
+  $("actions").innerHTML = actions.join("") || "<span class='muted'>无文件</span>";
 
   const video = $("preview");
-  if (status === "needs_transcript") {
-    video.hidden = true;
-    video.removeAttribute("src");
-  } else if (files.final) {
+  if (files.final) {
     video.hidden = false;
     video.src = `/api/jobs/${encodeURIComponent(data.job_id)}/files/final.mp4?t=${Date.now()}`;
   } else {
@@ -191,26 +191,7 @@ function renderJob(data) {
   $("golden-list").innerHTML = slotHtml(plan.golden);
   $("trust-list").innerHTML = slotHtml(plan.trust);
   $("cta-list").innerHTML = slotHtml(plan.cta);
-  $("review-md").textContent =
-    status === "needs_transcript"
-      ? "（待补转写后生成）"
-      : data.review_md || "（无 review）";
-}
-
-async function attachTranscript(jobId) {
-  const input = $("attach-transcript");
-  if (!input.files || !input.files[0]) throw new Error("请选择转写文件");
-  const fd = new FormData();
-  fd.append("transcript", input.files[0]);
-  fd.append("render", $("render").checked ? "true" : "false");
-  const res = await fetch(`/api/jobs/${encodeURIComponent(jobId)}/transcript`, {
-    method: "POST",
-    body: fd,
-  });
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(data.detail || "补传失败");
-  renderJob(data);
-  await loadJobs();
+  $("review-md").textContent = data.review_md || "（无 review）";
 }
 
 async function showJob(jobId) {
@@ -231,37 +212,38 @@ function setupForm() {
   const err = $("form-error");
   const btn = $("submit-btn");
 
-  useSample.addEventListener("change", () => {
-    transcript.disabled = useSample.checked;
-    if (useSample.checked) transcript.value = "";
-  });
+  if (useSample && transcript) {
+    useSample.addEventListener("change", () => {
+      transcript.disabled = useSample.checked;
+      if (useSample.checked) transcript.value = "";
+    });
+  }
 
   form.addEventListener("submit", async (e) => {
     e.preventDefault();
     err.hidden = true;
     err.textContent = "";
     btn.disabled = true;
-    btn.textContent = "处理中…";
+    btn.textContent = "智能口播处理中…";
 
     try {
       const fd = new FormData();
-      fd.append("use_sample", useSample.checked ? "true" : "false");
+      fd.append("use_sample", useSample && useSample.checked ? "true" : "false");
       fd.append("target_seconds", $("target_seconds").value || "60");
       fd.append("render", $("render").checked ? "true" : "false");
 
       const video = $("video");
       const hasVideo = !!(video.files && video.files[0]);
-      const hasTranscript = !!(transcript.files && transcript.files[0]);
+      const hasTranscript = !!(transcript && transcript.files && transcript.files[0]);
 
-      // Allow video-only; block only when nothing useful is provided
-      if (!hasVideo && !useSample.checked && !hasTranscript) {
-        throw new Error("请上传视频、转写文件，或勾选使用示例转写");
+      if (!hasVideo && !(useSample && useSample.checked) && !hasTranscript) {
+        throw new Error("请上传直播视频（将自动智能口播打轴）");
       }
 
       if (hasVideo) {
         fd.append("video", video.files[0]);
       }
-      if (!useSample.checked && hasTranscript) {
+      if (transcript && !(useSample && useSample.checked) && hasTranscript) {
         fd.append("transcript", transcript.files[0]);
       }
 
@@ -277,33 +259,7 @@ function setupForm() {
       err.textContent = String(ex.message || ex);
     } finally {
       btn.disabled = false;
-      btn.textContent = "开始切片";
-    }
-  });
-}
-
-function setupAttach() {
-  const btn = $("attach-btn");
-  const err = $("attach-error");
-  btn.addEventListener("click", async () => {
-    err.hidden = true;
-    err.textContent = "";
-    const jobId = $("result-panel").dataset.jobId;
-    if (!jobId) {
-      err.hidden = false;
-      err.textContent = "无当前任务";
-      return;
-    }
-    btn.disabled = true;
-    btn.textContent = "处理中…";
-    try {
-      await attachTranscript(jobId);
-    } catch (ex) {
-      err.hidden = false;
-      err.textContent = String(ex.message || ex);
-    } finally {
-      btn.disabled = false;
-      btn.textContent = "继续处理";
+      btn.textContent = "上传并自动切片";
     }
   });
 }
@@ -313,4 +269,3 @@ $("refresh-jobs").addEventListener("click", loadJobs);
 loadHealth();
 loadJobs();
 setupForm();
-setupAttach();

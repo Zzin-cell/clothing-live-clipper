@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>服装带货智能切片</title>
-  <link rel="stylesheet" href="/static/styles.css?v=mac2" />
+  <link rel="stylesheet" href="/static/styles.css?v=asr1" />
 </head>
 <body>
   <div class="app-shell">
@@ -19,7 +19,7 @@
           <span class="brand-mark" aria-hidden="true"></span>
           <div class="brand-text">
             <strong>Clipper</strong>
-            <span>服装带货直播切片</span>
+            <span>智能口播切片</span>
           </div>
         </div>
       </div>
@@ -31,9 +31,9 @@
     <div class="page">
       <section class="hero">
         <div class="hero-copy">
-          <p class="eyebrow">Local Studio</p>
-          <h1>上传视频，剪出黄金 20 秒</h1>
-          <p class="sub">以<strong>视频为主</strong>。转写可选，也可稍后补传。自动提取卖点并重排，生成约 <strong>60 秒</strong> 带货切片。</p>
+          <p class="eyebrow">Like CapCut smart speech</p>
+          <h1>只上传视频，自动打轴切片</h1>
+          <p class="sub">系统会先<strong>智能口播听写</strong>（Whisper）给每句话打时间戳，再按卖点重排<strong>黄金 20 秒</strong>，生成约 <strong>60 秒</strong> 成片。无需手动上传口播稿。</p>
         </div>
       </section>
 
@@ -42,7 +42,7 @@
           <div class="card-head">
             <div>
               <h2>新建任务</h2>
-              <p class="card-desc">从直播回放开始</p>
+              <p class="card-desc">主路径：只传直播视频</p>
             </div>
           </div>
 
@@ -50,28 +50,11 @@
             <div class="inset-group">
               <label class="row-field">
                 <span class="row-label">
-                  <span class="row-title">源视频</span>
-                  <span class="row-sub">主入口 · mp4 / mov</span>
+                  <span class="row-title">直播视频</span>
+                  <span class="row-sub">必填 · 自动抽音 + 智能口播打轴</span>
                 </span>
-                <input type="file" name="video" id="video" accept="video/*,.mp4,.mov,.mkv,.webm" />
+                <input type="file" name="video" id="video" accept="video/*,.mp4,.mov,.mkv,.webm" required />
               </label>
-              <label class="row-field">
-                <span class="row-label">
-                  <span class="row-title">口播转写</span>
-                  <span class="row-sub">可选 · json / srt · 可后补</span>
-                </span>
-                <input type="file" name="transcript" id="transcript" accept=".json,.srt,application/json,text/plain" />
-              </label>
-              <label class="row-field toggle-row">
-                <span class="row-label">
-                  <span class="row-title">示例转写</span>
-                  <span class="row-sub">不上传也能先看效果</span>
-                </span>
-                <input type="checkbox" name="use_sample" id="use_sample" class="ios-toggle" />
-              </label>
-            </div>
-
-            <div class="inset-group">
               <label class="row-field">
                 <span class="row-label">
                   <span class="row-title">目标时长</span>
@@ -91,8 +74,28 @@
               </label>
             </div>
 
-            <button type="submit" id="submit-btn" class="btn primary">开始切片</button>
-            <p class="hint" id="form-hint">可只上传视频，保存后再补转写；也可只生成 plan / review。时间戳需与视频对齐。</p>
+            <details class="advanced">
+              <summary>高级选项（一般不用）</summary>
+              <div class="inset-group" style="margin-top:12px">
+                <label class="row-field">
+                  <span class="row-label">
+                    <span class="row-title">手动口播稿</span>
+                    <span class="row-sub">可选覆盖自动听写 · json/srt</span>
+                  </span>
+                  <input type="file" name="transcript" id="transcript" accept=".json,.srt,application/json,text/plain" />
+                </label>
+                <label class="row-field toggle-row">
+                  <span class="row-label">
+                    <span class="row-title">示例口播</span>
+                    <span class="row-sub">无视频时的演示</span>
+                  </span>
+                  <input type="checkbox" name="use_sample" id="use_sample" class="ios-toggle" />
+                </label>
+              </div>
+            </details>
+
+            <button type="submit" id="submit-btn" class="btn primary">上传并自动切片</button>
+            <p class="hint" id="form-hint">需配置 Whisper API Key（OPENAI_API_KEY 或 CLIPPER_ASR_API_KEY）。处理时会先听写打轴，再出 plan / 成片。</p>
             <p class="error" id="form-error" hidden></p>
           </form>
         </section>
@@ -101,34 +104,21 @@
           <div class="card-head">
             <div>
               <h2>任务结果</h2>
-              <p class="card-desc">预览、时间轴与下载</p>
+              <p class="card-desc">口播时间轴 · 黄金开头 · 预览下载</p>
             </div>
             <button type="button" class="btn ghost" id="refresh-jobs">刷新</button>
           </div>
 
           <div id="result-empty" class="empty">
             <div class="empty-icon" aria-hidden="true"></div>
-            <p>提交任务后，这里显示黄金开头、时间轴和预览。</p>
+            <p>上传视频后，这里显示智能口播结果、重排时间轴和成片预览。</p>
           </div>
 
           <div id="result-panel" hidden>
             <div class="stats" id="stats"></div>
-
-            <div id="attach-panel" class="attach" hidden>
-              <div class="attach-head">
-                <div>
-                  <h3>待补转写</h3>
-                  <p class="hint">视频已保存。上传 .json / .srt 后继续处理。</p>
-                </div>
-              </div>
-              <input type="file" id="attach-transcript" accept=".json,.srt,application/json" />
-              <button type="button" class="btn primary compact" id="attach-btn">继续处理</button>
-              <p class="error" id="attach-error" hidden></p>
-            </div>
-
+            <div id="attach-panel" class="attach" hidden></div>
             <div class="actions" id="actions"></div>
             <video id="preview" class="preview" controls playsinline hidden></video>
-
             <div class="columns">
               <div class="panel">
                 <h3>黄金开头</h3>
@@ -158,10 +148,10 @@
       </main>
 
       <footer>
-        <span>本地工具 · 数据仅存 output/web_jobs · 不出本机</span>
+        <span>本地编排 · 听写走 Whisper API · 成片保存在 output/web_jobs</span>
       </footer>
     </div>
   </div>
-  <script src="/static/app.js?v=mac2"></script>
+  <script src="/static/app.js?v=asr1"></script>
 </body>
 </html>

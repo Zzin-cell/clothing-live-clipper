@@ -720,6 +720,23 @@ footer {
   font-size: 12px;
 }
 
+.advanced {
+  margin: 4px 2px 12px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.advanced summary {
+  cursor: pointer;
+  color: var(--accent);
+  font-weight: 600;
+  list-style: none;
+}
+
+.advanced summary::-webkit-details-marker {
+  display: none;
+}
+
 .review::-webkit-scrollbar { width: 10px; }
 .review::-webkit-scrollbar-thumb {
   background: rgba(0, 0, 0, 0.14);

@@ -23,6 +23,8 @@ import uuid
 from datetime import datetime
 from pathlib import Path
 
+# re used in keep_line for livestream try-on filler
+
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
@@ -40,11 +42,23 @@ SENTIMENT_WORDS = (
 )
 CHITCHAT_WORDS = (
     "家人们", "老铁们", "听得到吗", "扣1", "扣一", "点点关注", "双击", "晚上好啊", "来了吗",
+    "过一下", "过一遍", "带过", "先过", "往下过", "咱们过",
+    "看一下", "看一看", "说一下", "讲一下", "介绍一下",
+    "给大家看", "给你们看", "来看一下", "注意看",
+    "一会儿", "待会", "等会", "马上", "接下来",
+    "铃铃铃", "有没有人", "在不在", "刚进来", "欢迎",
+    "感谢", "谢谢老板", "谢谢姐妹", "公屏", "弹幕",
+)
+OFFTOPIC_WORDS = (
+    "零食", "好吃", "水果", "开心果", "坚果", "包装太大", "浪费了",
 )
 CORE_WORDS = (
     "收腰", "修身", "版型", "显瘦", "遮肉", "梨形", "面料", "布料", "醋酸", "凉感",
-    "雪纺", "纯棉", "券后", "只要", "原价", "小黄车", "链接", "加购", "下单", "弹窗",
+    "雪纺", "纯棉", "牛仔", "材质", "柔软", "透气", "不起球", "垂感", "弹力", "不透",
+    "券后", "只要", "原价", "小黄车", "链接", "加购", "下单", "弹窗",
     "领口", "袖口", "开叉", "通勤", "搭配", "号链接", "购物车", "库存",
+    "上衣", "裤子", "裙子", "外套", "内搭", "牛仔裤", "蕾丝", "雷丝", "洗水",
+    "显白", "百搭", "闭眼入", "遮胯", "高腰", "宽松", "直筒",
 )
 
 
@@ -108,35 +122,58 @@ def asr_local(wav: Path) -> list[dict]:
 
 
 def keep_line(text: str) -> bool:
+    """Only keep clothing-related product talk. Drop livestream filler & offtopic."""
     t = text.strip()
     if not t:
         return False
-    has_core = any(w.lower() in t.lower() for w in CORE_WORDS)
+
+    strong = (
+        "面料", "布料", "材质", "牛仔", "牛仔裤", "显瘦", "遮肉", "收腰", "修身",
+        "版型", "不透", "柔软", "超软", "软的", "蕾丝", "雷丝", "垂感", "弹力",
+        "醋酸", "凉感", "雪纺", "纯棉", "洗水", "上衣", "裙子", "外套", "内搭",
+        "遮胯", "高腰", "梨形", "闭眼入", "显白", "开叉", "领口", "袖口",
+    )
+    weak_only = ("搭配", "好看", "只要", "链接", "库存", "过一下", "看一下")
+    has_strong = any(w in t for w in strong)
+    has_weak = any(w in t for w in weak_only)
     is_size = any(w in t for w in SIZE_WORDS)
     is_sent = any(w in t for w in SENTIMENT_WORDS)
     is_chat = any(w in t for w in CHITCHAT_WORDS)
-    if is_size and not has_core:
+    is_off = any(w in t for w in OFFTOPIC_WORDS)
+
+    if is_off and not has_strong:
         return False
-    if is_sent and not has_core:
+    if is_size and not has_strong:
         return False
-    if is_chat and not has_core:
+    if is_sent and not has_strong:
         return False
-    if has_core or any(ch.isdigit() for ch in t) or "块" in t or "元" in t:
+    # 「过一下/看一下」类直播词：没有强服装信息就丢
+    if is_chat and not has_strong:
+        return False
+    if "过一下" in t and not has_strong:
+        return False
+    # 仅「穿一下牛仔/打一下牛仔」类试穿控场，缺少卖点信息
+    if re.search(r"(穿一下|打一下|过一下).{0,6}牛仔", t) and not any(
+        w in t for w in ("面料", "显瘦", "遮肉", "版型", "不透", "柔软", "软")
+    ):
+        return False
+    if re.search(r"不爱穿牛仔|穿牛仔很快|牛仔本身就是", t) and not any(
+        w in t for w in ("面料", "显瘦", "版型", "弹力", "不透", "软")
+    ):
+        return False
+    # 只有弱词（搭配/好看/只要）不够
+    if has_strong:
         return True
-    return len(t) >= 8 and not is_chat
+    if any(w in t for w in ("券后", "直播价", "专属价", "秒杀", "包邮", "块钱")):
+        return True
+    if has_weak and not has_strong:
+        return False
+    return False
 
 
 def filter_transcript(raw: list[dict]) -> list[dict]:
     kept = [u for u in raw if keep_line(u.get("text") or "")]
-    if len(kept) < 2:
-        kept = [
-            u
-            for u in raw
-            if (u.get("text") or "").strip()
-            and not any(w in (u.get("text") or "") for w in CHITCHAT_WORDS)
-        ]
-    if not kept:
-        kept = [u for u in raw if (u.get("text") or "").strip()]
+    # never fall back to keeping everything — empty means need better ASR / more product talk
     return kept
 
 

@@ -37,12 +37,26 @@ def score_clip(clip: Clip) -> Clip:
         clip.score_breakdown = {"chitchat": 0.0, "raw": 0.0}
         return clip
 
-    # No clothing claim → not usable in MVP ranking
-    content_types = {t for t in types if t != ClaimType.CHITCHAT}
+    # No clothing claim → score 0 (do not pad plan with filler / off-topic)
+    content_types = {t for t in types if t != ClaimType.CHITCHAT and t != ClaimType.SIZE}
     if not content_types:
         clip.score = 0.0
         clip.weight = 0.0
-        clip.score_breakdown = {"no_claim": 0.0, "raw": 0.0}
+        clip.score_breakdown = {"no_clothing_claim": 0.0, "raw": 0.0}
+        return clip
+
+    # Size-only lines: never useful for cuts (hard exclude policy)
+    if content_types <= {ClaimType.SIZE}:
+        clip.score = 0.0
+        clip.weight = 0.0
+        clip.score_breakdown = {"size_only": 0.0, "raw": 0.0}
+        return clip
+
+    # Outfit-only weak lines (e.g. 搭配就可以了 without fabric/fit) → drop
+    if content_types <= {ClaimType.OUTFIT}:
+        clip.score = 0.0
+        clip.weight = 0.0
+        clip.score_breakdown = {"outfit_only": 0.0, "raw": 0.0}
         return clip
 
     for t in content_types:

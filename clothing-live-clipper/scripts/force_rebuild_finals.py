@@ -38,8 +38,8 @@ def main() -> None:
             out,
             work_dir=work_dir,
             smooth=True,
-            crossfade_s=0.20,
-            edge_fade_s=0.14,
+            crossfade_s=0.0,
+            edge_fade_s=0.03,
             playback_speed=1.3,
         )
         dest = DST / name

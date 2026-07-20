@@ -51,7 +51,6 @@ def probe_duration_ms(video: str | Path) -> int:
             if cand.exists():
                 ffprobe = str(cand)
     if not ffprobe:
-        # last resort: parse ffmpeg -i
         ff = require_ffmpeg()
         proc = subprocess.run(
             [ff, "-i", str(video)],
@@ -123,69 +122,40 @@ def cut_segment(
     out_path: str | Path,
     reencode: bool = True,
     *,
-    edge_fade_s: float = 0.12,
+    edge_fade_s: float = 0.03,
     target_w: int | None = None,
     target_h: int | None = None,
     fps: int = 30,
-    zoom_style: str = "soft",
+    zoom_style: str = "none",
 ) -> Path:
     """
-    Cut one segment CapCut-like:
-    - normalize size/fps
-    - soft in/out fades on A/V
-    - subtle zoom (slow push-in) for less static feel
+    Invisible-edit style cut:
+    - unify size/fps/audio so joins don't glitch
+    - only micro audio/video edge fades (~30ms) to kill pops — not visible transitions
+    - no zoom / no flashy effects
     """
+    del zoom_style  # reserved; always none for invisible edit
     ffmpeg = require_ffmpeg()
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     ss = max(0.0, t0_ms / 1000.0)
-    dur = max(0.20, (t1_ms - t0_ms) / 1000.0)
+    dur = max(0.12, (t1_ms - t0_ms) / 1000.0)
 
-    fade = min(max(0.06, edge_fade_s), max(0.05, dur / 3.5))
+    # Micro-fade only (not a visible dissolve)
+    fade = min(max(0.02, edge_fade_s), max(0.02, dur / 8.0))
     fade_out_st = max(0.0, dur - fade)
 
-    if not reencode:
-        cmd = [
-            ffmpeg, "-y",
-            "-ss", f"{ss:.3f}",
-            "-i", str(video),
-            "-t", f"{dur:.3f}",
-            "-c", "copy",
-            str(out_path),
-        ]
-        run_cmd(cmd)
-        return out_path
+    w = (target_w or 1080) - ((target_w or 1080) % 2)
+    h = (target_h or 1920) - ((target_h or 1920) % 2)
 
-    w = target_w or 1080
-    h = target_h or 1920
-    # even dimensions
-    w -= w % 2
-    h -= h % 2
-
-    # CapCut-like gentle zoom: 1.00 → ~1.04 over clip
-    # zoompan is heavy; use scale+crop with animated crop via zoompan on normalized frames
-    if zoom_style == "soft" and dur >= 0.45:
-        # frames approx
-        frames = max(2, int(round(dur * fps)))
-        # z goes 1.0 to 1.035
-        zexpr = f"min(1.035,1+0.035*on/{max(1, frames - 1)})"
-        vf = (
-            f"scale={w}:{h}:force_original_aspect_ratio=increase,"
-            f"crop={w}:{h},"
-            f"fps={fps},"
-            f"zoompan=z='{zexpr}':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=1:s={w}x{h}:fps={fps},"
-            f"fade=t=in:st=0:d={fade:.3f}:alpha=0,"
-            f"fade=t=out:st={fade_out_st:.3f}:d={fade:.3f}:alpha=0"
-        )
-    else:
-        vf = (
-            f"scale={w}:{h}:force_original_aspect_ratio=decrease,"
-            f"pad={w}:{h}:(ow-iw)/2:(oh-ih)/2,"
-            f"fps={fps},"
-            f"fade=t=in:st=0:d={fade:.3f},"
-            f"fade=t=out:st={fade_out_st:.3f}:d={fade:.3f}"
-        )
-
+    # Match source framing; no zoom. Micro fade only.
+    vf = (
+        f"scale={w}:{h}:force_original_aspect_ratio=decrease,"
+        f"pad={w}:{h}:(ow-iw)/2:(oh-ih)/2:black,"
+        f"fps={fps},"
+        f"fade=t=in:st=0:d={fade:.3f},"
+        f"fade=t=out:st={fade_out_st:.3f}:d={fade:.3f}"
+    )
     af = (
         f"afade=t=in:st=0:d={fade:.3f},"
         f"afade=t=out:st={fade_out_st:.3f}:d={fade:.3f},"
@@ -193,53 +163,39 @@ def cut_segment(
     )
 
     cmd = [
-        ffmpeg, "-y",
-        "-ss", f"{ss:.3f}",
-        "-i", str(video),
-        "-t", f"{dur:.3f}",
-        "-vf", vf,
-        "-af", af,
-        "-c:v", "libx264",
-        "-preset", "veryfast",
-        "-crf", "20",
-        "-pix_fmt", "yuv420p",
-        "-c:a", "aac",
-        "-b:a", "160k",
-        "-ar", "44100",
-        "-ac", "2",
-        "-movflags", "+faststart",
+        ffmpeg,
+        "-y",
+        "-ss",
+        f"{ss:.3f}",
+        "-i",
+        str(video),
+        "-t",
+        f"{dur:.3f}",
+        "-vf",
+        vf,
+        "-af",
+        af,
+        "-c:v",
+        "libx264",
+        "-preset",
+        "veryfast",
+        "-crf",
+        "18",
+        "-pix_fmt",
+        "yuv420p",
+        "-c:a",
+        "aac",
+        "-b:a",
+        "192k",
+        "-ar",
+        "44100",
+        "-ac",
+        "2",
+        "-movflags",
+        "+faststart",
         str(out_path),
     ]
-    try:
-        run_cmd(cmd)
-    except FFmpegError:
-        # fallback without zoompan if filter fails
-        vf2 = (
-            f"scale={w}:{h}:force_original_aspect_ratio=decrease,"
-            f"pad={w}:{h}:(ow-iw)/2:(oh-ih)/2,"
-            f"fps={fps},"
-            f"fade=t=in:st=0:d={fade:.3f},"
-            f"fade=t=out:st={fade_out_st:.3f}:d={fade:.3f}"
-        )
-        cmd2 = [
-            ffmpeg, "-y",
-            "-ss", f"{ss:.3f}",
-            "-i", str(video),
-            "-t", f"{dur:.3f}",
-            "-vf", vf2,
-            "-af", af,
-            "-c:v", "libx264",
-            "-preset", "veryfast",
-            "-crf", "20",
-            "-pix_fmt", "yuv420p",
-            "-c:a", "aac",
-            "-b:a", "160k",
-            "-ar", "44100",
-            "-ac", "2",
-            "-movflags", "+faststart",
-            str(out_path),
-        ]
-        run_cmd(cmd2)
+    run_cmd(cmd)
     return out_path
 
 
@@ -247,48 +203,60 @@ def concat_segments(
     segment_paths: list[Path],
     out_mp4: str | Path,
     *,
-    crossfade_s: float = 0.18,
+    crossfade_s: float = 0.0,
 ) -> Path:
-    out_mp4 = Path(out_mp4)
-    out_mp4.parent.mkdir(parents=True, exist_ok=True)
-    if not segment_paths:
-        raise FFmpegError("no segments to concat")
-    if len(segment_paths) == 1:
-        shutil.copy2(segment_paths[0], out_mp4)
-        return out_mp4
-
-    durs: list[float] = []
-    for p in segment_paths:
-        try:
-            durs.append(max(0.05, probe_duration_ms(p) / 1000.0))
-        except Exception:
-            durs.append(1.0)
-
-    cf = max(0.08, min(float(crossfade_s or 0.0), 0.28))
-    # pairwise xfade when every part is long enough (CapCut-like soft cut)
-    if cf > 0.01 and all(d > cf * 2.5 for d in durs):
-        try:
-            return _concat_pairwise_xfade(segment_paths, durs, out_mp4, cf)
-        except FFmpegError:
-            pass
-
-    return _concat_pairwise_hard(segment_paths, out_mp4)
+    """
+    Direct seamless join (no visible transition).
+    Pairwise concat filter keeps full duration reliably.
+    crossfade_s is ignored for visual dissolves (policy: invisible hard cut).
+    """
+    del crossfade_s
+    return _concat_pairwise_hard(segment_paths, Path(out_mp4))
 
 
 def _concat_pairwise_hard(segment_paths: list[Path], out_mp4: Path) -> Path:
     ffmpeg = require_ffmpeg()
+    out_mp4 = Path(out_mp4)
+    out_mp4.parent.mkdir(parents=True, exist_ok=True)
+    if not segment_paths:
+        raise FFmpegError("no segments")
+    if len(segment_paths) == 1:
+        shutil.copy2(segment_paths[0], out_mp4)
+        return out_mp4
 
     def _pair(a: Path, b: Path, dest: Path) -> None:
+        # n=2 concat is the most reliable full-length join
         cmd = [
-            ffmpeg, "-y",
-            "-i", str(a),
-            "-i", str(b),
-            "-filter_complex", "[0:v][0:a][1:v][1:a]concat=n=2:v=1:a=1[v][a]",
-            "-map", "[v]", "-map", "[a]",
-            "-c:v", "libx264", "-preset", "ultrafast", "-crf", "20",
-            "-pix_fmt", "yuv420p",
-            "-c:a", "aac", "-b:a", "160k", "-ar", "44100", "-ac", "2",
-            "-movflags", "+faststart",
+            ffmpeg,
+            "-y",
+            "-i",
+            str(a),
+            "-i",
+            str(b),
+            "-filter_complex",
+            "[0:v][0:a][1:v][1:a]concat=n=2:v=1:a=1[v][a]",
+            "-map",
+            "[v]",
+            "-map",
+            "[a]",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "ultrafast",
+            "-crf",
+            "18",
+            "-pix_fmt",
+            "yuv420p",
+            "-c:a",
+            "aac",
+            "-b:a",
+            "192k",
+            "-ar",
+            "44100",
+            "-ac",
+            "2",
+            "-movflags",
+            "+faststart",
             str(dest),
         ]
         run_cmd(cmd)
@@ -299,63 +267,6 @@ def _concat_pairwise_hard(segment_paths: list[Path], out_mp4: Path) -> Path:
         for i, nxt in enumerate(segment_paths[1:], start=1):
             dest = td_path / f"join_{i:03d}.mp4"
             _pair(cur, nxt, dest)
-            cur = dest
-        shutil.copy2(cur, out_mp4)
-    return out_mp4
-
-
-def _concat_pairwise_xfade(
-    segment_paths: list[Path],
-    durs: list[float],
-    out_mp4: Path,
-    crossfade_s: float,
-) -> Path:
-    """
-    CapCut-like soft transitions via pairwise xfade+acrossfade.
-    Pairwise keeps duration correct (unlike huge multi-input graphs).
-    """
-    ffmpeg = require_ffmpeg()
-    # transition variants for visual variety (still soft)
-    transitions = ["fade", "fadewhite", "smoothleft", "smoothright", "fadeblack"]
-
-    def _pair(a: Path, b: Path, da: float, dest: Path, idx: int) -> float:
-        tr = transitions[idx % len(transitions)]
-        # offset must be da - crossfade
-        offset = max(0.05, da - crossfade_s)
-        # prefer fade for very short a
-        if da < crossfade_s * 3:
-            tr = "fade"
-            offset = max(0.05, da - crossfade_s)
-        cmd = [
-            ffmpeg, "-y",
-            "-i", str(a),
-            "-i", str(b),
-            "-filter_complex",
-            (
-                f"[0:v][1:v]xfade=transition={tr}:duration={crossfade_s:.3f}:offset={offset:.3f}[v];"
-                f"[0:a][1:a]acrossfade=d={crossfade_s:.3f}:c1=tri:c2=tri[a]"
-            ),
-            "-map", "[v]", "-map", "[a]",
-            "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
-            "-pix_fmt", "yuv420p",
-            "-c:a", "aac", "-b:a", "160k", "-ar", "44100", "-ac", "2",
-            "-movflags", "+faststart",
-            str(dest),
-        ]
-        run_cmd(cmd)
-        # new duration ≈ da + db - crossfade
-        try:
-            return probe_duration_ms(dest) / 1000.0
-        except Exception:
-            return da + 1.0 - crossfade_s
-
-    with tempfile.TemporaryDirectory(prefix="clipper_xfade_") as td:
-        td_path = Path(td)
-        cur = segment_paths[0]
-        cur_d = durs[0]
-        for i, nxt in enumerate(segment_paths[1:], start=1):
-            dest = td_path / f"xf_{i:03d}.mp4"
-            cur_d = _pair(cur, nxt, cur_d, dest, i - 1)
             cur = dest
         shutil.copy2(cur, out_mp4)
     return out_mp4
@@ -388,23 +299,36 @@ def apply_playback_speed(
         filters.append(f"atempo={rest:.5f}")
         return ",".join(filters)
 
-    # slight sharpen after speed for less mushy CapCut look
-    vf = f"setpts=PTS/{speed:.5f},unsharp=3:3:0.4:3:3:0.0"
+    # No unsharp — keep natural look
+    vf = f"setpts=PTS/{speed:.5f}"
     af = atempo_chain(speed)
     cmd = [
-        ffmpeg, "-y",
-        "-i", str(src_mp4),
-        "-filter:v", vf,
-        "-filter:a", af,
-        "-c:v", "libx264",
-        "-preset", "veryfast",
-        "-crf", "19",
-        "-pix_fmt", "yuv420p",
-        "-c:a", "aac",
-        "-b:a", "160k",
-        "-ar", "44100",
-        "-ac", "2",
-        "-movflags", "+faststart",
+        ffmpeg,
+        "-y",
+        "-i",
+        str(src_mp4),
+        "-filter:v",
+        vf,
+        "-filter:a",
+        af,
+        "-c:v",
+        "libx264",
+        "-preset",
+        "veryfast",
+        "-crf",
+        "18",
+        "-pix_fmt",
+        "yuv420p",
+        "-c:a",
+        "aac",
+        "-b:a",
+        "192k",
+        "-ar",
+        "44100",
+        "-ac",
+        "2",
+        "-movflags",
+        "+faststart",
         str(out_mp4),
     ]
     run_cmd(cmd)
@@ -418,11 +342,17 @@ def render_plan(
     work_dir: str | Path | None = None,
     *,
     smooth: bool = True,
-    crossfade_s: float = 0.20,
-    edge_fade_s: float = 0.14,
+    crossfade_s: float = 0.0,
+    edge_fade_s: float = 0.03,
     playback_speed: float = 1.0,
 ) -> Path:
-    """CapCut-like render: soft edges, pairwise crossfades, optional speed."""
+    """
+    Invisible-edit render:
+    - direct seamless joins (no xfade dissolve)
+    - micro edge fades only to avoid audio clicks
+    - optional global playback speed (default 1.3) after join
+    """
+    del crossfade_s  # never visual dissolve
     video = Path(video)
     out_mp4 = Path(out_mp4)
     if work_dir is None:
@@ -439,12 +369,12 @@ def render_plan(
     tw, th = _probe_stream_size(video)
     parts: list[Path] = []
     for i, (t0, t1) in enumerate(segments):
-        if t1 - t0 < 280:
-            t1 = t0 + 280
-        # slight handles for smoother transitions (CapCut often cuts with handles)
+        if t1 - t0 < 200:
+            t1 = t0 + 200
+        # tiny handles help audio continuity without looking like a transition
         if smooth:
-            t0 = max(0, t0 - 40)
-            t1 = t1 + 40
+            t0 = max(0, t0 - 30)
+            t1 = t1 + 30
         part = work_dir / f"part_{i:03d}.mp4"
         cut_segment(
             video,
@@ -456,7 +386,7 @@ def render_plan(
             target_w=tw,
             target_h=th,
             fps=30,
-            zoom_style="soft" if smooth else "none",
+            zoom_style="none",
         )
         parts.append(part)
 
@@ -465,30 +395,20 @@ def render_plan(
     if abs(speed - 1.0) > 0.01:
         joined = work_dir / "_joined_1x.mp4"
 
-    # CapCut-like crossfade length; clamp for many clips.
-    # Compensate selection length so final after speed still ≈ target.
-    cf = crossfade_s if smooth else 0.0
-    if len(parts) > 16:
-        cf = min(cf, 0.14)
-    if len(parts) > 24:
-        cf = min(cf, 0.10)
-
-    concat_segments(parts, joined, crossfade_s=cf)
+    # Always direct connect (no dissolve)
+    concat_segments(parts, joined, crossfade_s=0.0)
 
     if abs(speed - 1.0) > 0.01:
         apply_playback_speed(joined, out_mp4, speed=speed)
     elif joined != out_mp4:
         shutil.copy2(joined, out_mp4)
 
-    # If final is still short vs expected (xfade eats duration), slightly slow
-    # back toward ~60s instead of leaving a hard short cut.
+    # If still short after speed (material shortage), slight retime toward ~58s
     try:
         final_ms = probe_duration_ms(out_mp4)
-        # expected ~ source/speed; if much shorter than 55s, retime gently
         if final_ms > 0 and final_ms < 56_500:
             target_ms = 58_500
-            factor = min(1.15, max(1.01, target_ms / final_ms))
-            # slightly slow down to approach ~58–60s after soft transitions
+            factor = min(1.12, max(1.01, target_ms / final_ms))
             tmp = out_mp4.with_suffix(".retime.mp4")
             apply_playback_speed(out_mp4, tmp, speed=1.0 / factor)
             tmp.replace(out_mp4)

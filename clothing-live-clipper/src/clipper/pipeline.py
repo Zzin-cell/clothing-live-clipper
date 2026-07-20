@@ -103,8 +103,8 @@ def run_pipeline(
                     out_dir / "final.mp4",
                     work_dir=out_dir / "_parts",
                     smooth=True,
-                    crossfade_s=0.20,
-                    edge_fade_s=0.14,
+                    crossfade_s=0.0,  # invisible hard join
+                    edge_fade_s=0.03,  # micro de-click only
                     playback_speed=float(speed),
                 )
             )

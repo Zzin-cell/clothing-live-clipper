@@ -12,13 +12,19 @@ SCORE_WEIGHTS = {
     ClaimType.SELLING_POINT: 40.0,
     ClaimType.FIT: 20.0,
     ClaimType.FABRIC: 20.0,
-    ClaimType.PRICE: 15.0,
+    ClaimType.PRICE: 0.0,  # product policy: no price talk in cuts
     ClaimType.DETAIL: 8.0,
     ClaimType.SCENE: 8.0,
     ClaimType.SIZE: 8.0,
     ClaimType.OUTFIT: 6.0,
     ClaimType.CHITCHAT: 0.0,
 }
+
+_PRICE_TEXT = (
+    "券后", "只要", "原价", "秒杀", "限时", "包邮", "拍下", "链接", "库存",
+    "凑单", "满减", "到手", "块钱", "多少钱", "便宜", "加一捕", "加购", "下单",
+    "小黄车", "购物车", "号链接", "弹窗", "福袋", "直播价", "专属价", "到手价",
+)
 
 
 _CLOTHING_TEXT_HINTS = (
@@ -35,6 +41,14 @@ def score_clip(clip: Clip) -> Clip:
     raw = 0.0
     text = clip.text or ""
 
+    # Hard policy: never put price / deal talk into final cut
+    if ClaimType.PRICE in types or any(p in text for p in _PRICE_TEXT):
+        # allow only if clearly not a price line but contains 链接 as fabric noise — still drop
+        clip.score = 0.0
+        clip.weight = 0.0
+        clip.score_breakdown = {"price_excluded": 0.0, "raw": 0.0}
+        return clip
+
     if ClaimType.CHITCHAT in types and len(types) == 1:
         if not any(h in text for h in _CLOTHING_TEXT_HINTS):
             clip.score = 0.0
@@ -50,7 +64,11 @@ def score_clip(clip: Clip) -> Clip:
         clip.score_breakdown = {"chitchat": 0.0, "raw": 0.0}
         return clip
 
-    content_types = {t for t in types if t != ClaimType.CHITCHAT and t != ClaimType.SIZE}
+    content_types = {
+        t
+        for t in types
+        if t not in {ClaimType.CHITCHAT, ClaimType.SIZE, ClaimType.PRICE}
+    }
     if not content_types:
         if any(h in text for h in _CLOTHING_TEXT_HINTS):
             raw = 14.0
@@ -366,11 +384,17 @@ def _reorder_section_logical(slots: list[PlanSlot], by_id: dict[str, Clip], role
         return _primary_stage(c) if c else 3
 
     if role == "cta":
-        # price first, then supporting selling, keep relative time among ties
+        # closing recap: selling/fabric first (no price)
         return sorted(
             slots,
             key=lambda s: (
-                0 if by_id.get(s.clip_id) and ClaimType.PRICE in by_id[s.clip_id].claim_types else 1,
+                0
+                if by_id.get(s.clip_id)
+                and (
+                    ClaimType.SELLING_POINT in by_id[s.clip_id].claim_types
+                    or ClaimType.FABRIC in by_id[s.clip_id].claim_types
+                )
+                else 1,
                 stage_of(s),
                 s.t0_ms,
             ),
@@ -423,7 +447,6 @@ def build_timeline_plan(
             ClaimType.SELLING_POINT,
             ClaimType.FIT,
             ClaimType.FABRIC,
-            ClaimType.PRICE,
         },
         prefer_stages={0, 1, 2},
         dedupe_threshold=0.70,
@@ -431,54 +454,42 @@ def build_timeline_plan(
         chronological_bias=0.25,
     )
     golden = _reorder_section_logical(golden, by_id, "hook")
+    golden = [
+        s
+        for s in golden
+        if not any(p in (s.text or "") for p in _PRICE_TEXT)
+        and not (
+            s.clip_id in by_id and ClaimType.PRICE in by_id[s.clip_id].claim_types
+        )
+    ]
     if not golden:
         warnings.append("no_golden_clips")
 
-    # --- CTA: price / action, after body ---
+    # --- CTA: NO price. Closing = strongest remaining selling / fabric recap ---
     cta: list[PlanSlot] = []
-    price_clips = sorted(
-        [
-            c
-            for c in scored
-            if c.clip_id not in used
-            and c.score > 0
-            and ClaimType.PRICE in c.claim_types
-        ],
-        key=lambda c: (c.score, -c.t0_ms),
-        reverse=True,
-    )
-    remaining_cta = cta_ms
-    if price_clips:
-        # pick best price that isn't near-dup of golden texts
-        gtexts = [s.text for s in golden]
-        chosen_price = None
-        for c in price_clips:
-            if any(_similarity(c.text, g) >= 0.9 for g in gtexts):
-                continue
-            chosen_price = c
-            break
-        if chosen_price is None:
-            chosen_price = price_clips[0]
-        cta.append(_to_slot(chosen_price, "cta"))
-        used.add(chosen_price.clip_id)
-        remaining_cta = max(0, cta_ms - chosen_price.duration_ms)
-    else:
-        warnings.append("missing_price")
-
     cta.extend(
         _pick_logical(
             scored,
-            remaining_cta,
+            cta_ms,
             used,
             role="cta",
-            prefer_types={ClaimType.PRICE, ClaimType.SELLING_POINT},
-            prefer_stages={5, 0},
+            prefer_types={ClaimType.SELLING_POINT, ClaimType.FABRIC, ClaimType.FIT},
+            prefer_stages={0, 2, 1},
             dedupe_threshold=0.75,
             logic_over_dedupe=True,
             chronological_bias=0.2,
         )
     )
     cta = _reorder_section_logical(cta, by_id, "cta")
+    # strip any price that slipped through
+    cta = [
+        s
+        for s in cta
+        if not any(p in (s.text or "") for p in _PRICE_TEXT)
+        and not (
+            s.clip_id in by_id and ClaimType.PRICE in by_id[s.clip_id].claim_types
+        )
+    ]
 
     # --- Trust: expand fabric → detail → outfit, soft dedupe, time flow ---
     trust = _pick_logical(
@@ -602,10 +613,10 @@ def build_timeline_plan(
     has_selling = ClaimType.SELLING_POINT in golden_types
     has_fit_or_fabric = bool(golden_types & {ClaimType.FIT, ClaimType.FABRIC})
     ratio_ok = plan.golden_weight_ratio >= settings.golden_weight_ratio or golden_w == 0
-    coverage_ok = has_selling or has_fit_or_fabric or ClaimType.PRICE in golden_types
+    coverage_ok = has_selling or has_fit_or_fabric
 
-    if not has_selling and ClaimType.PRICE not in golden_types:
-        warnings.append("golden_missing_selling_or_price")
+    if not has_selling and not has_fit_or_fabric:
+        warnings.append("golden_missing_selling_or_fabric")
     if not has_fit_or_fabric and has_selling:
         warnings.append("golden_missing_fit_or_fabric")
 
@@ -614,6 +625,25 @@ def build_timeline_plan(
         warnings.append(
             f"golden_weight_ratio={plan.golden_weight_ratio:.2f}<{settings.golden_weight_ratio}"
         )
+
+    # Final safety: purge any remaining price lines from all sections
+    def _no_price(slots: list[PlanSlot]) -> list[PlanSlot]:
+        out: list[PlanSlot] = []
+        for s in slots:
+            if any(p in (s.text or "") for p in _PRICE_TEXT):
+                continue
+            c = by_id.get(s.clip_id)
+            if c and ClaimType.PRICE in c.claim_types:
+                continue
+            out.append(s)
+        return out
+
+    golden = _no_price(golden)
+    trust = _no_price(trust)
+    cta = _no_price(cta)
+    plan.golden, plan.trust, plan.cta = golden, trust, cta
+    all_slots = plan.all_slots()
+    plan.total_duration_ms = sum(s.t1_ms - s.t0_ms for s in all_slots)
 
     # report soft-dedupe stats
     texts = [s.text for s in all_slots]

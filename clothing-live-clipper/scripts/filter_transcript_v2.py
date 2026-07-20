@@ -42,7 +42,12 @@ MEDIUM = (
     "太好看", "超好看", "你好看", "也好看", "又好看", "小肥", "玻璃",
 )
 
-PRICE = ("券后", "直播价", "专属价", "秒杀", "包邮", "块钱", "只要", "原价", "到手", "20块", "长20")
+# Price talk is excluded from cuts entirely (product policy)
+PRICE = (
+    "券后", "直播价", "专属价", "秒杀", "包邮", "块钱", "只要", "原价", "到手",
+    "20块", "长20", "便宜", "多少钱", "加购", "下单", "小黄车", "购物车",
+    "号链接", "弹窗", "福袋", "拍下", "库存", "满减", "凑单",
+)
 
 
 def _has_any(text: str, words: tuple[str, ...]) -> bool:
@@ -62,6 +67,9 @@ def classify(text: str) -> str:
     filler = _has_any(t, FILLER_WORDS)
     off = _has_any(t, OFFTOPIC_WORDS)
 
+    # never keep price/deal talk
+    if price:
+        return "drop"
     if off and not strong:
         return "drop"
     if size and not (strong or medium):
@@ -70,7 +78,7 @@ def classify(text: str) -> str:
         return "drop"
     if ("过一下" in t or "过一遍" in t) and not strong:
         return "drop"
-    if filler and not (strong or medium or price):
+    if filler and not (strong or medium):
         return "drop"
     if re.search(r"(穿一下|打一下).{0,8}牛仔", t) and not strong:
         return "drop"
@@ -79,8 +87,6 @@ def classify(text: str) -> str:
 
     if strong:
         return "strong"
-    if price:
-        return "price"
     if medium:
         return "medium"
     return "drop"
@@ -134,22 +140,16 @@ def filter_for_duration(
 
     strong = [u for g, u in labeled if g == "strong"]
     medium = [u for g, u in labeled if g == "medium"]
-    price = [u for g, u in labeled if g == "price"]
+    # price intentionally ignored (no price talk in cuts)
 
     # Merge first to create longer usable segments
     strong_m = merge_nearby(strong)
     medium_m = merge_nearby(medium)
-    price_m = merge_nearby(price)
 
     def total(xs: list[dict]) -> int:
         return sum(_dur(u) for u in xs)
 
     chosen: list[dict] = list(strong_m)
-    for u in price_m:
-        if total(chosen) >= max_ms:
-            break
-        if u not in chosen:
-            chosen.append(u)
 
     # fill with medium until min_ms
     medium_sorted = sorted(medium_m, key=_dur, reverse=True)
@@ -168,7 +168,7 @@ def filter_for_duration(
 
     # If still short: allow more medium from unmerged pool (individual lines)
     if total(chosen) < min_ms:
-        for u in sorted(medium + strong + price, key=_dur, reverse=True):
+        for u in sorted(medium + strong, key=_dur, reverse=True):
             if total(chosen) >= min_ms:
                 break
             if all(abs(int(u.get("t0_ms", 0)) - int(c.get("t0_ms", 0))) > 200 for c in chosen):

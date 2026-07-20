@@ -59,10 +59,29 @@ def extract_wav(video: Path, wav: Path) -> None:
         raise RuntimeError(f"ffmpeg extract failed: {(p.stderr or '')[-800:]}")
 
 
+def resolve_local_model() -> str:
+    """Prefer explicit path / pointer file / default local download dir."""
+    env = (os.environ.get("CLIPPER_LOCAL_WHISPER_MODEL") or "").strip()
+    if env and (Path(env).exists() or env in {
+        "tiny", "base", "small", "medium", "large-v2", "large-v3", "turbo",
+        "tiny.en", "base.en", "small.en", "medium.en",
+    }):
+        return env
+    pointer = Path(__file__).resolve().parent / "local_whisper_model_path.txt"
+    if pointer.exists():
+        p = pointer.read_text(encoding="utf-8").strip()
+        if p and Path(p).exists():
+            return p
+    default_dir = Path(r"C:\Users\MR\AppData\grok\models\whisper-tiny")
+    if default_dir.exists() and (default_dir / "model.bin").exists():
+        return str(default_dir)
+    return "tiny"
+
+
 def asr_local(wav: Path) -> list[dict]:
     from faster_whisper import WhisperModel
 
-    model_size = (os.environ.get("CLIPPER_LOCAL_WHISPER_MODEL") or "tiny").strip()
+    model_size = resolve_local_model()
     # Optional mirror for first download only
     if "HF_ENDPOINT" not in os.environ:
         os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"

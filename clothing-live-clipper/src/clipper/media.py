@@ -221,42 +221,47 @@ def concat_segments(
         except Exception:
             durs.append(1.0)
 
-    # use xfade only if every clip longer than 2*crossfade
-    cf = max(0.06, min(crossfade_s, 0.20))
-    can_xfade = all(d > cf * 2.2 for d in durs)
-
-    if can_xfade and len(segment_paths) <= 40:
-        try:
-            return _concat_xfade(segment_paths, durs, out_mp4, cf)
-        except FFmpegError:
-            # fallback below
-            pass
+    # xfade disabled by default: multi-clip graphs often produce wrong duration.
+    # Edge fades on each part already soften hard cuts.
+    if crossfade_s and crossfade_s > 0.01 and len(segment_paths) <= 12:
+        cf = max(0.06, min(float(crossfade_s), 0.20))
+        can_xfade = all(d > cf * 2.2 for d in durs)
+        if can_xfade:
+            try:
+                return _concat_xfade(segment_paths, durs, out_mp4, cf)
+            except FFmpegError:
+                pass
 
     return _concat_demuxer(segment_paths, out_mp4)
 
 
 def _concat_demuxer(segment_paths: list[Path], out_mp4: Path) -> Path:
+    """Reliable full-length join: pairwise concat filter (avoids demuxer/graph bugs)."""
     ffmpeg = require_ffmpeg()
-    with tempfile.TemporaryDirectory(prefix="clipper_concat_") as td:
-        list_file = Path(td) / "list.txt"
-        lines = []
-        for p in segment_paths:
-            ap = p.resolve().as_posix().replace("'", r"'\''")
-            lines.append(f"file '{ap}'")
-        list_file.write_text("\n".join(lines), encoding="utf-8")
+    if not segment_paths:
+        raise FFmpegError("no segments")
+    if len(segment_paths) == 1:
+        shutil.copy2(segment_paths[0], out_mp4)
+        return out_mp4
+
+    def _pair_concat(a: Path, b: Path, dest: Path) -> None:
         cmd = [
             ffmpeg,
             "-y",
-            "-f",
-            "concat",
-            "-safe",
-            "0",
             "-i",
-            str(list_file),
+            str(a),
+            "-i",
+            str(b),
+            "-filter_complex",
+            "[0:v][0:a][1:v][1:a]concat=n=2:v=1:a=1[v][a]",
+            "-map",
+            "[v]",
+            "-map",
+            "[a]",
             "-c:v",
             "libx264",
             "-preset",
-            "veryfast",
+            "ultrafast",
             "-crf",
             "20",
             "-pix_fmt",
@@ -271,9 +276,18 @@ def _concat_demuxer(segment_paths: list[Path], out_mp4: Path) -> Path:
             "2",
             "-movflags",
             "+faststart",
-            str(out_mp4),
+            str(dest),
         ]
         run_cmd(cmd)
+
+    with tempfile.TemporaryDirectory(prefix="clipper_pair_") as td:
+        td_path = Path(td)
+        cur = segment_paths[0]
+        for i, nxt in enumerate(segment_paths[1:], start=1):
+            dest = td_path / f"join_{i:03d}.mp4"
+            _pair_concat(cur, nxt, dest)
+            cur = dest
+        shutil.copy2(cur, out_mp4)
     return out_mp4
 
 
@@ -432,8 +446,8 @@ def render_plan(
         work_dir = out_mp4.parent / "_parts"
     work_dir = Path(work_dir)
     if work_dir.exists():
-        # clean old parts to avoid stale joins
-        for old in work_dir.glob("part_*.mp4"):
+        # clean ALL intermediate files (parts + joined) to avoid stale short joins
+        for old in work_dir.glob("*.mp4"):
             try:
                 old.unlink()
             except OSError:
@@ -464,10 +478,10 @@ def render_plan(
     if abs(speed - 1.0) > 0.01:
         joined = work_dir / "_joined_1x.mp4"
 
-    if smooth and len(parts) >= 2:
-        concat_segments(parts, joined, crossfade_s=crossfade_s)
-    else:
-        concat_segments(parts, joined, crossfade_s=0.0)
+    # Always use concat demuxer for full duration fidelity.
+    # Per-clip edge fades already smooth joins; multi-clip xfade graphs
+    # frequently collapse duration when part count is large.
+    concat_segments(parts, joined, crossfade_s=0.0)
 
     if abs(speed - 1.0) > 0.01:
         apply_playback_speed(joined, out_mp4, speed=speed)

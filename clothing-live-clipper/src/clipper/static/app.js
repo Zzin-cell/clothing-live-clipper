@@ -65,7 +65,7 @@ function renderStatus(st) {
   if (banner) {
     banner.hidden = false;
     banner.innerHTML =
-      "Web 只负责提交。上传后状态为<strong>排队中</strong>，请在 Agent 对话发送：<code>处理队列</code>";
+      "输入<strong>只要视频</strong>。上传后<strong>排队中</strong>，请在 Agent 对话发送：<code>处理队列</code>";
   }
 
   const el = $("health");
@@ -477,17 +477,8 @@ async function showJob(jobId) {
 
 function setupForm() {
   const form = $("job-form");
-  const useSample = $("use_sample");
-  const transcript = $("transcript");
   const err = $("form-error");
   const btn = $("submit-btn");
-
-  if (useSample && transcript) {
-    useSample.addEventListener("change", () => {
-      transcript.disabled = useSample.checked;
-      if (useSample.checked) transcript.value = "";
-    });
-  }
 
   form.addEventListener("submit", async (e) => {
     e.preventDefault();
@@ -497,26 +488,16 @@ function setupForm() {
     btn.textContent = "上传中…";
 
     try {
+      const video = $("video");
+      if (!video.files || !video.files[0]) {
+        throw new Error("请选择直播视频（唯一输入）");
+      }
+
       const fd = new FormData();
-      fd.append("use_sample", useSample && useSample.checked ? "true" : "false");
+      fd.append("video", video.files[0]);
       fd.append("target_seconds", $("target_seconds").value || "60");
       fd.append("render", $("render").checked ? "true" : "false");
       fd.append("mode", "agent");
-
-      const video = $("video");
-      const hasVideo = !!(video.files && video.files[0]);
-      const hasTranscript = !!(transcript && transcript.files && transcript.files[0]);
-
-      if (!hasVideo && !(useSample && useSample.checked) && !hasTranscript) {
-        throw new Error("请上传直播视频");
-      }
-
-      if (hasVideo) {
-        fd.append("video", video.files[0]);
-      }
-      if (transcript && !(useSample && useSample.checked) && hasTranscript) {
-        fd.append("transcript", transcript.files[0]);
-      }
 
       const res = await fetch("/api/jobs", { method: "POST", body: fd });
       const data = await res.json().catch(() => ({}));
@@ -530,7 +511,7 @@ function setupForm() {
       err.textContent = String(ex.message || ex);
     } finally {
       btn.disabled = false;
-      btn.textContent = "上传并排队";
+      btn.textContent = "上传视频并排队";
     }
   });
 }

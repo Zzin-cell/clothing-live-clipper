@@ -377,140 +377,47 @@ def create_app() -> FastAPI:
 
     @app.post("/api/jobs")
     async def create_job(
-        transcript: UploadFile | None = File(default=None),
         video: UploadFile | None = File(default=None),
-        use_sample: bool = Form(default=False),
         target_seconds: int = Form(default=60),
         render: bool = Form(default=True),
-        mode: str = Form(default="agent"),
     ) -> dict[str, Any]:
-        """Default mode=agent: queue only. mode=local: legacy in-process pipeline."""
+        """Video-only intake: save file and queue for Agent skill worker."""
         target_seconds = int(target_seconds)
         if target_seconds < 15 or target_seconds > 180:
             raise HTTPException(status_code=400, detail="target_seconds must be 15-180")
-        mode = (mode or "agent").strip().lower()
-        if mode not in {"agent", "local"}:
-            mode = "agent"
+
+        if video is None or not video.filename:
+            raise HTTPException(status_code=400, detail="请上传直播视频（唯一输入）")
+
+        suffix = Path(video.filename).suffix.lower()
+        if suffix not in ALLOWED_VIDEO:
+            raise HTTPException(status_code=400, detail=f"视频格式不支持: {suffix}")
 
         job_id = datetime.now().strftime("%Y%m%d_%H%M%S") + "_" + uuid.uuid4().hex[:8]
         d = _job_dir(job_id)
         uploads = d / "uploads"
         uploads.mkdir(parents=True, exist_ok=True)
 
+        video_path = uploads / _safe_name(video.filename, f"video{suffix}")
+        try:
+            await _save_upload(video, video_path)
+        except Exception as e:  # noqa: BLE001
+            raise HTTPException(status_code=500, detail=f"保存视频失败: {e}") from e
+
         meta: dict[str, Any] = {
             "job_id": job_id,
             "status": "queued",
             "created_at": _utc_now(),
             "target_seconds": target_seconds,
-            "render_requested": render,
+            "render_requested": bool(render),
             "error": None,
-            "has_video": False,
+            "has_video": True,
             "has_final": False,
-            "process_mode": mode,
-            "user_hint": "在 Agent 对话发送：处理队列",
+            "process_mode": "agent",
+            "video_source": video.filename,
+            "queue_hint": "在 Agent 对话发送：处理队列",
+            "user_hint": "输入只要视频；口播打轴由 Agent skill 完成",
         }
-        _write_meta(d, meta)
-
-        try:
-            transcript_path: Path | None = None
-            if use_sample:
-                if not SAMPLE_TRANSCRIPT.exists():
-                    raise HTTPException(status_code=500, detail="sample transcript missing")
-                transcript_path = uploads / "transcript.json"
-                shutil.copy2(SAMPLE_TRANSCRIPT, transcript_path)
-                meta["transcript_source"] = "sample"
-            elif transcript is not None and transcript.filename:
-                suffix = Path(transcript.filename).suffix.lower()
-                if suffix not in ALLOWED_TRANSCRIPT:
-                    raise HTTPException(
-                        status_code=400, detail="转写仅支持 .json / .srt"
-                    )
-                transcript_path = uploads / _safe_name(transcript.filename, "transcript.json")
-                if transcript_path.suffix.lower() not in ALLOWED_TRANSCRIPT:
-                    transcript_path = uploads / f"transcript{suffix}"
-                await _save_upload(transcript, transcript_path)
-                meta["transcript_source"] = transcript.filename
-
-            video_path: Path | None = None
-            if video is not None and video.filename:
-                suffix = Path(video.filename).suffix.lower()
-                if suffix not in ALLOWED_VIDEO:
-                    raise HTTPException(
-                        status_code=400,
-                        detail=f"视频格式不支持: {suffix}",
-                    )
-                video_path = uploads / _safe_name(video.filename, f"video{suffix}")
-                await _save_upload(video, video_path)
-                meta["video_source"] = video.filename
-                meta["has_video"] = True
-            else:
-                meta["video_source"] = None
-
-            has_tr = transcript_path is not None
-            has_vid = video_path is not None
-
-            if not has_tr and not has_vid:
-                raise HTTPException(
-                    status_code=400,
-                    detail="请上传直播视频",
-                )
-
-            # ---- Default: agent queue (Web does not run Whisper/pipeline) ----
-            if mode == "agent" and has_vid and not use_sample:
-                meta["status"] = "queued"
-                meta["process_mode"] = "agent"
-                meta["queue_hint"] = "在 Agent 对话发送：处理队列"
-                meta["has_final"] = False
-                _write_meta(d, meta)
-                return get_job(job_id)
-
-            # ---- Local debug path (optional): needs transcript or sample ----
-            if mode == "agent" and use_sample and not has_vid:
-                # sample demo without video still can run local plan
-                mode = "local"
-
-            if not has_tr or transcript_path is None:
-                raise HTTPException(
-                    status_code=400,
-                    detail="本地模式需要转写或示例；默认请只上传视频并用 Agent 处理队列",
-                )
-
-            meta["status"] = "processing"
-            meta["process_mode"] = "local"
-            _write_meta(d, meta)
-
-            do_render = bool(render and video_path is not None)
-            settings = _settings_for_target(target_seconds)
-            result = run_pipeline(
-                video=video_path,
-                transcript_path=transcript_path,
-                out_dir=d,
-                settings=settings,
-                render=do_render,
-            )
-            status = _status_from_result(result)
-            _apply_result_meta(meta, result, has_vid=has_vid, status=status)
-            meta["transcript_source"] = meta.get("transcript_source") or "upload"
-        except HTTPException as he:
-            if meta.get("status") not in {
-                "queued",
-                "claimed",
-                "success",
-                "success_partial",
-            }:
-                meta["status"] = "failed"
-                meta["finished_at"] = _utc_now()
-                if he.detail and not meta.get("error"):
-                    meta["error"] = str(he.detail)
-                _write_meta(d, meta)
-            raise
-        except Exception as e:  # noqa: BLE001 - surface to UI
-            meta["status"] = "failed"
-            meta["error"] = str(e)
-            meta["finished_at"] = _utc_now()
-            _write_meta(d, meta)
-            raise HTTPException(status_code=500, detail=str(e)) from e
-
         _write_meta(d, meta)
         return get_job(job_id)
 

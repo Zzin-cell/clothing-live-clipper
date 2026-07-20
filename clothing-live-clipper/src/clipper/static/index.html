@@ -140,7 +140,7 @@
               <label class="row-field">
                 <span class="row-label">
                   <span class="row-title">直播视频</span>
-                  <span class="row-sub">必填 · 上传后进入排队</span>
+                  <span class="row-sub">唯一输入 · 上传后进入排队</span>
                 </span>
                 <input type="file" name="video" id="video" accept="video/*,.mp4,.mov,.mkv,.webm" required />
               </label>
@@ -163,31 +163,11 @@
               </label>
             </div>
 
-            <details class="advanced">
-              <summary>高级选项（一般不用）</summary>
-              <div class="inset-group" style="margin-top:12px">
-                <label class="row-field">
-                  <span class="row-label">
-                    <span class="row-title">手动口播稿</span>
-                    <span class="row-sub">可选覆盖自动听写 · json/srt</span>
-                  </span>
-                  <input type="file" name="transcript" id="transcript" accept=".json,.srt,application/json,text/plain" />
-                </label>
-                <label class="row-field toggle-row">
-                  <span class="row-label">
-                    <span class="row-title">示例口播</span>
-                    <span class="row-sub">无视频时的演示</span>
-                  </span>
-                  <input type="checkbox" name="use_sample" id="use_sample" class="ios-toggle" />
-                </label>
-              </div>
-            </details>
-
-            <div id="setup-banner" class="setup-banner" hidden>
-              请先点右上角 <strong>设置</strong> 填写 API Key 并自检 Whisper，再上传视频。
+            <div id="setup-banner" class="setup-banner">
+              输入只要<strong>视频</strong>。口播打轴与切片由 Agent skill 完成：对话发送 <code>处理队列</code>
             </div>
-            <button type="submit" id="submit-btn" class="btn primary">上传并排队</button>
-            <p class="hint" id="form-hint">上传成功后，请在 Agent 对话发送「处理队列」。处理完成后点刷新查看预览与下载。</p>
+            <button type="submit" id="submit-btn" class="btn primary">上传视频并排队</button>
+            <p class="hint" id="form-hint">不需要口播稿/转写。上传成功后到 Agent 对话发送「处理队列」，再回本页刷新查看结果。</p>
             <p class="error" id="form-error" hidden></p>
           </form>
         </section>

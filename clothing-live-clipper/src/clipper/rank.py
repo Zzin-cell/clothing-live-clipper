@@ -220,6 +220,44 @@ def _is_pure_filler(c: Clip) -> bool:
     return False
 
 
+_HOOK_FEATURE_WORDS = (
+    "显瘦", "遮肉", "遮胯", "不透", "柔软", "超软", "软到", "软的", "百搭",
+    "闭眼入", "垂感", "弹力", "不起球", "透气", "显白", "收腰", "修身",
+    "面料", "布料", "材质", "天丝", "醋酸", "凉感", "蕾丝", "雷丝",
+    "破洞", "牛仔", "版型", "高腰", "梨形",
+)
+
+
+def _hook_strength(c: Clip) -> float:
+    """How strongly this clip belongs in first ~20s (features/selling first)."""
+    types = set(c.claim_types)
+    text = c.text or ""
+    s = 0.0
+    if ClaimType.SELLING_POINT in types:
+        s += 50.0
+    if ClaimType.FIT in types:
+        s += 28.0
+    if ClaimType.FABRIC in types:
+        s += 30.0
+    if ClaimType.DETAIL in types:
+        s += 12.0
+    # text features even if ASR typing missed claim tags
+    hits = sum(1 for w in _HOOK_FEATURE_WORDS if w in text)
+    s += min(36.0, hits * 8.0)
+    # combo: selling + structure/material
+    if ClaimType.SELLING_POINT in types and (ClaimType.FIT in types or ClaimType.FABRIC in types):
+        s += 20.0
+    if any(w in text for w in ("不透", "显瘦", "遮肉", "软到", "超级软", "面料")):
+        s += 15.0
+    # demote pure vague 好看 / try-on without feature
+    if "好看" in text and hits == 0 and ClaimType.SELLING_POINT not in types:
+        s -= 20.0
+    if re.search(r"穿一下|打一下", text) and hits == 0:
+        s -= 15.0
+    s += c.score * 0.35
+    return s
+
+
 def _primary_stage(c: Clip) -> int:
     """Narrative stage index (logic order). Lower = earlier in story after hook."""
     types = set(c.claim_types)
@@ -227,7 +265,9 @@ def _primary_stage(c: Clip) -> int:
     # 0 hook-ish: selling + fabric/fit combo feel
     if ClaimType.SELLING_POINT in types and (ClaimType.FABRIC in types or ClaimType.FIT in types):
         return 0
-    if ClaimType.SELLING_POINT in types:
+    if ClaimType.SELLING_POINT in types or any(
+        w in text for w in ("显瘦", "遮肉", "不透", "软到", "超级软", "闭眼入")
+    ):
         return 0
     if ClaimType.FIT in types:
         return 1
@@ -264,13 +304,16 @@ def _pick_logical(
     dedupe_threshold: float = 0.72,
     logic_over_dedupe: bool = True,
     chronological_bias: float = 0.35,
+    feature_first: bool = False,
+    time_chain: bool = False,
 ) -> list[PlanSlot]:
     """
     Pick clips with:
     1) narrative stage / preferred types (logic)
-    2) score
-    3) soft near-duplicate penalty (logic > hard non-repeat)
-    4) light chronological continuity within section
+    2) feature-first boost for golden 20s
+    3) score
+    4) soft near-duplicate penalty (logic > hard non-repeat)
+    5) stronger chronological continuity to reduce jump-cut feel
     """
     slots: list[PlanSlot] = []
     remaining = budget_ms
@@ -281,6 +324,7 @@ def _pick_logical(
     stage_pref = set(prefer_stages or [])
     selected_texts: list[str] = []
     last_t0: int | None = None
+    last_t1: int | None = None
 
     while remaining > 200 and pool:
         best: Clip | None = None
@@ -292,45 +336,61 @@ def _pick_logical(
 
             types = set(c.claim_types)
             stage = _primary_stage(c)
-            type_boost = 100.0 if prefer_types and (types & prefer_types) else 0.0
-            stage_boost = 40.0 if stage in stage_pref else 0.0
+            type_boost = 120.0 if prefer_types and (types & prefer_types) else 0.0
+            stage_boost = 45.0 if stage in stage_pref else 0.0
+            feature_boost = _hook_strength(c) if (feature_first or role == "hook") else 0.0
 
-            # soft dedupe: high similarity penalizes but does not hard-ban if needed for logic/duration
+            # soft dedupe
             sim = 0.0
             for prev in selected_texts:
                 sim = max(sim, _similarity(c.text, prev))
             if sim >= 0.95:
-                # almost exact repeat: only allow if remaining still large and logic needs it
                 if not logic_over_dedupe or remaining < 8000:
                     continue
                 dedupe_pen = 80.0
             elif sim >= dedupe_threshold:
-                dedupe_pen = 25.0 + 40.0 * sim  # soft
+                dedupe_pen = 25.0 + 40.0 * sim
             else:
                 dedupe_pen = sim * 12.0
 
-            # chronological continuity: prefer next-in-time after previous pick
+            # chronological continuity (stronger when time_chain)
             chrono = 0.0
-            if last_t0 is not None:
+            bias = chronological_bias * (1.7 if time_chain else 1.0)
+            if last_t1 is not None:
+                gap = c.t0_ms - last_t1
+                # prefer next nearby segment (like continuous live talk)
+                if 0 <= gap <= 8000:
+                    chrono = bias * 55.0
+                elif 0 <= gap <= 25000:
+                    chrono = bias * 35.0 * (1.0 - gap / 25000.0)
+                elif 0 <= gap <= 60000:
+                    chrono = bias * 12.0 * (1.0 - gap / 60000.0)
+                elif gap < 0:
+                    # jumping backward feels edited
+                    chrono = -22.0 if time_chain else -10.0
+                else:
+                    chrono = -6.0 if time_chain else -2.0
+            elif last_t0 is not None:
                 delta = c.t0_ms - last_t0
                 if 0 <= delta <= 45000:
-                    chrono = chronological_bias * (1.0 - min(delta, 45000) / 45000.0) * 30.0
+                    chrono = bias * (1.0 - min(delta, 45000) / 45000.0) * 30.0
                 elif delta < 0:
-                    chrono = -8.0  # jumping backward is less logical mid-section
+                    chrono = -10.0
 
-            # role-specific stage pressure
-            if role == "hook" and stage <= 2:
-                stage_boost += 20.0
+            if role == "hook":
+                # features MUST dominate first 20s
+                stage_boost += 35.0 if stage <= 2 else -25.0
+                feature_boost *= 1.35
             if role == "trust" and 1 <= stage <= 4:
                 stage_boost += 15.0
-            if role == "cta" and stage >= 4:
-                stage_boost += 25.0
+            if role == "cta" and stage <= 2:
+                stage_boost += 20.0  # recap features, not price
 
             key = (
-                type_boost + stage_boost + c.score + chrono - dedupe_pen,
-                -stage if role != "cta" else stage,  # earlier stages first except CTA
+                feature_boost + type_boost + stage_boost + c.score + chrono - dedupe_pen,
+                -stage if role != "cta" else stage,
                 c.weight,
-                -abs((last_t0 or c.t0_ms) - c.t0_ms),
+                -abs((last_t1 or last_t0 or c.t0_ms) - c.t0_ms),
             )
             if best is None or key > best_key:  # type: ignore[operator]
                 best = c
@@ -339,9 +399,7 @@ def _pick_logical(
         if best is None:
             break
 
-        # if highly similar to last clip and we still have alternatives later, skip once
         if selected_texts and _similarity(best.text, selected_texts[-1]) >= 0.88:
-            # try find alternative with lower sim
             alt = None
             alt_key = None
             for c in pool:
@@ -351,20 +409,29 @@ def _pick_logical(
                     continue
                 if _similarity(c.text, selected_texts[-1]) >= 0.88:
                     continue
+                # keep time continuity when replacing
+                if last_t1 is not None and time_chain:
+                    gap = c.t0_ms - last_t1
+                    if gap < -5000 or gap > 90000:
+                        continue
                 types = set(c.claim_types)
                 type_boost = 100.0 if prefer_types and (types & prefer_types) else 0.0
-                k = (type_boost + c.score, c.weight)
+                k = (
+                    (_hook_strength(c) if feature_first or role == "hook" else 0.0)
+                    + type_boost
+                    + c.score,
+                    c.weight,
+                )
                 if alt is None or k > alt_key:  # type: ignore[operator]
                     alt, alt_key = c, k
-            if alt is not None and logic_over_dedupe:
-                # only replace if alt isn't much weaker
-                if alt.score >= best.score * 0.55:
-                    best = alt
+            if alt is not None and logic_over_dedupe and alt.score >= best.score * 0.50:
+                best = alt
 
         slots.append(_to_slot(best, role))
         used.add(best.clip_id)
         selected_texts.append(best.text)
         last_t0 = best.t0_ms
+        last_t1 = best.t1_ms
         remaining -= best.duration_ms
         pool = [c for c in pool if c.clip_id not in used]
 
@@ -401,17 +468,17 @@ def _reorder_section_logical(slots: list[PlanSlot], by_id: dict[str, Clip], role
         )
 
     if role == "hook":
-        # best hook content first (score), but group fabric/selling before weak lines
+        # strongest features first in front 20s; within same strength keep time order
         return sorted(
             slots,
             key=lambda s: (
+                -(_hook_strength(by_id[s.clip_id]) if s.clip_id in by_id else s.score),
                 stage_of(s),
-                -(by_id[s.clip_id].score if s.clip_id in by_id else s.score),
                 s.t0_ms,
             ),
         )
 
-    # trust: stage ascending, within stage chronological for logic
+    # trust/body: stage then chronological (less jump-cut)
     return sorted(slots, key=lambda s: (stage_of(s), s.t0_ms))
 
 
@@ -437,21 +504,52 @@ def build_timeline_plan(
     if abs(speed - 1.0) > 0.01:
         warnings.append(f"source_select_for_speed={speed:.2f}x")
 
-    # --- Golden: strongest product hook, logical mini-arc ---
-    golden = _pick_logical(
-        scored,
-        golden_ms,
-        used,
-        role="hook",
-        prefer_types={
-            ClaimType.SELLING_POINT,
-            ClaimType.FIT,
-            ClaimType.FABRIC,
-        },
-        prefer_stages={0, 1, 2},
-        dedupe_threshold=0.70,
-        logic_over_dedupe=True,
-        chronological_bias=0.25,
+    # --- Golden (~front 20s final): FORCE features/selling first ---
+    # Seed with absolute top feature clips, then fill with nearby logical talk.
+    golden: list[PlanSlot] = []
+    feature_pool = sorted(
+        [c for c in scored if not _is_pure_filler(c) and c.score > 0],
+        key=_hook_strength,
+        reverse=True,
+    )
+    # take top feature seeds first (1–3)
+    seed_budget = int(golden_ms * 0.72)
+    seed_used = 0
+    for c in feature_pool:
+        if seed_used >= seed_budget:
+            break
+        if c.clip_id in used:
+            continue
+        if any(p in (c.text or "") for p in _PRICE_TEXT) or ClaimType.PRICE in c.claim_types:
+            continue
+        if _hook_strength(c) < 25 and golden:
+            break
+        golden.append(_to_slot(c, "hook"))
+        used.add(c.clip_id)
+        seed_used += c.duration_ms
+        if len(golden) >= 4:
+            break
+
+    remain_g = max(0, golden_ms - sum(s.t1_ms - s.t0_ms for s in golden))
+    golden.extend(
+        _pick_logical(
+            scored,
+            remain_g,
+            used,
+            role="hook",
+            prefer_types={
+                ClaimType.SELLING_POINT,
+                ClaimType.FIT,
+                ClaimType.FABRIC,
+                ClaimType.DETAIL,
+            },
+            prefer_stages={0, 1, 2},
+            dedupe_threshold=0.70,
+            logic_over_dedupe=True,
+            chronological_bias=0.55,
+            feature_first=True,
+            time_chain=True,
+        )
     )
     golden = _reorder_section_logical(golden, by_id, "hook")
     golden = [
@@ -464,8 +562,17 @@ def build_timeline_plan(
     ]
     if not golden:
         warnings.append("no_golden_clips")
+    else:
+        # ensure first clip is the strongest feature available in golden
+        golden = sorted(
+            golden,
+            key=lambda s: (
+                -(_hook_strength(by_id[s.clip_id]) if s.clip_id in by_id else s.score),
+                s.t0_ms,
+            ),
+        )
 
-    # --- CTA: NO price. Closing = strongest remaining selling / fabric recap ---
+    # --- CTA: NO price. Closing = remaining selling / fabric recap ---
     cta: list[PlanSlot] = []
     cta.extend(
         _pick_logical(
@@ -477,11 +584,12 @@ def build_timeline_plan(
             prefer_stages={0, 2, 1},
             dedupe_threshold=0.75,
             logic_over_dedupe=True,
-            chronological_bias=0.2,
+            chronological_bias=0.35,
+            feature_first=True,
+            time_chain=True,
         )
     )
     cta = _reorder_section_logical(cta, by_id, "cta")
-    # strip any price that slipped through
     cta = [
         s
         for s in cta
@@ -491,7 +599,7 @@ def build_timeline_plan(
         )
     ]
 
-    # --- Trust: expand fabric → detail → outfit, soft dedupe, time flow ---
+    # --- Trust: expand fabric → detail → outfit; stronger time chain ---
     trust = _pick_logical(
         scored,
         trust_ms,
@@ -508,7 +616,9 @@ def build_timeline_plan(
         prefer_stages={2, 3, 1, 4},
         dedupe_threshold=0.68,
         logic_over_dedupe=True,
-        chronological_bias=0.45,
+        chronological_bias=0.65,
+        feature_first=False,
+        time_chain=True,
     )
     trust = _reorder_section_logical(trust, by_id, "trust")
 
@@ -537,7 +647,9 @@ def build_timeline_plan(
             prefer_stages={2, 3, 4, 1, 0},
             dedupe_threshold=0.80,  # looser when filling duration (logic/duration > strict uniqueness)
             logic_over_dedupe=True,
-            chronological_bias=0.5,
+            chronological_bias=0.7,
+            feature_first=False,
+            time_chain=True,
         )
         if not extra:
             leftover = [c for c in scored if c.clip_id not in used and c.score > 0 and not _is_pure_filler(c)]

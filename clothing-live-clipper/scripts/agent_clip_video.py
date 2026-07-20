@@ -121,60 +121,12 @@ def asr_local(wav: Path) -> list[dict]:
     return out
 
 
-def keep_line(text: str) -> bool:
-    """Only keep clothing-related product talk. Drop livestream filler & offtopic."""
-    t = text.strip()
-    if not t:
-        return False
-
-    strong = (
-        "面料", "布料", "材质", "牛仔", "牛仔裤", "显瘦", "遮肉", "收腰", "修身",
-        "版型", "不透", "柔软", "超软", "软的", "蕾丝", "雷丝", "垂感", "弹力",
-        "醋酸", "凉感", "雪纺", "纯棉", "洗水", "上衣", "裙子", "外套", "内搭",
-        "遮胯", "高腰", "梨形", "闭眼入", "显白", "开叉", "领口", "袖口",
-    )
-    weak_only = ("搭配", "好看", "只要", "链接", "库存", "过一下", "看一下")
-    has_strong = any(w in t for w in strong)
-    has_weak = any(w in t for w in weak_only)
-    is_size = any(w in t for w in SIZE_WORDS)
-    is_sent = any(w in t for w in SENTIMENT_WORDS)
-    is_chat = any(w in t for w in CHITCHAT_WORDS)
-    is_off = any(w in t for w in OFFTOPIC_WORDS)
-
-    if is_off and not has_strong:
-        return False
-    if is_size and not has_strong:
-        return False
-    if is_sent and not has_strong:
-        return False
-    # 「过一下/看一下」类直播词：没有强服装信息就丢
-    if is_chat and not has_strong:
-        return False
-    if "过一下" in t and not has_strong:
-        return False
-    # 仅「穿一下牛仔/打一下牛仔」类试穿控场，缺少卖点信息
-    if re.search(r"(穿一下|打一下|过一下).{0,6}牛仔", t) and not any(
-        w in t for w in ("面料", "显瘦", "遮肉", "版型", "不透", "柔软", "软")
-    ):
-        return False
-    if re.search(r"不爱穿牛仔|穿牛仔很快|牛仔本身就是", t) and not any(
-        w in t for w in ("面料", "显瘦", "版型", "弹力", "不透", "软")
-    ):
-        return False
-    # 只有弱词（搭配/好看/只要）不够
-    if has_strong:
-        return True
-    if any(w in t for w in ("券后", "直播价", "专属价", "秒杀", "包邮", "块钱")):
-        return True
-    if has_weak and not has_strong:
-        return False
-    return False
-
-
 def filter_transcript(raw: list[dict]) -> list[dict]:
-    kept = [u for u in raw if keep_line(u.get("text") or "")]
-    # never fall back to keeping everything — empty means need better ASR / more product talk
-    return kept
+    """Clothing-only keep, fill toward 55–60s with medium product lines (not filler)."""
+    # local import avoids circular issues when used as library
+    from filter_transcript_v2 import filter_for_duration
+
+    return filter_for_duration(raw, target_ms=60_000, min_ms=55_000, max_ms=65_000)
 
 
 def run_clipper(video: Path, transcript: Path, out_dir: Path, seconds: int, render: bool) -> None:

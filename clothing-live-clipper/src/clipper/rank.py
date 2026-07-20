@@ -18,28 +18,50 @@ SCORE_WEIGHTS = {
 }
 
 
+_CLOTHING_TEXT_HINTS = (
+    "面料", "布料", "材质", "牛仔", "蕾丝", "雷丝", "不透", "柔软", "软到", "超软",
+    "洗水", "破洞", "天丝", "醋酸", "显瘦", "遮肉", "版型", "收腰", "上衣", "裙子",
+    "白色", "黑色", "口袋", "穿上", "上身", "这件", "这套", "裤子", "外套", "好看",
+    "推荐", "客户", "软", "弹", "不透", "拼接",
+)
+
+
 def score_clip(clip: Clip) -> Clip:
     types = set(clip.claim_types)
     breakdown: dict[str, float] = {}
     raw = 0.0
+    text = clip.text or ""
 
     if ClaimType.CHITCHAT in types and len(types) == 1:
-        clip.score = 0.0
-        clip.weight = 0.0
-        clip.score_breakdown = {"chitchat": 0.0, "raw": 0.0}
-        return clip
+        # rescue if ASR tagged wrong but clothing words present
+        if not any(h in text for h in _CLOTHING_TEXT_HINTS):
+            clip.score = 0.0
+            clip.weight = 0.0
+            clip.score_breakdown = {"chitchat": 0.0, "raw": 0.0}
+            return clip
 
     if is_chitchat_text(clip.text) and not (
         types & {ClaimType.SELLING_POINT, ClaimType.FIT, ClaimType.FABRIC, ClaimType.PRICE}
-    ):
+    ) and not any(h in text for h in _CLOTHING_TEXT_HINTS):
         clip.score = 0.0
         clip.weight = 0.0
         clip.score_breakdown = {"chitchat": 0.0, "raw": 0.0}
         return clip
 
-    # No clothing claim → score 0 (do not pad plan with filler / off-topic)
+    # No clothing claim → score 0 unless hard clothing keywords in text (ASR miss)
     content_types = {t for t in types if t != ClaimType.CHITCHAT and t != ClaimType.SIZE}
     if not content_types:
+        if any(h in text for h in _CLOTHING_TEXT_HINTS):
+            raw = 14.0
+            if len(text) >= 10:
+                raw += 3.0
+            if clip.duration_ms >= 2000:
+                raw += 3.0
+            breakdown["text_hint_rescue"] = raw
+            breakdown["raw"] = raw
+            clip.score = raw
+            clip.score_breakdown = breakdown
+            return clip
         clip.score = 0.0
         clip.weight = 0.0
         clip.score_breakdown = {"no_clothing_claim": 0.0, "raw": 0.0}
@@ -52,8 +74,8 @@ def score_clip(clip: Clip) -> Clip:
         clip.score_breakdown = {"size_only": 0.0, "raw": 0.0}
         return clip
 
-    # Outfit-only weak lines (e.g. 搭配就可以了 without fabric/fit) → drop
-    if content_types <= {ClaimType.OUTFIT}:
+    # Outfit-only weak lines without clothing hints → drop
+    if content_types <= {ClaimType.OUTFIT} and not any(h in text for h in _CLOTHING_TEXT_HINTS):
         clip.score = 0.0
         clip.weight = 0.0
         clip.score_breakdown = {"outfit_only": 0.0, "raw": 0.0}
@@ -73,20 +95,30 @@ def score_clip(clip: Clip) -> Clip:
         raw += combo
     breakdown["combo_bonus"] = combo
 
+    # text hints boost medium clothing talk so duration fill works
+    if any(h in text for h in _CLOTHING_TEXT_HINTS):
+        raw += 6.0
+        breakdown["clothing_hint"] = 6.0
+
     # specificity: has digits or material-ish length
     spec = 0.0
     if any(ch.isdigit() for ch in clip.text):
         spec += 5.0
     if len(clip.text) >= 12:
         spec += 3.0
+    if len(clip.text) >= 24:
+        spec += 4.0
     raw += spec
     breakdown["specificity"] = spec
 
-    # prefer mid-length clips slightly
+    # prefer usable durations for 55–60s packing
     dur = clip.duration_ms
-    if 1500 <= dur <= 8000:
-        raw += 3.0
-        breakdown["duration_bonus"] = 3.0
+    if 1500 <= dur <= 15000:
+        raw += 4.0
+        breakdown["duration_bonus"] = 4.0
+    elif dur > 0:
+        breakdown["duration_bonus"] = 1.0
+        raw += 1.0
     else:
         breakdown["duration_bonus"] = 0.0
 
@@ -122,10 +154,16 @@ def _pick_fill(
     remaining = budget_ms
     pool = [c for c in candidates if c.clip_id not in used and c.score > 0]
     if ban_chitchat:
+        # Only drop pure filler; keep scored clothing lines even if ASR tagged chitchat
         pool = [
             c
             for c in pool
-            if ClaimType.CHITCHAT not in c.claim_types and not is_chitchat_text(c.text)
+            if c.score > 0
+            and not (
+                ClaimType.CHITCHAT in c.claim_types
+                and len(set(c.claim_types)) == 1
+                and not any(h in (c.text or "") for h in _CLOTHING_TEXT_HINTS)
+            )
         ]
 
     def sort_key(c: Clip) -> tuple:
@@ -137,13 +175,11 @@ def _pick_fill(
     pool = sorted(pool, key=sort_key, reverse=True)
 
     for c in pool:
-        if remaining <= 400:
+        if remaining <= 200:
             break
-        # allow slight overshoot on last piece
-        if c.duration_ms > remaining + 1500 and slots:
+        # allow larger overshoot so short ASR segments can still fill 55–60s
+        if c.duration_ms > remaining + 8000 and slots:
             continue
-        take_ms = min(c.duration_ms, remaining + 1500)
-        # always use full clip timestamps from source (no intra-clip trim in MVP)
         slots.append(
             PlanSlot(
                 clip_id=c.clip_id,
@@ -241,13 +277,88 @@ def build_timeline_plan(
         prefer_types={
             ClaimType.DETAIL,
             ClaimType.FABRIC,
-            ClaimType.SIZE,
             ClaimType.SCENE,
             ClaimType.OUTFIT,
             ClaimType.FIT,
+            ClaimType.SELLING_POINT,
         },
         ban_chitchat=True,
     )
+
+    # Duration fill: if under ~55s, keep adding positive clothing clips into trust
+    min_plan = getattr(settings, "min_plan_ms", 55_000)
+    max_plan = getattr(settings, "max_plan_ms", 65_000)
+
+    def _plan_ms() -> int:
+        return sum(s.t1_ms - s.t0_ms for s in [*golden, *trust, *cta])
+
+    # multi-pass fill until 55s: take any remaining positive-score clothing clips
+    for _ in range(6):
+        if _plan_ms() >= min_plan:
+            break
+        need = max_plan - _plan_ms()
+        extra = _pick_fill(
+            scored,
+            max(need, 15000),
+            used,
+            role="trust",
+            prefer_types=None,
+            ban_chitchat=True,
+        )
+        if not extra:
+            # last resort: include any unused score>0 regardless of role preference
+            leftover = [
+                c for c in scored if c.clip_id not in used and c.score > 0
+            ]
+            leftover = sorted(leftover, key=lambda c: c.score, reverse=True)
+            if not leftover:
+                break
+            for c in leftover:
+                if _plan_ms() >= min_plan:
+                    break
+                trust.append(
+                    PlanSlot(
+                        clip_id=c.clip_id,
+                        role="trust",
+                        t0_ms=c.t0_ms,
+                        t1_ms=c.t1_ms,
+                        text=c.text,
+                        score=c.score,
+                    )
+                )
+                used.add(c.clip_id)
+            break
+        trust.extend(extra)
+    if _plan_ms() < min_plan:
+        warnings.append(f"short_content_ms={_plan_ms()}")
+    if _plan_ms() > max_plan + 5000:
+        warnings.append(f"overlong_ms={_plan_ms()}")
+
+    # Soft pad clip edges to approach 55–60s without adding filler speech
+    # (expands cut windows slightly around existing product lines)
+    def _pad_slots(slots: list[PlanSlot], need_ms: int) -> None:
+        if need_ms <= 0 or not slots:
+            return
+        per = max(100, need_ms // max(1, len(slots)))
+        # cap pad per side
+        per = min(per, 800)
+        for s in slots:
+            s.t0_ms = max(0, s.t0_ms - per)
+            s.t1_ms = s.t1_ms + per
+
+    cur = _plan_ms()
+    if cur < min_plan:
+        _pad_slots([*golden, *trust, *cta], min_plan - cur + 500)
+        # second pass if still short
+        cur2 = _plan_ms()
+        if cur2 < min_plan:
+            _pad_slots([*golden, *trust, *cta], min_plan - cur2 + 500)
+        if _plan_ms() >= min_plan:
+            warnings.append("duration_edge_padded")
+        # refresh short warning
+        warnings[:] = [w for w in warnings if not str(w).startswith("short_content_ms=")]
+        if _plan_ms() < min_plan:
+            warnings.append(f"short_content_ms={_plan_ms()}")
 
     plan = TimelinePlan(
         target_duration_s=settings.target_duration_s,

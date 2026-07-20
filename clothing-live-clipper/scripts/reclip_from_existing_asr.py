@@ -7,10 +7,10 @@ import subprocess
 import sys
 from pathlib import Path
 
-# reuse filter from agent_clip_video
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
-from agent_clip_video import filter_transcript, run_clipper  # type: ignore
+from filter_transcript_v2 import filter_for_duration  # type: ignore
+from agent_clip_video import run_clipper  # type: ignore
 
 SRC = Path(r"C:\Users\MR\Desktop\检查文件\待剪辑")
 DST = Path(r"C:\Users\MR\Desktop\检查文件\已经完成")
@@ -24,13 +24,18 @@ def process_one(name: str) -> None:
     if not asr_path.exists():
         raise SystemExit(f"missing asr: {asr_path}")
     raw = json.loads(asr_path.read_text(encoding="utf-8"))
-    kept = filter_transcript(raw)
+    kept = filter_for_duration(raw, target_ms=60_000, min_ms=55_000, max_ms=65_000)
     tr = job / "transcript_for_clipper.json"
     tr.write_text(json.dumps(kept, ensure_ascii=False, indent=2), encoding="utf-8")
-    print(name, "raw", len(raw), "kept", len(kept))
-    # show sample kept
-    for u in kept[:12]:
-        print(" ", u.get("text"))
+    kept_ms = sum(max(0, int(u["t1_ms"]) - int(u["t0_ms"])) for u in kept)
+    print(name, "raw", len(raw), "kept", len(kept), "kept_ms", kept_ms)
+    for u in kept[:20]:
+        print(" ", u.get("text"), f"({max(0,int(u['t1_ms'])-int(u['t0_ms']))}ms)")
+
+    # Also write unmerged individual kept lines for clipper scoring density
+    # if merged still short: expand by re-including non-drop singles already in kept
+    if kept_ms < 55_000:
+        print("WARN short clothing material", kept_ms, "ms — will still cut best available")
 
     env = os.environ.copy()
     env["PYTHONPATH"] = str(ROOT / "src")

@@ -515,9 +515,10 @@ def build_timeline_plan(
     min_plan = getattr(settings, "source_min_plan_ms", None)
     max_plan = getattr(settings, "source_max_plan_ms", None)
     if min_plan is None:
-        min_plan = int(round(getattr(settings, "min_plan_ms", 55_000) * speed))
+        # leave headroom for crossfades (~0.15–0.2s * cuts) before 1.3x speed
+        min_plan = int(round(getattr(settings, "min_plan_ms", 55_000) * speed * 1.08))
     if max_plan is None:
-        max_plan = int(round(getattr(settings, "max_plan_ms", 65_000) * speed))
+        max_plan = int(round(getattr(settings, "max_plan_ms", 65_000) * speed * 1.10))
 
     def _plan_ms() -> int:
         return sum(s.t1_ms - s.t0_ms for s in [*golden, *trust, *cta])

@@ -102,6 +102,9 @@ def run_pipeline(
                     segs,
                     out_dir / "final.mp4",
                     work_dir=out_dir / "_parts",
+                    smooth=True,
+                    crossfade_s=0.20,
+                    edge_fade_s=0.14,
                     playback_speed=float(speed),
                 )
             )

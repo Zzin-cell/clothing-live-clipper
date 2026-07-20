@@ -345,6 +345,71 @@ def _concat_xfade(
     return out_mp4
 
 
+def apply_playback_speed(
+    src_mp4: str | Path,
+    out_mp4: str | Path,
+    speed: float = 1.3,
+) -> Path:
+    """Speed up final video+audio. speed=1.3 → 1.3x playback, shorter duration."""
+    ffmpeg = require_ffmpeg()
+    src_mp4 = Path(src_mp4)
+    out_mp4 = Path(out_mp4)
+    if speed <= 0:
+        raise FFmpegError(f"invalid speed: {speed}")
+    if abs(speed - 1.0) < 0.01:
+        if src_mp4.resolve() != out_mp4.resolve():
+            shutil.copy2(src_mp4, out_mp4)
+        return out_mp4
+
+    # atempo only supports 0.5–2.0; chain if needed
+    def atempo_chain(sp: float) -> str:
+        filters: list[str] = []
+        rest = sp
+        # convert duration factor: playback speed S means tempo = S
+        while rest > 2.0 + 1e-6:
+            filters.append("atempo=2.0")
+            rest /= 2.0
+        while rest < 0.5 - 1e-6:
+            filters.append("atempo=0.5")
+            rest /= 0.5
+        filters.append(f"atempo={rest:.5f}")
+        return ",".join(filters)
+
+    vf = f"setpts=PTS/{speed:.5f}"
+    af = atempo_chain(speed)
+    cmd = [
+        ffmpeg,
+        "-y",
+        "-i",
+        str(src_mp4),
+        "-filter:v",
+        vf,
+        "-filter:a",
+        af,
+        "-c:v",
+        "libx264",
+        "-preset",
+        "veryfast",
+        "-crf",
+        "20",
+        "-pix_fmt",
+        "yuv420p",
+        "-c:a",
+        "aac",
+        "-b:a",
+        "160k",
+        "-ar",
+        "44100",
+        "-ac",
+        "2",
+        "-movflags",
+        "+faststart",
+        str(out_mp4),
+    ]
+    run_cmd(cmd)
+    return out_mp4
+
+
 def render_plan(
     video: str | Path,
     segments: list[tuple[int, int]],
@@ -354,8 +419,13 @@ def render_plan(
     smooth: bool = True,
     crossfade_s: float = 0.12,
     edge_fade_s: float = 0.10,
+    playback_speed: float = 1.0,
 ) -> Path:
-    """segments: list of (t0_ms, t1_ms) in output order."""
+    """segments: list of (t0_ms, t1_ms) in output order.
+
+    If playback_speed != 1, select/cut at source speed first, then speed the
+    joined file so final duration ≈ source_duration / playback_speed.
+    """
     video = Path(video)
     out_mp4 = Path(out_mp4)
     if work_dir is None:
@@ -371,11 +441,8 @@ def render_plan(
     work_dir.mkdir(parents=True, exist_ok=True)
 
     tw, th = _probe_stream_size(video)
-    # normalize vertical-ish social size while keeping source aspect via pad
-    # if landscape, still pad to source box
     parts: list[Path] = []
     for i, (t0, t1) in enumerate(segments):
-        # tiny expand already done in ranking pad; ensure min length for fades
         if t1 - t0 < 200:
             t1 = t0 + 200
         part = work_dir / f"part_{i:03d}.mp4"
@@ -392,6 +459,16 @@ def render_plan(
         )
         parts.append(part)
 
+    joined = out_mp4
+    speed = playback_speed if playback_speed and playback_speed > 0 else 1.0
+    if abs(speed - 1.0) > 0.01:
+        joined = work_dir / "_joined_1x.mp4"
+
     if smooth and len(parts) >= 2:
-        return concat_segments(parts, out_mp4, crossfade_s=crossfade_s)
-    return concat_segments(parts, out_mp4, crossfade_s=0.0)
+        concat_segments(parts, joined, crossfade_s=crossfade_s)
+    else:
+        concat_segments(parts, joined, crossfade_s=0.0)
+
+    if abs(speed - 1.0) > 0.01:
+        apply_playback_speed(joined, out_mp4, speed=speed)
+    return out_mp4

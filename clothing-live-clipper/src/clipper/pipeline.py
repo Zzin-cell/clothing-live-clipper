@@ -57,16 +57,20 @@ def run_pipeline(
     )
 
     # human review
+    speed = float(getattr(settings, "playback_speed", 1.0) or 1.0)
+    est_final_s = (plan.total_duration_ms / 1000.0) / speed if speed > 0 else plan.total_duration_ms / 1000.0
     review_lines = [
         f"# Clip review",
         f"",
-        f"- target: {settings.target_duration_s}s",
-        f"- plan total: {plan.total_duration_ms/1000:.1f}s",
+        f"- target_final: {settings.target_duration_s}s",
+        f"- playback_speed: {speed:.2f}x",
+        f"- source_plan: {plan.total_duration_ms/1000:.1f}s",
+        f"- estimated_final: {est_final_s:.1f}s",
         f"- golden20_passed: {plan.golden20_passed}",
         f"- golden_weight_ratio: {plan.golden_weight_ratio:.2f}",
         f"- warnings: {', '.join(plan.warnings) if plan.warnings else '(none)'}",
         f"",
-        f"## Golden (0-20s)",
+        f"## Golden (source, ~0-{int(settings.golden_s * speed)}s before speed → ~0-20s final)",
     ]
     for s in plan.golden:
         review_lines.append(f"- [{s.t0_ms}-{s.t1_ms}] ({s.score:.0f}) {s.text}")
@@ -91,14 +95,18 @@ def run_pipeline(
             meta["render_error"] = "empty plan"
         else:
             segs = [(s.t0_ms, s.t1_ms) for s in plan.all_slots()]
+            speed = getattr(settings, "playback_speed", 1.3) or 1.0
             output_mp4 = str(
                 render_plan(
                     video,
                     segs,
                     out_dir / "final.mp4",
                     work_dir=out_dir / "_parts",
+                    playback_speed=float(speed),
                 )
             )
+            meta["playback_speed"] = float(speed)
+            meta["source_plan_ms"] = int(plan.total_duration_ms)
     elif render and not video:
         meta["render_skipped"] = True
         meta["render_error"] = "no video provided (plan-only mode)"

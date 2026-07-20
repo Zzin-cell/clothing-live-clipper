@@ -118,14 +118,44 @@ class Settings:
     cta_s: int = 10
     min_clip_ms: int = 500
     max_clip_ms: int = 15_000
+    # Prefer filling plan toward target; allow slight overshoot in picker
+    min_plan_ms: int = 55_000
+    max_plan_ms: int = 65_000
+    # Playback speed of final cut. Plan selects longer source so final ≈ target after speed.
+    # e.g. speed=1.3 → select ~78s source for ~60s output.
+    playback_speed: float = 1.3
     golden_weight_ratio: float = 0.60
     llm_api_key: str | None = None
     llm_base_url: str = "https://api.openai.com/v1"
     llm_model: str = "gpt-4o-mini"
 
+    @property
+    def source_select_duration_s(self) -> int:
+        """How many seconds of source timeline to select before speed-up."""
+        sp = self.playback_speed if self.playback_speed and self.playback_speed > 0 else 1.0
+        return max(self.target_duration_s, int(round(self.target_duration_s * sp)))
+
+    @property
+    def source_min_plan_ms(self) -> int:
+        sp = self.playback_speed if self.playback_speed and self.playback_speed > 0 else 1.0
+        return int(round(self.min_plan_ms * sp))
+
+    @property
+    def source_max_plan_ms(self) -> int:
+        sp = self.playback_speed if self.playback_speed and self.playback_speed > 0 else 1.0
+        return int(round(self.max_plan_ms * sp))
+
     @classmethod
     def from_env(cls) -> "Settings":
+        speed_raw = _get("CLIPPER_PLAYBACK_SPEED") or "1.3"
+        try:
+            speed = float(speed_raw)
+        except ValueError:
+            speed = 1.3
+        if speed < 0.8 or speed > 2.5:
+            speed = 1.3
         return cls(
+            playback_speed=speed,
             llm_api_key=resolve_llm_key() or None,
             llm_base_url=resolve_llm_base_url(),
             llm_model=resolve_llm_model(),

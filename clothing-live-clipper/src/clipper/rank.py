@@ -203,13 +203,21 @@ def build_timeline_plan(
     scored = score_all(clips)
     by_id = {c.clip_id: c for c in scored}
 
-    target_ms = settings.target_duration_s * 1000
-    golden_ms = settings.golden_s * 1000
-    cta_ms = settings.cta_s * 1000
+    # Select longer source timeline when final will be sped up (e.g. 1.3x → ~78s source for 60s out)
+    speed = getattr(settings, "playback_speed", 1.0) or 1.0
+    if speed < 0.8:
+        speed = 1.0
+    source_target_s = getattr(settings, "source_select_duration_s", settings.target_duration_s)
+    target_ms = int(source_target_s) * 1000
+    # scale section budgets with speed so golden still ~20s *after* speedup
+    golden_ms = int(round(settings.golden_s * 1000 * speed))
+    cta_ms = int(round(settings.cta_s * 1000 * speed))
     trust_ms = max(0, target_ms - golden_ms - cta_ms)
 
     used: set[str] = set()
     warnings: list[str] = []
+    if abs(speed - 1.0) > 0.01:
+        warnings.append(f"source_select_for_speed={speed:.2f}x")
 
     golden = _pick_fill(
         scored,
@@ -285,9 +293,13 @@ def build_timeline_plan(
         ban_chitchat=True,
     )
 
-    # Duration fill: if under ~55s, keep adding positive clothing clips into trust
-    min_plan = getattr(settings, "min_plan_ms", 55_000)
-    max_plan = getattr(settings, "max_plan_ms", 65_000)
+    # Duration fill toward source length that becomes ~55–60s after playback_speed
+    min_plan = getattr(settings, "source_min_plan_ms", None)
+    max_plan = getattr(settings, "source_max_plan_ms", None)
+    if min_plan is None:
+        min_plan = int(round(getattr(settings, "min_plan_ms", 55_000) * speed))
+    if max_plan is None:
+        max_plan = int(round(getattr(settings, "max_plan_ms", 65_000) * speed))
 
     def _plan_ms() -> int:
         return sum(s.t1_ms - s.t0_ms for s in [*golden, *trust, *cta])

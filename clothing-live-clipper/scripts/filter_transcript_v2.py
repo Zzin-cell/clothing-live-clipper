@@ -120,10 +120,11 @@ def merge_nearby(items: list[dict], *, max_gap_ms: int = 1200, max_span_ms: int 
 def filter_for_duration(
     raw: list[dict[str, Any]],
     *,
-    target_ms: int = 60_000,
-    min_ms: int = 55_000,
-    max_ms: int = 65_000,
+    target_ms: int = 78_000,
+    min_ms: int = 72_000,
+    max_ms: int = 85_000,
 ) -> list[dict[str, Any]]:
+    # Defaults assume final 1.3x → need ~78s source for ~60s output
     labeled: list[tuple[str, dict]] = []
     for u in raw:
         text = (u.get("text") or "").strip()

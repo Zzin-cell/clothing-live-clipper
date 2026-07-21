@@ -14,6 +14,8 @@ let currentJobId = null;
 let pollTimer = null;
 let planEdit = null; // {golden, trust, cta}
 let planOriginal = null;
+let asrCards = []; // left transcript editable cards
+let selectedAsr = new Set(); // selected asr indices for bulk add
 
 function escapeHtml(str) {
   return String(str ?? "")
@@ -349,13 +351,18 @@ function bindTrackEditors() {
       } catch (_) {
         return;
       }
-      const fromRole = payload.role;
-      const fromIdx = Number(payload.idx);
-      if (!planEdit?.[fromRole]?.[fromIdx]) return;
 
       const trackId = track.id; // golden-track / trust-track / cta-track
       const toRole = trackId.replace("-track", "");
       if (!TRACK_ORDER.includes(toRole)) return;
+
+      // ensure plan model exists
+      if (!planEdit) {
+        planEdit = { golden: [], trust: [], cta: [] };
+        planOriginal = clonePlan(planEdit);
+        setPlanToolsEnabled(true);
+      }
+      if (!planEdit[toRole]) planEdit[toRole] = [];
 
       let toIdx = planEdit[toRole].length;
       const overClip = e.target.closest(".jy-clip");
@@ -366,6 +373,43 @@ function bindTrackEditors() {
         toIdx = e.clientY < mid ? overIdx : overIdx + 1;
       }
 
+      // from left ASR cards
+      if (payload.source === "asr") {
+        const aidx = Number(payload.idx);
+        const item = asrCards[aidx];
+        if (!item) return;
+        // pull latest edited values from left card if present
+        const leftCard = document.querySelector(`.asr-card[data-idx="${aidx}"]`);
+        let text = item.text;
+        let t0 = Number(item.t0_ms || 0);
+        let t1 = Number(item.t1_ms || 0);
+        if (leftCard) {
+          const ta = leftCard.querySelector(".clip-text-edit");
+          const t0s = leftCard.querySelector(".clip-t0s");
+          const t1s = leftCard.querySelector(".clip-t1s");
+          if (ta) text = ta.value;
+          if (t0s) t0 = Math.max(0, Math.round(Number(t0s.value || 0) * 1000));
+          if (t1s) t1 = Math.max(t0 + 300, Math.round(Number(t1s.value || 0) * 1000));
+        }
+        const slot = {
+          clip_id: `asr_${aidx}_${Date.now().toString(36)}`,
+          role: roleLabel(toRole),
+          text: String(text || "").trim(),
+          t0_ms: t0,
+          t1_ms: t1,
+          score: 20,
+          removed: false,
+        };
+        if (!slot.text) return;
+        planEdit[toRole].splice(Math.max(0, toIdx), 0, slot);
+        renderTracks(planEdit);
+        return;
+      }
+
+      // from plan track reorder/move
+      const fromRole = payload.role;
+      const fromIdx = Number(payload.idx);
+      if (!planEdit?.[fromRole]?.[fromIdx]) return;
       if (fromRole === toRole && fromIdx < toIdx) toIdx -= 1;
       moveClip(fromRole, fromIdx, toRole, Math.max(0, toIdx));
     });
@@ -428,42 +472,206 @@ function setupPlanTools() {
   $("plan-apply")?.addEventListener("click", applyPlanEdit);
 }
 
+function setAsrToolsEnabled(on) {
+  ["asr-reload", "asr-to-golden", "asr-to-trust", "asr-to-cta"].forEach((id) => {
+    if ($(id)) $(id).disabled = !on;
+  });
+}
+
+function addAsrToTrack(trackKey, indices) {
+  if (!TRACK_ORDER.includes(trackKey)) return;
+  if (!planEdit) {
+    planEdit = { golden: [], trust: [], cta: [] };
+    planOriginal = clonePlan(planEdit);
+  }
+  setPlanToolsEnabled(true);
+  const list = indices && indices.length ? indices : [...selectedAsr];
+  if (!list.length) {
+    alert("请先勾选左侧口播卡片，或直接拖拽到成片结构");
+    return;
+  }
+  list
+    .sort((a, b) => a - b)
+    .forEach((aidx) => {
+      const item = asrCards[aidx];
+      if (!item) return;
+      const leftCard = document.querySelector(`.asr-card[data-idx="${aidx}"]`);
+      let text = item.text;
+      let t0 = Number(item.t0_ms || 0);
+      let t1 = Number(item.t1_ms || 0);
+      if (leftCard) {
+        const ta = leftCard.querySelector(".clip-text-edit");
+        const t0s = leftCard.querySelector(".clip-t0s");
+        const t1s = leftCard.querySelector(".clip-t1s");
+        if (ta) text = ta.value;
+        if (t0s) t0 = Math.max(0, Math.round(Number(t0s.value || 0) * 1000));
+        if (t1s) t1 = Math.max(t0 + 300, Math.round(Number(t1s.value || 0) * 1000));
+        // keep left edits
+        item.text = text;
+        item.t0_ms = t0;
+        item.t1_ms = t1;
+      }
+      const slot = {
+        clip_id: `asr_${aidx}_${Date.now().toString(36)}_${Math.random().toString(16).slice(2, 6)}`,
+        role: roleLabel(trackKey),
+        text: String(text || "").trim(),
+        t0_ms: t0,
+        t1_ms: t1,
+        score: 20,
+        removed: false,
+      };
+      if (!slot.text) return;
+      planEdit[trackKey].push(slot);
+    });
+  selectedAsr.clear();
+  renderTracks(planEdit);
+  renderAsrCards();
+}
+
+function renderAsrCards() {
+  const box = $("transcript-list");
+  if (!box) return;
+  if (!asrCards.length) {
+    box.innerHTML = '<div class="jy-empty">口播尚未生成 / 无保留句子</div>';
+    setAsrToolsEnabled(false);
+    return;
+  }
+  setAsrToolsEnabled(true);
+  $("asr-count").textContent = `${asrCards.length} 句`;
+  box.innerHTML = asrCards
+    .map((u, idx) => {
+      const a = (Number(u.t0_ms || 0) / 1000).toFixed(1);
+      const b = (Number(u.t1_ms || 0) / 1000).toFixed(1);
+      const checked = selectedAsr.has(idx) ? "checked" : "";
+      return `<div class="jy-clip expanded asr-card trust" draggable="true" data-source="asr" data-idx="${idx}">
+        <div class="clip-top">
+          <input type="checkbox" class="asr-check" ${checked} title="多选后批量加入成片" />
+          <span class="clip-drag" title="拖到成片结构">⠿</span>
+          <span class="clip-badge">口播 #${idx + 1}</span>
+          <button type="button" class="clip-x asr-add-one" title="加入黄金">＋</button>
+        </div>
+        <textarea class="clip-text-edit" rows="5" placeholder="编辑这段口播词…">${escapeHtml(u.text || "")}</textarea>
+        <div class="clip-time-row">
+          <label>开始(s)<input class="clip-t0s" type="number" step="0.1" min="0" value="${a}" /></label>
+          <label>结束(s)<input class="clip-t1s" type="number" step="0.1" min="0" value="${b}" /></label>
+        </div>
+        <div class="meta">可改词/改时码 · 拖到右侧成片结构 · 或勾选后点 +黄金/信任/收尾</div>
+        <div class="clip-tools">
+          <button type="button" class="asr-add-golden">+黄金</button>
+          <button type="button" class="asr-add-trust">+信任</button>
+          <button type="button" class="asr-add-cta">+收尾</button>
+        </div>
+      </div>`;
+    })
+    .join("");
+
+  // bind left cards
+  box.querySelectorAll(".asr-card").forEach((card) => {
+    const idx = Number(card.dataset.idx);
+    const ta = card.querySelector(".clip-text-edit");
+    const t0s = card.querySelector(".clip-t0s");
+    const t1s = card.querySelector(".clip-t1s");
+    const ck = card.querySelector(".asr-check");
+    const push = () => {
+      if (!asrCards[idx]) return;
+      if (ta) asrCards[idx].text = ta.value;
+      if (t0s) asrCards[idx].t0_ms = Math.max(0, Math.round(Number(t0s.value || 0) * 1000));
+      if (t1s) {
+        const t0 = asrCards[idx].t0_ms || 0;
+        const t1 = Math.max(t0 + 300, Math.round(Number(t1s.value || 0) * 1000));
+        asrCards[idx].t1_ms = t1;
+      }
+    };
+    ta?.addEventListener("input", push);
+    t0s?.addEventListener("change", push);
+    t1s?.addEventListener("change", push);
+    ta?.addEventListener("mousedown", (e) => e.stopPropagation());
+    t0s?.addEventListener("mousedown", (e) => e.stopPropagation());
+    t1s?.addEventListener("mousedown", (e) => e.stopPropagation());
+    ck?.addEventListener("change", () => {
+      if (ck.checked) selectedAsr.add(idx);
+      else selectedAsr.delete(idx);
+    });
+    card.querySelector(".asr-add-golden")?.addEventListener("click", (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      push();
+      addAsrToTrack("golden", [idx]);
+    });
+    card.querySelector(".asr-add-trust")?.addEventListener("click", (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      push();
+      addAsrToTrack("trust", [idx]);
+    });
+    card.querySelector(".asr-add-cta")?.addEventListener("click", (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      push();
+      addAsrToTrack("cta", [idx]);
+    });
+    card.querySelector(".asr-add-one")?.addEventListener("click", (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      push();
+      addAsrToTrack("golden", [idx]);
+    });
+
+    card.addEventListener("dragstart", (e) => {
+      if (e.target.closest("button, textarea, input")) {
+        e.preventDefault();
+        return;
+      }
+      push();
+      card.classList.add("dragging");
+      e.dataTransfer.effectAllowed = "copyMove";
+      e.dataTransfer.setData("text/plain", JSON.stringify({ source: "asr", idx }));
+    });
+    card.addEventListener("dragend", () => card.classList.remove("dragging"));
+  });
+}
+
 async function loadTranscript(jobId) {
   const box = $("transcript-list");
   $("asr-count").textContent = "—";
+  asrCards = [];
+  selectedAsr.clear();
+  setAsrToolsEnabled(false);
   try {
-    const res = await fetch(`/api/jobs/${encodeURIComponent(jobId)}/files/transcript_for_clipper.json`);
-    if (!res.ok) {
-      // fallback asr
-      const res2 = await fetch(`/api/jobs/${encodeURIComponent(jobId)}/files/transcript_asr.json`);
-      if (!res2.ok) {
+    // prefer full raw asr for human selection space; fallback kept
+    let items = [];
+    const resRaw = await fetch(`/api/jobs/${encodeURIComponent(jobId)}/files/transcript_asr.json`);
+    if (resRaw.ok) {
+      items = await resRaw.json();
+    } else {
+      const resKept = await fetch(`/api/jobs/${encodeURIComponent(jobId)}/files/transcript_for_clipper.json`);
+      if (!resKept.ok) {
         box.innerHTML = '<div class="jy-empty">口播尚未生成</div>';
         return;
       }
-      const raw = await res2.json();
-      $("asr-count").textContent = `${raw.length || 0} 句`;
-      box.innerHTML = (raw || [])
-        .slice(0, 80)
-        .map((u) => {
-          const a = ((u.t0_ms || 0) / 1000).toFixed(1);
-          const b = ((u.t1_ms || 0) / 1000).toFixed(1);
-          return `<div class="jy-line"><div class="t">${a}s–${b}s</div>${escapeHtml(u.text || "")}</div>`;
-        })
-        .join("");
-      return;
+      items = await resKept.json();
     }
-    const kept = await res.json();
-    $("asr-count").textContent = `保留 ${kept.length || 0} 句`;
-    box.innerHTML = (kept || [])
-      .map((u) => {
-        const a = ((u.t0_ms || 0) / 1000).toFixed(1);
-        const b = ((u.t1_ms || 0) / 1000).toFixed(1);
-        return `<div class="jy-line keep"><div class="t">${a}s–${b}s</div>${escapeHtml(u.text || "")}</div>`;
-      })
-      .join("") || '<div class="jy-empty">无保留句子</div>';
+    asrCards = (items || [])
+      .filter((u) => u && String(u.text || "").trim())
+      .map((u, i) => ({
+        utt_id: u.utt_id || `a${i}`,
+        text: String(u.text || "").trim(),
+        t0_ms: Number(u.t0_ms || 0),
+        t1_ms: Number(u.t1_ms || 0),
+      }));
+    renderAsrCards();
   } catch {
     box.innerHTML = '<div class="jy-empty">口播加载失败</div>';
   }
+}
+
+function setupAsrTools() {
+  $("asr-reload")?.addEventListener("click", () => {
+    if (currentJobId) loadTranscript(currentJobId);
+  });
+  $("asr-to-golden")?.addEventListener("click", () => addAsrToTrack("golden"));
+  $("asr-to-trust")?.addEventListener("click", () => addAsrToTrack("trust"));
+  $("asr-to-cta")?.addEventListener("click", () => addAsrToTrack("cta"));
 }
 
 function renderJob(data) {
@@ -885,4 +1093,5 @@ loadJobs();
 setupForm();
 setupTranscriptModule();
 setupPlanTools();
+setupAsrTools();
 setupTranscriptPanelToggle();

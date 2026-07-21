@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>小面 · CapCut</title>
-  <link rel="stylesheet" href="/static/styles.css?v=jy20" />
+  <link rel="stylesheet" href="/static/styles.css?v=jy21" />
 </head>
 <body>
   <div class="jy-app">
@@ -73,8 +73,15 @@
               <button type="button" class="jy-btn tiny" id="toggle-transcript-panel" title="折叠/展开">收起</button>
             </div>
           </div>
-          <div class="jy-transcript" id="transcript-list">
-            <div class="jy-empty">处理后在这里显示口播句子</div>
+          <div class="jy-track-tools asr-tools">
+            <button type="button" class="jy-btn tiny" id="asr-reload" disabled>刷新口播</button>
+            <button type="button" class="jy-btn tiny" id="asr-to-golden" disabled>+黄金</button>
+            <button type="button" class="jy-btn tiny" id="asr-to-trust" disabled>+信任</button>
+            <button type="button" class="jy-btn tiny" id="asr-to-cta" disabled>+收尾</button>
+            <span class="muted">拖到右侧成片结构 · 可改词</span>
+          </div>
+          <div class="jy-transcript asr-cards" id="transcript-list">
+            <div class="jy-empty">处理后在这里显示口播句子（可编辑、可拖入成片）</div>
           </div>
         </div>
       </aside>
@@ -186,6 +193,6 @@
     </div>
   </aside>
 
-  <script src="/static/app.js?v=jy20"></script>
+  <script src="/static/app.js?v=jy21"></script>
 </body>
 </html>

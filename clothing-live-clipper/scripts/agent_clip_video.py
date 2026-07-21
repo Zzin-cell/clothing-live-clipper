@@ -64,9 +64,22 @@ CORE_WORDS = (
 
 def extract_wav(video: Path, wav: Path) -> None:
     wav.parent.mkdir(parents=True, exist_ok=True)
+    # -vn + mono 16k is enough for whisper; threads help demux
     cmd = [
-        "ffmpeg", "-y", "-i", str(video),
-        "-vn", "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le", str(wav),
+        "ffmpeg",
+        "-y",
+        "-threads",
+        "2",
+        "-i",
+        str(video),
+        "-vn",
+        "-ac",
+        "1",
+        "-ar",
+        "16000",
+        "-c:a",
+        "pcm_s16le",
+        str(wav),
     ]
     p = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace")
     if p.returncode != 0 or not wav.exists() or wav.stat().st_size < 100:
@@ -92,16 +105,49 @@ def resolve_local_model() -> str:
     return "tiny"
 
 
-def asr_local(wav: Path) -> list[dict]:
+_WHISPER_MODEL = None
+_WHISPER_MODEL_KEY = None
+
+
+def _get_whisper_model(model_size: str):
+    """Reuse model in-process (big speedup for multi jobs / reclip)."""
+    global _WHISPER_MODEL, _WHISPER_MODEL_KEY
+    key = str(model_size)
+    if _WHISPER_MODEL is not None and _WHISPER_MODEL_KEY == key:
+        return _WHISPER_MODEL
     from faster_whisper import WhisperModel
 
-    model_size = resolve_local_model()
-    # Optional mirror for first download only
     if "HF_ENDPOINT" not in os.environ:
         os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
-    print(f"[asr] local faster-whisper model={model_size!r}")
-    model = WhisperModel(model_size, device="cpu", compute_type="int8")
-    segments, info = model.transcribe(str(wav), language="zh", vad_filter=True)
+    # Prefer more CPU threads when available
+    cpu_threads = max(2, min(8, (os.cpu_count() or 4)))
+    print(f"[asr] loading faster-whisper model={key!r} threads={cpu_threads}")
+    _WHISPER_MODEL = WhisperModel(
+        key,
+        device="cpu",
+        compute_type="int8",
+        cpu_threads=cpu_threads,
+        num_workers=1,
+    )
+    _WHISPER_MODEL_KEY = key
+    return _WHISPER_MODEL
+
+
+def asr_local(wav: Path) -> list[dict]:
+    model_size = resolve_local_model()
+    model = _get_whisper_model(model_size)
+    # Fast path: greedy decode, no condition on previous, VAD on
+    segments, info = model.transcribe(
+        str(wav),
+        language="zh",
+        vad_filter=True,
+        beam_size=1,
+        best_of=1,
+        temperature=0.0,
+        condition_on_previous_text=False,
+        without_timestamps=False,
+        word_timestamps=False,
+    )
     out: list[dict] = []
     for i, seg in enumerate(segments):
         text = (seg.text or "").strip()

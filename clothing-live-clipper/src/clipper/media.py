@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 import tempfile
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 
@@ -162,6 +164,8 @@ def cut_segment(
         f"aresample=async=1:first_pts=0"
     )
 
+    # ultrafast encode for speed; quality still ok for short social clips
+    threads = str(max(2, min(8, (os.cpu_count() or 4))))
     cmd = [
         ffmpeg,
         "-y",
@@ -178,15 +182,17 @@ def cut_segment(
         "-c:v",
         "libx264",
         "-preset",
-        "veryfast",
+        "ultrafast",
         "-crf",
-        "18",
+        "23",
+        "-threads",
+        threads,
         "-pix_fmt",
         "yuv420p",
         "-c:a",
         "aac",
         "-b:a",
-        "192k",
+        "128k",
         "-ar",
         "44100",
         "-ac",
@@ -215,6 +221,7 @@ def concat_segments(
 
 
 def _concat_pairwise_hard(segment_paths: list[Path], out_mp4: Path) -> Path:
+    """Single-pass concat demuxer (much faster than pairwise re-encode)."""
     ffmpeg = require_ffmpeg()
     out_mp4 = Path(out_mp4)
     out_mp4.parent.mkdir(parents=True, exist_ok=True)
@@ -224,51 +231,68 @@ def _concat_pairwise_hard(segment_paths: list[Path], out_mp4: Path) -> Path:
         shutil.copy2(segment_paths[0], out_mp4)
         return out_mp4
 
-    def _pair(a: Path, b: Path, dest: Path) -> None:
-        # n=2 concat is the most reliable full-length join
-        cmd = [
+    with tempfile.TemporaryDirectory(prefix="clipper_concat_") as td:
+        list_file = Path(td) / "list.txt"
+        lines = []
+        for p in segment_paths:
+            # ffmpeg concat demuxer wants escaped single quotes on Windows paths
+            ap = p.resolve().as_posix().replace("'", r"'\''")
+            lines.append(f"file '{ap}'")
+        list_file.write_text("\n".join(lines), encoding="utf-8")
+        threads = str(max(2, min(8, (os.cpu_count() or 4))))
+        # parts already same codec/params → stream copy is fastest & full duration
+        cmd_copy = [
             ffmpeg,
             "-y",
+            "-f",
+            "concat",
+            "-safe",
+            "0",
             "-i",
-            str(a),
-            "-i",
-            str(b),
-            "-filter_complex",
-            "[0:v][0:a][1:v][1:a]concat=n=2:v=1:a=1[v][a]",
-            "-map",
-            "[v]",
-            "-map",
-            "[a]",
-            "-c:v",
-            "libx264",
-            "-preset",
-            "ultrafast",
-            "-crf",
-            "18",
-            "-pix_fmt",
-            "yuv420p",
-            "-c:a",
-            "aac",
-            "-b:a",
-            "192k",
-            "-ar",
-            "44100",
-            "-ac",
-            "2",
+            str(list_file),
+            "-c",
+            "copy",
             "-movflags",
             "+faststart",
-            str(dest),
+            str(out_mp4),
         ]
-        run_cmd(cmd)
-
-    with tempfile.TemporaryDirectory(prefix="clipper_pair_") as td:
-        td_path = Path(td)
-        cur = segment_paths[0]
-        for i, nxt in enumerate(segment_paths[1:], start=1):
-            dest = td_path / f"join_{i:03d}.mp4"
-            _pair(cur, nxt, dest)
-            cur = dest
-        shutil.copy2(cur, out_mp4)
+        try:
+            run_cmd(cmd_copy)
+            return out_mp4
+        except FFmpegError:
+            # fallback re-encode once
+            cmd = [
+                ffmpeg,
+                "-y",
+                "-f",
+                "concat",
+                "-safe",
+                "0",
+                "-i",
+                str(list_file),
+                "-c:v",
+                "libx264",
+                "-preset",
+                "ultrafast",
+                "-crf",
+                "23",
+                "-threads",
+                threads,
+                "-pix_fmt",
+                "yuv420p",
+                "-c:a",
+                "aac",
+                "-b:a",
+                "128k",
+                "-ar",
+                "44100",
+                "-ac",
+                "2",
+                "-movflags",
+                "+faststart",
+                str(out_mp4),
+            ]
+            run_cmd(cmd)
     return out_mp4
 
 
@@ -314,15 +338,17 @@ def apply_playback_speed(
         "-c:v",
         "libx264",
         "-preset",
-        "veryfast",
+        "ultrafast",
         "-crf",
-        "18",
+        "23",
+        "-threads",
+        str(max(2, min(8, (os.cpu_count() or 4)))),
         "-pix_fmt",
         "yuv420p",
         "-c:a",
         "aac",
         "-b:a",
-        "192k",
+        "128k",
         "-ar",
         "44100",
         "-ac",
@@ -367,15 +393,19 @@ def render_plan(
     work_dir.mkdir(parents=True, exist_ok=True)
 
     tw, th = _probe_stream_size(video)
-    parts: list[Path] = []
+    # prepare segment specs
+    specs: list[tuple[int, int, int, Path]] = []
     for i, (t0, t1) in enumerate(segments):
         if t1 - t0 < 200:
             t1 = t0 + 200
-        # tiny handles help audio continuity without looking like a transition
         if smooth:
             t0 = max(0, t0 - 30)
             t1 = t1 + 30
         part = work_dir / f"part_{i:03d}.mp4"
+        specs.append((i, t0, t1, part))
+
+    def _cut_one(spec: tuple[int, int, int, Path]) -> tuple[int, Path]:
+        i, t0, t1, part = spec
         cut_segment(
             video,
             t0,
@@ -388,7 +418,17 @@ def render_plan(
             fps=30,
             zoom_style="none",
         )
-        parts.append(part)
+        return i, part
+
+    # parallel cuts (I/O + encode bound) — biggest render speedup
+    workers = max(2, min(6, (os.cpu_count() or 4)))
+    parts_map: dict[int, Path] = {}
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        futs = [ex.submit(_cut_one, sp) for sp in specs]
+        for fut in as_completed(futs):
+            i, part = fut.result()
+            parts_map[i] = part
+    parts = [parts_map[i] for i in range(len(specs))]
 
     joined = out_mp4
     speed = playback_speed if playback_speed and playback_speed > 0 else 1.0

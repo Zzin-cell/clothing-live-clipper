@@ -180,6 +180,9 @@ function renderJob(data) {
   if (st === "failed") {
     actions.push(`<button type="button" class="jy-btn" id="retry-btn">重试</button>`);
   }
+  if (files.transcript || files.transcript_asr || data.status === "success" || data.status === "success_partial") {
+    actions.push(`<button type="button" class="jy-btn" id="open-tr-inline">编辑口播稿</button>`);
+  }
   $("actions").innerHTML = actions.join("") || '<span class="muted">暂无导出</span>';
   const retry = $("retry-btn");
   if (retry) {
@@ -188,6 +191,8 @@ function renderJob(data) {
       pollJob(data.job_id);
     };
   }
+  const openTr = $("open-tr-inline");
+  if (openTr) openTr.onclick = () => openTranscriptDrawer();
 
   loadTranscript(data.job_id);
   highlightJob(data.job_id);
@@ -325,52 +330,127 @@ function setupForm() {
   });
 }
 
-function setupSettings() {
-  const open = () => {
-    $("drawer-backdrop").hidden = false;
-    $("settings-drawer").hidden = false;
-    loadSystemStatus();
-  };
-  const close = () => {
-    $("drawer-backdrop").hidden = true;
-    $("settings-drawer").hidden = true;
-  };
-  $("open-settings")?.addEventListener("click", open);
-  $("close-settings")?.addEventListener("click", close);
-  $("drawer-backdrop")?.addEventListener("click", close);
+let transcriptCache = [];
+
+function openTranscriptDrawer() {
+  $("drawer-backdrop").hidden = false;
+  $("transcript-drawer").hidden = false;
+  loadTranscriptEditor(currentJobId);
 }
 
-async function loadSystemStatus() {
+function closeTranscriptDrawer() {
+  $("drawer-backdrop").hidden = true;
+  $("transcript-drawer").hidden = true;
+}
+
+function setupTranscriptModule() {
+  $("open-transcript")?.addEventListener("click", openTranscriptDrawer);
+  $("close-transcript")?.addEventListener("click", closeTranscriptDrawer);
+  $("drawer-backdrop")?.addEventListener("click", closeTranscriptDrawer);
+  $("tr-reload")?.addEventListener("click", () => loadTranscriptEditor(currentJobId));
+  $("tr-all")?.addEventListener("click", () => setAllKeep(true));
+  $("tr-none")?.addEventListener("click", () => setAllKeep(false));
+  $("tr-save")?.addEventListener("click", () => saveTranscript(false));
+  $("tr-reclip")?.addEventListener("click", () => saveTranscript(true));
+}
+
+function setAllKeep(v) {
+  transcriptCache.forEach((u) => (u.keep = v));
+  renderTranscriptEditor();
+}
+
+function collectEditorItems() {
+  const rows = Array.from(document.querySelectorAll(".tr-item"));
+  const items = [];
+  rows.forEach((row, i) => {
+    const keep = !!row.querySelector(".tr-keep")?.checked;
+    const text = (row.querySelector(".tr-text")?.value || "").trim();
+    const t0 = Number(row.querySelector(".tr-t0")?.value || 0);
+    const t1 = Number(row.querySelector(".tr-t1")?.value || 0);
+    const utt_id = row.dataset.uid || `e${i:04d}`;
+    items.push({ utt_id, text, t0_ms: t0, t1_ms: t1, keep });
+  });
+  return items;
+}
+
+function renderTranscriptEditor() {
+  const box = $("tr-list");
+  if (!transcriptCache.length) {
+    box.innerHTML = '<div class="jy-empty">暂无口播句子（先完成自动听写）</div>';
+    return;
+  }
+  box.innerHTML = transcriptCache
+    .map((u, i) => {
+      const keep = u.keep !== false;
+      return `<div class="tr-item ${keep ? "" : "off"}" data-uid="${escapeHtml(u.utt_id || `u${i}`)}">
+        <input class="tr-keep" type="checkbox" ${keep ? "checked" : ""} />
+        <div class="tr-time">
+          <input class="tr-t0" type="number" value="${Number(u.t0_ms || 0)}" title="开始 ms" />
+          <input class="tr-t1" type="number" value="${Number(u.t1_ms || 0)}" title="结束 ms" />
+        </div>
+        <textarea class="tr-text">${escapeHtml(u.text || "")}</textarea>
+      </div>`;
+    })
+    .join("");
+  box.querySelectorAll(".tr-keep").forEach((ck) => {
+    ck.addEventListener("change", () => {
+      ck.closest(".tr-item")?.classList.toggle("off", !ck.checked);
+    });
+  });
+}
+
+async function loadTranscriptEditor(jobId) {
+  const meta = $("tr-meta");
+  const msg = $("tr-msg");
+  msg.textContent = "";
+  if (!jobId) {
+    meta.textContent = "未选择任务";
+    $("tr-list").innerHTML = '<div class="jy-empty">先处理一个视频，再编辑口播稿</div>';
+    transcriptCache = [];
+    return;
+  }
+  meta.textContent = `任务 ${jobId} · 加载中…`;
   try {
-    const res = await fetch("/api/system/status");
-    const st = await res.json();
-    const rows = [];
-    const row = (label, ok, detail) => {
-      const cls = ok === true ? "ok" : ok === false ? "bad" : "warn";
-      const mark = ok === true ? "✓" : ok === false ? "!" : "·";
-      rows.push(
-        `<div class="check-row ${cls}"><span class="mark">${mark}</span><div><strong>${escapeHtml(
-          label
-        )}</strong><div class="muted">${escapeHtml(detail || "")}</div></div></div>`
-      );
-    };
-    row("服务", st.service?.ok, `${st.service?.host}:${st.service?.port}`);
-    row("ffmpeg", st.ffmpeg?.ok, st.ffmpeg?.path || "未找到");
-    row("本地自动切片", true, "上传后后台处理，无需 Agent");
-    row("磁盘", st.storage?.ok, `${st.storage?.path || ""} · ${st.storage?.free_gb ?? "?"} GB`);
-    $("checklist").innerHTML = rows.join("");
-    $("env-box").textContent = JSON.stringify(
-      {
-        python: st.deps?.python,
-        ffmpeg: st.ffmpeg,
-        storage: st.storage,
-        checked_at: st.checked_at,
-      },
-      null,
-      2
-    );
+    const res = await fetch(`/api/jobs/${encodeURIComponent(jobId)}/transcript?kind=all`);
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || "加载失败");
+    transcriptCache = data.items || [];
+    meta.textContent = `任务 ${jobId} · 共 ${transcriptCache.length} 句 · 已勾选将参与重剪`;
+    renderTranscriptEditor();
   } catch (e) {
-    $("checklist").textContent = "状态加载失败：" + e;
+    meta.textContent = `任务 ${jobId}`;
+    $("tr-list").innerHTML = `<div class="jy-empty">${escapeHtml(String(e.message || e))}</div>`;
+  }
+}
+
+async function saveTranscript(reclip) {
+  const msg = $("tr-msg");
+  msg.textContent = "";
+  if (!currentJobId) {
+    msg.textContent = "请先选择任务";
+    return;
+  }
+  const items = collectEditorItems();
+  const kept = items.filter((x) => x.keep && x.text);
+  if (!kept.length) {
+    msg.textContent = "请至少勾选并保留一句口播";
+    return;
+  }
+  msg.textContent = reclip ? "保存并重剪中…" : "保存中…";
+  try {
+    const res = await fetch(`/api/jobs/${encodeURIComponent(currentJobId)}/transcript`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ items, reclip: !!reclip }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.detail || "保存失败");
+    msg.textContent = reclip ? "已保存，正在按口播重剪…" : `已保存 ${kept.length} 句`;
+    renderJob(data);
+    await loadJobs();
+    if (reclip) pollJob(currentJobId);
+  } catch (e) {
+    msg.textContent = String(e.message || e);
   }
 }
 
@@ -378,4 +458,4 @@ $("refresh-jobs")?.addEventListener("click", loadJobs);
 loadHealth();
 loadJobs();
 setupForm();
-setupSettings();
+setupTranscriptModule();

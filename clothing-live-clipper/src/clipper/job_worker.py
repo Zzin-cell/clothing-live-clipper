@@ -200,6 +200,102 @@ def process_job_dir(job_dir: Path) -> None:
             _running.discard(job_id)
 
 
+def reclip_from_saved_transcript(job_dir: Path) -> None:
+    """Re-run clipper using existing transcript_for_clipper.json (skip ASR)."""
+    job_dir = Path(job_dir)
+    job_id = job_dir.name
+    meta = _read_meta(job_dir)
+    try:
+        video = _find_video(job_dir)
+        if not video:
+            raise RuntimeError("未找到上传视频")
+        tr_path = job_dir / "transcript_for_clipper.json"
+        if not tr_path.exists():
+            raise RuntimeError("未找到可重剪的口播稿 transcript_for_clipper.json")
+
+        target = int(meta.get("target_seconds") or 60)
+        render = bool(meta.get("render_requested", True))
+        speed = float(meta.get("playback_speed") or os.environ.get("CLIPPER_PLAYBACK_SPEED") or 1.3)
+
+        _set_progress(job_dir, "reclip", 55, "按口播稿重新切片")
+        from clipper.config import Settings
+        from clipper.pipeline import run_pipeline
+
+        base = Settings.from_env()
+        settings = Settings(
+            target_duration_s=target,
+            golden_s=base.golden_s,
+            cta_s=base.cta_s,
+            min_clip_ms=base.min_clip_ms,
+            max_clip_ms=base.max_clip_ms,
+            min_plan_ms=base.min_plan_ms,
+            max_plan_ms=base.max_plan_ms,
+            playback_speed=speed if speed > 0 else 1.3,
+            golden_weight_ratio=base.golden_weight_ratio,
+            llm_api_key=base.llm_api_key,
+            llm_base_url=base.llm_base_url,
+            llm_model=base.llm_model,
+        )
+        _set_progress(job_dir, "render", 80, "渲染成片" if render else "仅生成计划")
+        result = run_pipeline(
+            video=video,
+            transcript_path=tr_path,
+            out_dir=job_dir,
+            settings=settings,
+            render=render,
+        )
+        has_plan = (job_dir / "plan.json").exists()
+        has_final = (job_dir / "final.mp4").exists()
+        status = (
+            "success"
+            if has_plan and has_final
+            else ("success_partial" if has_plan else "failed")
+        )
+        meta = _read_meta(job_dir)
+        meta.update(
+            {
+                "status": status,
+                "stage": "done" if status != "failed" else "failed",
+                "progress": 100 if status != "failed" else 90,
+                "finished_at": _utc_now(),
+                "has_final": has_final,
+                "output_mp4": has_final,
+                "worker": "local_reclip",
+                "selected_clips": len(result.plan.all_slots()) if result.plan else 0,
+                "golden20_passed": bool(result.plan.golden20_passed) if result.plan else False,
+                "duration_s": (result.plan.total_duration_ms / 1000.0) if result.plan else 0,
+                "warnings": result.plan.warnings if result.plan else [],
+                "error": None if status != "failed" else "重剪失败：未生成 plan/final",
+            }
+        )
+        if has_final:
+            try:
+                from clipper.media import probe_duration_ms
+
+                meta["final_duration_s"] = round(
+                    probe_duration_ms(job_dir / "final.mp4") / 1000.0, 2
+                )
+            except Exception:
+                pass
+        _write_meta(job_dir, meta)
+    except Exception as e:
+        meta = _read_meta(job_dir)
+        meta.update(
+            {
+                "status": "failed",
+                "stage": "failed",
+                "error": str(e),
+                "traceback": traceback.format_exc()[-2000:],
+                "finished_at": _utc_now(),
+                "worker": "local_reclip",
+            }
+        )
+        _write_meta(job_dir, meta)
+    finally:
+        with _lock:
+            _running.discard(job_id)
+
+
 def start_job_async(job_dir: Path) -> bool:
     """Start background thread if not already running this job."""
     job_dir = Path(job_dir)
@@ -209,5 +305,18 @@ def start_job_async(job_dir: Path) -> bool:
             return False
         _running.add(job_id)
     t = threading.Thread(target=process_job_dir, args=(job_dir,), daemon=True)
+    t.start()
+    return True
+
+
+def start_reclip_async(job_dir: Path) -> bool:
+    """Reclip using saved transcript without ASR."""
+    job_dir = Path(job_dir)
+    job_id = job_dir.name
+    with _lock:
+        if job_id in _running:
+            return False
+        _running.add(job_id)
+    t = threading.Thread(target=reclip_from_saved_transcript, args=(job_dir,), daemon=True)
     t.start()
     return True

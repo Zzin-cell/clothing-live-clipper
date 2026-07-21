@@ -253,12 +253,12 @@ body {
 .jy-actions { display: flex; flex-wrap: wrap; gap: 8px; }
 .jy-actions a.jy-btn { text-decoration: none; }
 
-/* settings drawer */
+/* transcript drawer */
 .drawer-backdrop {
   position: fixed; inset: 0; background: rgba(0,0,0,.45); z-index: 40;
 }
 .drawer {
-  position: fixed; top: 0; right: 0; width: min(420px, 100%); height: 100%;
+  position: fixed; top: 0; right: 0; width: min(520px, 100%); height: 100%;
   background: #1e1e22; border-left: 1px solid #333; z-index: 50;
   display: flex; flex-direction: column;
 }
@@ -269,23 +269,54 @@ body {
 .drawer-head h2 { margin: 0; font-size: 16px; }
 .card-desc { margin: 4px 0 0; color: var(--muted); font-size: 12px; }
 .drawer-body { padding: 12px; overflow: auto; flex: 1; }
-.checklist { display: grid; gap: 8px; margin-bottom: 12px; }
-.check-row {
-  display: flex; gap: 8px; align-items: flex-start;
-  background: #18181b; border: 1px solid #303036; border-radius: 10px; padding: 8px 10px;
+.transcript-body { display: flex; flex-direction: column; gap: 10px; min-height: 0; }
+.tr-toolbar { display: flex; justify-content: space-between; gap: 8px; align-items: center; }
+.tr-meta { font-size: 12px; color: var(--muted); }
+.tr-actions { display: flex; gap: 6px; }
+.tr-list {
+  flex: 1; min-height: 240px; overflow: auto; background: #151518;
+  border: 1px solid #303036; border-radius: 12px; padding: 8px;
+}
+.tr-item {
+  display: grid;
+  grid-template-columns: 22px 78px 1fr;
+  gap: 8px;
+  align-items: start;
+  padding: 8px;
+  border-radius: 10px;
+  margin-bottom: 6px;
+  background: #1c1c20;
+  border: 1px solid #2d2d33;
+}
+.tr-item.off { opacity: .45; }
+.tr-item input[type="checkbox"] { margin-top: 4px; }
+.tr-time {
+  display: grid; gap: 4px;
+}
+.tr-time input {
+  width: 100%;
+  border: 1px solid #3a3a40;
+  background: #111114;
+  color: var(--text);
+  border-radius: 8px;
+  padding: 4px 6px;
+  font-size: 11px;
+}
+.tr-text {
+  width: 100%;
+  min-height: 54px;
+  resize: vertical;
+  border: 1px solid #3a3a40;
+  background: #111114;
+  color: var(--text);
+  border-radius: 8px;
+  padding: 8px;
   font-size: 12px;
+  line-height: 1.4;
+  font-family: inherit;
 }
-.check-row .mark {
-  width: 18px; height: 18px; border-radius: 50%; display: grid; place-items: center;
-  background: #333; font-size: 11px;
-}
-.check-row.ok .mark { background: rgba(61,214,140,.2); color: var(--ok); }
-.check-row.bad .mark { background: rgba(255,92,92,.2); color: var(--danger); }
-.check-row.warn .mark { background: rgba(240,180,41,.2); color: var(--warn); }
-.env-box, .review {
-  white-space: pre-wrap; word-break: break-word; background: #151518; border-radius: 10px;
-  border: 1px solid #303036; padding: 10px; color: #bdbdc4; font-size: 11px;
-}
+.tr-footer { display: flex; gap: 8px; }
+.tr-footer .jy-btn { flex: 1; }
 
 @media (max-width: 1100px) {
   body { overflow: auto; }

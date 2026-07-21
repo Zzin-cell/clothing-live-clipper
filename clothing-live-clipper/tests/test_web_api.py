@@ -121,3 +121,43 @@ def test_list_jobs_includes_queued(client, monkeypatch):
     job_id = r.json()["job_id"]
     ids = {j["job_id"] for j in c.get("/api/jobs").json()["jobs"]}
     assert job_id in ids
+
+
+def test_transcript_get_and_save(client, monkeypatch):
+    monkeypatch.setattr("clipper.web.start_job_async", lambda d: False)
+    monkeypatch.setattr("clipper.job_worker.start_reclip_async", lambda d: True)
+    c, jobs = client
+    video_bytes = b"\x00\x00\x00\x18ftypmp42fake"
+    r = c.post(
+        "/api/jobs",
+        data={"target_seconds": "60", "auto_process": "false"},
+        files={"video": ("demo.mp4", io.BytesIO(video_bytes), "video/mp4")},
+    )
+    job_id = r.json()["job_id"]
+    raw = [
+        {"utt_id": "u1", "text": "这件面料很软", "t0_ms": 0, "t1_ms": 2000},
+        {"utt_id": "u2", "text": "家人们来了吗", "t0_ms": 2000, "t1_ms": 3000},
+    ]
+    (jobs / job_id / "transcript_asr.json").write_text(
+        json.dumps(raw, ensure_ascii=False), encoding="utf-8"
+    )
+    (jobs / job_id / "transcript_for_clipper.json").write_text(
+        json.dumps([raw[0]], ensure_ascii=False), encoding="utf-8"
+    )
+    g = c.get(f"/api/jobs/{job_id}/transcript?kind=all")
+    assert g.status_code == 200
+    assert g.json()["count"] == 2
+    saved = c.put(
+        f"/api/jobs/{job_id}/transcript",
+        json={
+            "reclip": True,
+            "items": [
+                {"utt_id": "u1", "text": "这件面料很软很显瘦", "t0_ms": 0, "t1_ms": 2000, "keep": True},
+                {"utt_id": "u2", "text": "家人们来了吗", "t0_ms": 2000, "t1_ms": 3000, "keep": False},
+            ],
+        },
+    )
+    assert saved.status_code == 200, saved.text
+    kept = json.loads((jobs / job_id / "transcript_for_clipper.json").read_text(encoding="utf-8"))
+    assert len(kept) == 1
+    assert "显瘦" in kept[0]["text"]

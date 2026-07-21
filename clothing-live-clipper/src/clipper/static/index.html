@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>智能口播切片 · CapCut 风格</title>
-  <link rel="stylesheet" href="/static/styles.css?v=jy1" />
+  <link rel="stylesheet" href="/static/styles.css?v=jy2" />
 </head>
 <body>
   <div class="jy-app">
@@ -21,7 +21,7 @@
         <span class="jy-pill" id="health">检查环境…</span>
       </div>
       <div class="jy-top-right">
-        <button type="button" class="jy-btn ghost" id="open-settings">设置</button>
+        <button type="button" class="jy-btn ghost" id="open-transcript">口播稿</button>
         <button type="button" class="jy-btn primary" id="export-btn" disabled>导出成片</button>
       </div>
     </header>
@@ -143,22 +143,36 @@
     </div>
   </div>
 
-  <!-- settings drawer kept simple -->
+  <!-- 口播稿模块（替代无用设置页） -->
   <div class="drawer-backdrop" id="drawer-backdrop" hidden></div>
-  <aside class="drawer" id="settings-drawer" hidden>
+  <aside class="drawer" id="transcript-drawer" hidden>
     <div class="drawer-head">
       <div>
-        <h2>设置 / 状态</h2>
-        <p class="card-desc">本机环境 · 可选 API（默认不需要）</p>
+        <h2>口播稿</h2>
+        <p class="card-desc">查看 / 勾选 / 改字 / 按时码重剪（无需重新听写）</p>
       </div>
-      <button type="button" class="jy-btn ghost" id="close-settings">关闭</button>
+      <button type="button" class="jy-btn ghost" id="close-transcript">关闭</button>
     </div>
-    <div class="drawer-body">
-      <div id="checklist" class="checklist">加载中…</div>
-      <pre id="env-box" class="review env-box"></pre>
+    <div class="drawer-body transcript-body">
+      <div class="tr-toolbar">
+        <div class="tr-meta" id="tr-meta">未选择任务</div>
+        <div class="tr-actions">
+          <button type="button" class="jy-btn tiny" id="tr-reload">刷新</button>
+          <button type="button" class="jy-btn tiny" id="tr-all">全选</button>
+          <button type="button" class="jy-btn tiny" id="tr-none">全不选</button>
+        </div>
+      </div>
+      <div class="tr-list" id="tr-list">
+        <div class="jy-empty">先处理一个视频，再编辑口播稿</div>
+      </div>
+      <div class="tr-footer">
+        <button type="button" class="jy-btn" id="tr-save">仅保存口播</button>
+        <button type="button" class="jy-btn primary" id="tr-reclip">保存并重剪</button>
+      </div>
+      <p class="jy-hint" id="tr-msg"></p>
     </div>
   </aside>
 
-  <script src="/static/app.js?v=jy1"></script>
+  <script src="/static/app.js?v=jy2"></script>
 </body>
 </html>

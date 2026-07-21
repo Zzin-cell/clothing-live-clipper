@@ -54,6 +54,11 @@ class AgentFailBody(BaseModel):
     error: str = "agent_failed"
 
 
+class TranscriptSaveBody(BaseModel):
+    items: list[dict] = Field(default_factory=list)
+    reclip: bool = True
+
+
 def _utc_now() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
@@ -450,6 +455,115 @@ def create_app() -> FastAPI:
         meta.pop("finished_at", None)
         _write_meta(d, meta)
         start_job_async(d)
+        return get_job(job_id)
+
+    @app.get("/api/jobs/{job_id}/transcript")
+    def get_transcript(job_id: str, kind: str = "kept") -> dict[str, Any]:
+        """Return ASR transcript for editing. kind=kept|raw|all"""
+        d = _job_dir(job_id)
+        if not (d / "job_meta.json").exists():
+            raise HTTPException(status_code=404, detail="job not found")
+        kept_p = d / "transcript_for_clipper.json"
+        raw_p = d / "transcript_asr.json"
+        raw = _read_json(raw_p) if raw_p.exists() else []
+        kept = _read_json(kept_p) if kept_p.exists() else []
+        if not isinstance(raw, list):
+            raw = []
+        if not isinstance(kept, list):
+            kept = []
+        # normalize
+        def norm(items: list) -> list[dict[str, Any]]:
+            out = []
+            for i, u in enumerate(items):
+                if not isinstance(u, dict):
+                    continue
+                out.append(
+                    {
+                        "utt_id": str(u.get("utt_id") or f"u{i:04d}"),
+                        "text": str(u.get("text") or "").strip(),
+                        "t0_ms": int(u.get("t0_ms") or 0),
+                        "t1_ms": int(u.get("t1_ms") or 0),
+                        "keep": True,
+                    }
+                )
+            return out
+
+        raw_n = norm(raw)
+        kept_ids = {
+            (int(u.get("t0_ms") or 0), str(u.get("text") or "").strip()) for u in kept
+        }
+        for u in raw_n:
+            key = (u["t0_ms"], u["text"])
+            u["keep"] = key in kept_ids if kept_ids else True
+        if kind == "raw":
+            items = raw_n
+        elif kind == "kept":
+            items = [u for u in raw_n if u["keep"]] or norm(kept)
+        else:
+            items = raw_n
+        return {
+            "job_id": job_id,
+            "has_raw": raw_p.exists(),
+            "has_kept": kept_p.exists(),
+            "count": len(items),
+            "items": items,
+        }
+
+    @app.put("/api/jobs/{job_id}/transcript")
+    def save_transcript(job_id: str, body: TranscriptSaveBody) -> dict[str, Any]:
+        """Save edited transcript (kept lines) and optionally re-run clipper without ASR."""
+        d = _job_dir(job_id)
+        meta_path = d / "job_meta.json"
+        if not meta_path.exists():
+            raise HTTPException(status_code=404, detail="job not found")
+        items = []
+        for i, u in enumerate(body.items or []):
+            if not isinstance(u, dict):
+                continue
+            text = str(u.get("text") or "").strip()
+            if not text:
+                continue
+            # allow explicit keep=false to drop
+            if u.get("keep") is False:
+                continue
+            t0 = int(u.get("t0_ms") or 0)
+            t1 = int(u.get("t1_ms") or (t0 + 1000))
+            if t1 <= t0:
+                t1 = t0 + 500
+            items.append(
+                {
+                    "utt_id": str(u.get("utt_id") or f"e{i:04d}"),
+                    "text": text,
+                    "t0_ms": t0,
+                    "t1_ms": t1,
+                }
+            )
+        if not items:
+            raise HTTPException(status_code=400, detail="口播稿为空，请至少保留一句")
+        items.sort(key=lambda x: x["t0_ms"])
+        (d / "transcript_for_clipper.json").write_text(
+            json.dumps(items, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        # also archive edited copy
+        (d / "transcript_edited.json").write_text(
+            json.dumps(items, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        meta = _read_json(meta_path)
+        meta["transcript_source"] = "manual_edit"
+        meta["transcript_edited_at"] = _utc_now()
+        meta["transcript_kept_count"] = len(items)
+        _write_meta(d, meta)
+
+        if body.reclip:
+            from clipper.job_worker import start_reclip_async
+
+            meta["status"] = "processing"
+            meta["stage"] = "reclip"
+            meta["progress"] = 50
+            meta["error"] = None
+            meta.pop("finished_at", None)
+            _write_meta(d, meta)
+            start_reclip_async(d)
         return get_job(job_id)
 
     @app.post("/api/jobs/{job_id}/transcript")

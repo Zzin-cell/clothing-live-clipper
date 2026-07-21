@@ -305,29 +305,34 @@ body {
   flex: 1 1 auto;
   min-height: 0;
   display: grid;
-  gap: 8px;
+  gap: 10px;
   margin-bottom: 0;
   overflow-y: auto;
   overflow-x: hidden;
   overscroll-behavior: contain;
   padding-right: 2px;
 }
-.jy-track { display: grid; grid-template-columns: 48px 1fr; gap: 8px; align-items: stretch; }
+.jy-track {
+  display: grid;
+  grid-template-columns: 48px 1fr;
+  gap: 8px;
+  align-items: start;
+}
 .jy-track-label {
   font-size: 11px; color: var(--muted); display: grid; place-items: center;
   background: #f3f4f6; border-radius: 8px; border: 1px solid var(--line);
+  min-height: 48px; position: sticky; top: 0;
 }
 .jy-track-body {
-  min-height: 64px;
+  min-height: 72px;
   background: #f8fafc;
   border-radius: 10px;
   border: 1px solid var(--line);
   display: flex;
-  gap: 6px;
-  overflow-x: auto;
-  overflow-y: hidden;
+  flex-direction: column; /* full expand vertical list */
+  gap: 8px;
+  overflow: visible;
   padding: 8px;
-  -webkit-overflow-scrolling: touch;
   transition: border-color .15s ease, background .15s ease;
 }
 .jy-track-body.drag-over {
@@ -345,72 +350,93 @@ body {
 }
 .jy-clip {
   position: relative;
-  flex: 0 0 auto;
-  min-width: 120px;
-  max-width: 200px;
+  width: 100%;
   background: linear-gradient(180deg, #f0f9ff, #e8f4ff);
   border: 1px solid #bfdbfe;
-  border-radius: 8px;
-  padding: 8px 26px 8px 22px;
-  font-size: 11px;
-  line-height: 1.3;
+  border-radius: 12px;
+  padding: 10px 12px 10px 12px;
+  font-size: 12px;
+  line-height: 1.45;
   color: #1e3a5f;
   cursor: grab;
-  user-select: none;
-  touch-action: none;
+  user-select: text;
+  touch-action: pan-y;
 }
+.jy-clip.expanded { min-height: 140px; }
 .jy-clip:active { cursor: grabbing; }
 .jy-clip.dragging {
   opacity: 0.45;
-  transform: scale(0.98);
+  transform: scale(0.995);
 }
 .jy-clip.drag-over-left {
-  box-shadow: inset 3px 0 0 #00c2c7;
+  box-shadow: inset 0 3px 0 #00c2c7;
 }
 .jy-clip.drag-over-right {
-  box-shadow: inset -3px 0 0 #00c2c7;
+  box-shadow: inset 0 -3px 0 #00c2c7;
 }
 .jy-clip.hook { background: linear-gradient(180deg, #ecfdf5, #d1fae5); border-color: #86efac; color: #14532d; }
 .jy-clip.trust { background: linear-gradient(180deg, #f0f9ff, #e0f2fe); border-color: #7dd3fc; color: #0c4a6e; }
 .jy-clip.cta { background: linear-gradient(180deg, #f5f3ff, #ede9fe); border-color: #c4b5fd; color: #4c1d95; }
-.jy-clip .clip-text {
-  display: -webkit-box;
-  -webkit-line-clamp: 4;
-  -webkit-box-orient: vertical;
-  overflow: hidden;
+.jy-clip .clip-top {
+  display: flex; align-items: center; gap: 8px; margin-bottom: 8px;
 }
-.jy-clip .meta { color: #64748b; font-size: 10px; margin-top: 3px; }
+.jy-clip .clip-badge {
+  font-size: 11px; font-weight: 700; color: inherit; opacity: .85;
+}
+.jy-clip .clip-text-edit {
+  width: 100%;
+  min-height: 88px;
+  resize: vertical;
+  border: 1px solid rgba(15,23,42,.12);
+  background: rgba(255,255,255,.92);
+  color: #111827;
+  border-radius: 10px;
+  padding: 10px;
+  font-size: 13px;
+  line-height: 1.5;
+  font-family: inherit;
+}
+.jy-clip .clip-time-row {
+  display: flex; gap: 10px; margin-top: 8px; flex-wrap: wrap;
+}
+.jy-clip .clip-time-row label {
+  display: flex; align-items: center; gap: 6px; font-size: 11px; color: #64748b;
+}
+.jy-clip .clip-time-row input[type="number"] {
+  width: 90px;
+  border: 1px solid #dbe3ee;
+  background: #fff;
+  border-radius: 8px;
+  padding: 4px 6px;
+  color: #111827;
+}
+.jy-clip .meta { color: #64748b; font-size: 11px; margin-top: 6px; }
 .jy-clip .clip-drag {
-  position: absolute;
-  left: 4px;
-  top: 50%;
-  transform: translateY(-50%);
   color: #94a3b8;
-  font-size: 12px;
+  font-size: 14px;
   line-height: 1;
-  opacity: 0.9;
-  pointer-events: none;
+  cursor: grab;
 }
 .jy-clip .clip-x {
-  position: absolute; top: 4px; right: 4px;
-  width: 18px; height: 18px; border: 0; border-radius: 50%;
-  background: rgba(15,23,42,.55); color: #fff; cursor: pointer; font-size: 12px; line-height: 18px;
-  z-index: 2;
+  margin-left: auto;
+  width: 22px; height: 22px; border: 0; border-radius: 50%;
+  background: rgba(15,23,42,.55); color: #fff; cursor: pointer; font-size: 13px; line-height: 22px;
 }
 .jy-clip .clip-x:hover { background: #ef4444; }
 .jy-clip .clip-tools {
-  display: flex; gap: 4px; margin-top: 6px; flex-wrap: wrap;
+  display: flex; gap: 6px; margin-top: 8px; flex-wrap: wrap;
 }
 .jy-clip .clip-tools button {
   border: 1px solid #cbd5e1; background: #fff; color: #334155;
-  border-radius: 6px; font-size: 10px; padding: 2px 6px; cursor: pointer;
+  border-radius: 8px; font-size: 11px; padding: 4px 8px; cursor: pointer;
 }
 .jy-clip .clip-tools button:hover { border-color: var(--accent); color: #0f766e; }
 .jy-clip.removed {
-  opacity: .35;
+  opacity: .4;
   filter: grayscale(0.7);
   border-style: dashed;
 }
+.jy-clip.removed .clip-text-edit { pointer-events: none; }
 
 /* nicer scrollbars for structure panel */
 .jy-tracks::-webkit-scrollbar,

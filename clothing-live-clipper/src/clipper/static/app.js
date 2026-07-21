@@ -122,7 +122,29 @@ function moveClip(fromRole, fromIdx, toRole, toIdx) {
   renderTracks(planEdit);
 }
 
+function syncPlanFieldsFromDom() {
+  if (!planEdit) return;
+  document.querySelectorAll(".jy-clip").forEach((card) => {
+    const role = card.dataset.role;
+    const idx = Number(card.dataset.idx);
+    if (!planEdit?.[role]?.[idx]) return;
+    const ta = card.querySelector(".clip-text-edit");
+    const t0 = card.querySelector(".clip-t0");
+    const t1 = card.querySelector(".clip-t1");
+    if (ta) planEdit[role][idx].text = ta.value;
+    if (t0) planEdit[role][idx].t0_ms = Math.max(0, Number(t0.value || 0));
+    if (t1) {
+      const v1 = Math.max(0, Number(t1.value || 0));
+      const v0 = planEdit[role][idx].t0_ms;
+      planEdit[role][idx].t1_ms = v1 > v0 ? v1 : v0 + 500;
+    }
+  });
+}
+
 function renderTracks(plan) {
+  // keep in-progress edits when re-rendering same plan
+  if (planEdit) syncPlanFieldsFromDom();
+
   // prefer editable working copy
   const src = planEdit || clonePlan(plan || {});
   if (!planEdit && (plan?.golden?.length || plan?.trust?.length || plan?.cta?.length)) {
@@ -134,21 +156,30 @@ function renderTracks(plan) {
   const mk = (arr, role, key) => {
     const list = arr || [];
     if (!list.length) {
-      return '<div class="jy-drop-hint" data-role="' + key + '">拖到这里</div>';
+      return '<div class="jy-drop-hint" data-role="' + key + '">拖到这里 / 可从其他轨移入</div>';
     }
     return list
       .map((s, idx) => {
-        const a = (s.t0_ms / 1000).toFixed(1);
-        const b = (s.t1_ms / 1000).toFixed(1);
+        const a = (Number(s.t0_ms || 0) / 1000).toFixed(1);
+        const b = (Number(s.t1_ms || 0) / 1000).toFixed(1);
         const removed = !!s.removed;
-        return `<div class="jy-clip ${role} ${removed ? "removed" : ""}" draggable="true" data-role="${key}" data-idx="${idx}">
-          <button type="button" class="clip-x" title="${removed ? "恢复" : "删除"}">${removed ? "+" : "×"}</button>
-          <div class="clip-drag" title="拖动调整位置">⠿</div>
-          <div class="clip-text">${escapeHtml(s.text || "")}</div>
-          <div class="meta">${a}s–${b}s · 可拖拽</div>
+        return `<div class="jy-clip expanded ${role} ${removed ? "removed" : ""}" draggable="true" data-role="${key}" data-idx="${idx}" data-id="${escapeHtml(s.clip_id || "")}">
+          <div class="clip-top">
+            <span class="clip-drag" title="拖动调整位置">⠿</span>
+            <span class="clip-badge">${key === "golden" ? "黄金" : key === "trust" ? "信任" : "收尾"} #${idx + 1}</span>
+            <button type="button" class="clip-x" title="${removed ? "恢复" : "删除"}">${removed ? "+" : "×"}</button>
+          </div>
+          <textarea class="clip-text-edit" rows="4" placeholder="编辑这段口播词…">${escapeHtml(s.text || "")}</textarea>
+          <div class="clip-time-row">
+            <label>开始(s)<input class="clip-t0s" type="number" step="0.1" min="0" value="${a}" /></label>
+            <label>结束(s)<input class="clip-t1s" type="number" step="0.1" min="0" value="${b}" /></label>
+            <input class="clip-t0" type="hidden" value="${Number(s.t0_ms || 0)}" />
+            <input class="clip-t1" type="hidden" value="${Number(s.t1_ms || 0)}" />
+          </div>
+          <div class="meta">可改口播词与时间 · 拖拽排序 · 应用后按此反向剪视频</div>
           <div class="clip-tools">
-            <button type="button" class="clip-up" title="同轨左移">←</button>
-            <button type="button" class="clip-down" title="同轨右移">→</button>
+            <button type="button" class="clip-up" title="同轨上移">↑</button>
+            <button type="button" class="clip-down" title="同轨下移">↓</button>
             <button type="button" class="clip-prev" title="移到上一轨">↑轨</button>
             <button type="button" class="clip-next" title="移到下一轨">↓轨</button>
           </div>
@@ -165,11 +196,48 @@ function renderTracks(plan) {
 }
 
 function bindTrackEditors() {
+  // sync seconds inputs <-> ms hidden fields + model
+  document.querySelectorAll(".jy-clip").forEach((card) => {
+    const role = card.dataset.role;
+    const idx = Number(card.dataset.idx);
+    const t0s = card.querySelector(".clip-t0s");
+    const t1s = card.querySelector(".clip-t1s");
+    const t0 = card.querySelector(".clip-t0");
+    const t1 = card.querySelector(".clip-t1");
+    const ta = card.querySelector(".clip-text-edit");
+
+    const push = () => {
+      if (!planEdit?.[role]?.[idx]) return;
+      if (ta) planEdit[role][idx].text = ta.value;
+      if (t0s && t0) {
+        const ms0 = Math.max(0, Math.round(Number(t0s.value || 0) * 1000));
+        t0.value = String(ms0);
+        planEdit[role][idx].t0_ms = ms0;
+      }
+      if (t1s && t1) {
+        const ms1 = Math.max(0, Math.round(Number(t1s.value || 0) * 1000));
+        t1.value = String(ms1);
+        const ms0 = planEdit[role][idx].t0_ms || 0;
+        planEdit[role][idx].t1_ms = ms1 > ms0 ? ms1 : ms0 + 500;
+        if (ms1 <= ms0) t1s.value = ((ms0 + 500) / 1000).toFixed(1);
+      }
+      updatePlanHint();
+    };
+    ta?.addEventListener("input", push);
+    t0s?.addEventListener("change", push);
+    t1s?.addEventListener("change", push);
+    // don't start drag from editors
+    ta?.addEventListener("mousedown", (e) => e.stopPropagation());
+    t0s?.addEventListener("mousedown", (e) => e.stopPropagation());
+    t1s?.addEventListener("mousedown", (e) => e.stopPropagation());
+  });
+
   // delete / restore
   document.querySelectorAll(".jy-clip .clip-x").forEach((btn) => {
     btn.onclick = (e) => {
       e.preventDefault();
       e.stopPropagation();
+      syncPlanFieldsFromDom();
       const card = btn.closest(".jy-clip");
       const role = card.dataset.role;
       const idx = Number(card.dataset.idx);
@@ -179,11 +247,12 @@ function bindTrackEditors() {
     };
   });
 
-  // keyboard-like nudge buttons
+  // nudge buttons (vertical order inside track)
   document.querySelectorAll(".jy-clip .clip-up").forEach((btn) => {
     btn.onclick = (e) => {
       e.preventDefault();
       e.stopPropagation();
+      syncPlanFieldsFromDom();
       const card = btn.closest(".jy-clip");
       const role = card.dataset.role;
       const idx = Number(card.dataset.idx);
@@ -195,11 +264,11 @@ function bindTrackEditors() {
     btn.onclick = (e) => {
       e.preventDefault();
       e.stopPropagation();
+      syncPlanFieldsFromDom();
       const card = btn.closest(".jy-clip");
       const role = card.dataset.role;
       const idx = Number(card.dataset.idx);
       if (!planEdit?.[role] || idx >= planEdit[role].length - 1) return;
-      // insert after next: remove first then insert at idx+1
       const arr = planEdit[role];
       const item = arr.splice(idx, 1)[0];
       arr.splice(idx + 1, 0, item);
@@ -210,6 +279,7 @@ function bindTrackEditors() {
     btn.onclick = (e) => {
       e.preventDefault();
       e.stopPropagation();
+      syncPlanFieldsFromDom();
       const card = btn.closest(".jy-clip");
       const role = card.dataset.role;
       const idx = Number(card.dataset.idx);
@@ -222,6 +292,7 @@ function bindTrackEditors() {
     btn.onclick = (e) => {
       e.preventDefault();
       e.stopPropagation();
+      syncPlanFieldsFromDom();
       const card = btn.closest(".jy-clip");
       const role = card.dataset.role;
       const idx = Number(card.dataset.idx);
@@ -231,13 +302,14 @@ function bindTrackEditors() {
     };
   });
 
-  // drag & drop free move
+  // drag & drop free move (handle area preferred)
   document.querySelectorAll(".jy-clip[draggable='true']").forEach((card) => {
     card.addEventListener("dragstart", (e) => {
-      if (e.target.closest("button")) {
+      if (e.target.closest("button, textarea, input")) {
         e.preventDefault();
         return;
       }
+      syncPlanFieldsFromDom();
       card.classList.add("dragging");
       e.dataTransfer.effectAllowed = "move";
       e.dataTransfer.setData(
@@ -257,13 +329,12 @@ function bindTrackEditors() {
       e.preventDefault();
       e.dataTransfer.dropEffect = "move";
       track.classList.add("drag-over");
-      // highlight insert position on hovered clip
       const overClip = e.target.closest(".jy-clip");
       document.querySelectorAll(".jy-clip").forEach((c) => c.classList.remove("drag-over-left", "drag-over-right"));
       if (overClip && track.contains(overClip)) {
         const rect = overClip.getBoundingClientRect();
-        const mid = rect.left + rect.width / 2;
-        overClip.classList.add(e.clientX < mid ? "drag-over-left" : "drag-over-right");
+        const mid = rect.top + rect.height / 2;
+        overClip.classList.add(e.clientY < mid ? "drag-over-left" : "drag-over-right");
       }
     });
     track.addEventListener("dragleave", (e) => {
@@ -282,22 +353,19 @@ function bindTrackEditors() {
       const fromIdx = Number(payload.idx);
       if (!planEdit?.[fromRole]?.[fromIdx]) return;
 
-      // determine target track from drop container id
       const trackId = track.id; // golden-track / trust-track / cta-track
       const toRole = trackId.replace("-track", "");
       if (!TRACK_ORDER.includes(toRole)) return;
 
-      // insert index: before/after hovered clip, or end
       let toIdx = planEdit[toRole].length;
       const overClip = e.target.closest(".jy-clip");
       if (overClip && track.contains(overClip) && overClip.dataset.role === toRole) {
         const overIdx = Number(overClip.dataset.idx);
         const rect = overClip.getBoundingClientRect();
-        const mid = rect.left + rect.width / 2;
-        toIdx = e.clientX < mid ? overIdx : overIdx + 1;
+        const mid = rect.top + rect.height / 2;
+        toIdx = e.clientY < mid ? overIdx : overIdx + 1;
       }
 
-      // adjust index if moving within same track forward
       if (fromRole === toRole && fromIdx < toIdx) toIdx -= 1;
       moveClip(fromRole, fromIdx, toRole, Math.max(0, toIdx));
     });
@@ -306,17 +374,30 @@ function bindTrackEditors() {
 
 async function applyPlanEdit() {
   if (!currentJobId || !planEdit) return;
+  syncPlanFieldsFromDom();
+  const clean = (arr) =>
+    (arr || [])
+      .filter((s) => !s.removed)
+      .map((s) => ({
+        clip_id: s.clip_id,
+        role: s.role,
+        text: String(s.text || "").trim(),
+        t0_ms: Math.max(0, Number(s.t0_ms || 0)),
+        t1_ms: Math.max(Number(s.t0_ms || 0) + 300, Number(s.t1_ms || 0)),
+        score: Number(s.score || 0),
+      }))
+      .filter((s) => s.text);
   const payload = {
     reclip: true,
-    golden: (planEdit.golden || []).filter((s) => !s.removed),
-    trust: (planEdit.trust || []).filter((s) => !s.removed),
-    cta: (planEdit.cta || []).filter((s) => !s.removed),
+    golden: clean(planEdit.golden),
+    trust: clean(planEdit.trust),
+    cta: clean(planEdit.cta),
   };
   if (!payload.golden.length && !payload.trust.length && !payload.cta.length) {
-    alert("请至少保留一个片段");
+    alert("请至少保留一个片段，并填写口播词");
     return;
   }
-  $("plan-edit-hint").textContent = "正在按调整后的结构重剪…";
+  $("plan-edit-hint").textContent = "正在按修改后的口播与结构反向剪视频…";
   $("plan-apply").disabled = true;
   try {
     const res = await fetch(`/api/jobs/${encodeURIComponent(currentJobId)}/plan`, {

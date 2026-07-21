@@ -6,7 +6,9 @@ from typing import Any
 
 SIZE_WORDS = (
     "尺码", "选码", "偏大", "偏小", "胸围", "腰围", "臀围", "身高", "穿M", "穿S",
-    "穿L", "穿XL", "均码", "加大码", "码数", "建议穿", "斤穿",
+    "穿L", "穿XL", "穿XXL", "均码", "加大码", "码数", "建议穿", "斤穿",
+    "体重", "肩宽", "袖长", "衣长", "裤长", "试码", "报尺码", "该穿", "能穿",
+    "S码", "M码", "L码", "XL码", "XXL码", "选码表",
 )
 SENTIMENT_WORDS = (
     "做了五年", "不容易", "感谢陪伴", "创业", "初心", "故事是这样", "一路走来",
@@ -100,16 +102,16 @@ def classify(text: str) -> str:
     off = _has_any(t, OFFTOPIC_WORDS)
     garment = is_garment_line(t)
 
-    # never keep price
+    # never keep price / size (global product policy)
     if price:
+        return "drop"
+    if size:
         return "drop"
     # non-clothing topics
     if off and not strong:
         return "drop"
     if not garment:
         # pure 好看/白色/客户 等不够
-        return "drop"
-    if size and not strong:
         return "drop"
     if sent and not strong:
         return "drop"

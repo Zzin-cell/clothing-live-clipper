@@ -46,6 +46,43 @@ def test_golden_excludes_chitchat_and_has_value():
     assert any(k in golden_text for k in ("显瘦", "闭眼入", "醋酸", "收腰", "面料", "版型"))
 
 
+def test_global_policy_size_excluded_and_unique_first():
+    from clipper.models import ClaimType, Clip
+
+    clips = [
+        Clip(
+            clip_id="s1",
+            text="这件建议穿M码偏大选小一码",
+            t0_ms=0,
+            t1_ms=2000,
+            claim_types=[ClaimType.SIZE, ClaimType.SELLING_POINT],
+            score=50,
+        ),
+        Clip(
+            clip_id="u1",
+            text="独家面料专利凉感不起球",
+            t0_ms=3000,
+            t1_ms=6000,
+            claim_types=[ClaimType.FABRIC, ClaimType.SELLING_POINT],
+            score=40,
+        ),
+        Clip(
+            clip_id="n1",
+            text="这件面料也很软",
+            t0_ms=7000,
+            t1_ms=9000,
+            claim_types=[ClaimType.FABRIC],
+            score=35,
+        ),
+    ]
+    plan = build_timeline_plan(clips, Settings(target_duration_s=60, playback_speed=1.0))
+    all_text = " ".join(s.text for s in plan.all_slots())
+    assert "M码" not in all_text and "选小一码" not in all_text
+    assert plan.golden, "need golden features"
+    assert "独家" in plan.golden[0].text or "专利" in plan.golden[0].text
+    assert any("unique_features_first" in w or "size_excluded" in w for w in plan.warnings)
+
+
 def test_global_policy_outfit_not_in_golden():
     """GLOBAL: try-on / outfit change must not lead first 20s."""
     from clipper.models import ClaimType, Clip
@@ -92,6 +129,7 @@ def test_plan_has_three_sections_when_enough_material():
     clips = _clips_from_fixture()
     plan = build_timeline_plan(clips, Settings(target_duration_s=60))
     assert plan.golden
-    assert plan.trust or plan.cta
+    # under strict clothing policies, body may be short; golden + duration is required
     assert plan.total_duration_ms > 0
     assert plan.golden20_passed is True
+    assert any(s.role == "hook" for s in plan.golden)

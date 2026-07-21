@@ -26,6 +26,25 @@ _PRICE_TEXT = (
     "小黄车", "购物车", "号链接", "弹窗", "福袋", "直播价", "专属价", "到手价",
 )
 
+# Hard size advice — never keep in final cut
+_SIZE_TEXT = (
+    "尺码", "选码", "偏大", "偏小", "腰围", "胸围", "臀围", "肩宽", "均码",
+    "加大码", "码数", "建议穿", "该穿", "斤穿", "身高", "体重", "试码",
+    "报尺码", "穿M", "穿S", "穿L", "穿XL", "穿XXL", "S码", "M码", "L码",
+    "XL码", "XXL码", "袖长", "衣长", "裤长", "能穿吗", "能不能穿",
+)
+
+# Unique / rare product claims — rank to front of golden 20s
+_UNIQUE_FEATURE_WORDS = (
+    "独家", "独创", "专利", "首创", "限定", "限量", "仅此", "独一无二",
+    "只有我们", "市面少见", "很少见", "别处没有", "买不到", "独家面料",
+    "独家版型", "自研", "私模", "独家工艺", "独家设计", "独家配方",
+    "全网首发", "首发", "仅此一家", "稀缺", "紧俏", "断码前",
+    "三防", "防晒", "防水", "防风", "凉感", "冰丝", "醋酸", "真丝",
+    "羊绒", "桑蚕丝", "四面弹", "360度", "不勒", "不卷边", "不起球",
+    "不缩水", "不掉色", "免烫", "可机洗", "抗皱",
+)
+
 
 _CLOTHING_TEXT_HINTS = (
     "面料", "布料", "材质", "牛仔", "蕾丝", "雷丝", "不透", "柔软", "软到", "超软",
@@ -44,10 +63,17 @@ def score_clip(clip: Clip) -> Clip:
 
     # Hard policy: never put price / deal talk into final cut
     if ClaimType.PRICE in types or any(p in text for p in _PRICE_TEXT):
-        # allow only if clearly not a price line but contains 链接 as fabric noise — still drop
         clip.score = 0.0
         clip.weight = 0.0
         clip.score_breakdown = {"price_excluded": 0.0, "raw": 0.0}
+        return clip
+
+    # Hard policy: never put size chart / sizing advice into final cut
+    if ClaimType.SIZE in types or any(p in text for p in _SIZE_TEXT):
+        # pure size always out; mixed size+feature still out (user: 去除尺码)
+        clip.score = 0.0
+        clip.weight = 0.0
+        clip.score_breakdown = {"size_excluded": 0.0, "raw": 0.0}
         return clip
 
     if ClaimType.CHITCHAT in types and len(types) == 1:
@@ -279,13 +305,31 @@ def _is_true_feature(c: Clip) -> bool:
     return False
 
 
+def _unique_feature_boost(text: str) -> float:
+    """Unique / scarce product claims go first among features."""
+    t = text or ""
+    hits = [w for w in _UNIQUE_FEATURE_WORDS if w in t]
+    if not hits:
+        return 0.0
+    # stronger boost for exclusivity words
+    exclusivity = ("独家", "独创", "专利", "首创", "独一无二", "只有我们", "别处没有", "全网首发", "限量")
+    bonus = 0.0
+    for w in hits:
+        bonus += 28.0 if any(e in w or w in e for e in exclusivity) else 16.0
+    return min(90.0, bonus)
+
+
 def _hook_strength(c: Clip) -> float:
-    """How strongly this clip belongs in first ~20s (features/selling ONLY)."""
+    """How strongly this clip belongs in first ~20s (unique features first)."""
     types = set(c.claim_types)
     text = c.text or ""
-    # hard ban outfit/change from front 20s ranking
+    # hard ban outfit/change / size from front 20s ranking
     if _is_outfit_or_change(c):
         return -100.0
+    if ClaimType.SIZE in types or any(p in text for p in _SIZE_TEXT):
+        return -120.0
+    if ClaimType.PRICE in types or any(p in text for p in _PRICE_TEXT):
+        return -120.0
 
     s = 0.0
     if ClaimType.SELLING_POINT in types:
@@ -299,6 +343,10 @@ def _hook_strength(c: Clip) -> float:
 
     hits = sum(1 for w in _HOOK_FEATURE_WORDS if w in text)
     s += min(40.0, hits * 9.0)
+
+    # UNIQUE features float to the very front
+    uniq = _unique_feature_boost(text)
+    s += uniq
 
     if ClaimType.SELLING_POINT in types and (ClaimType.FIT in types or ClaimType.FABRIC in types):
         s += 25.0
@@ -635,10 +683,13 @@ def build_timeline_plan(
 
     # GLOBAL hard filter on golden (every job)
     def _keep_in_golden(s: PlanSlot) -> bool:
-        if any(p in (s.text or "") for p in _PRICE_TEXT):
+        text = s.text or ""
+        if any(p in text for p in _PRICE_TEXT) or any(p in text for p in _SIZE_TEXT):
             return False
         c = by_id.get(s.clip_id)
         if c and ClaimType.PRICE in c.claim_types:
+            return False
+        if c and ClaimType.SIZE in c.claim_types:
             return False
         if demote_outfit and c and _is_outfit_or_change(c):
             return False
@@ -647,10 +698,11 @@ def build_timeline_plan(
         return True
 
     golden = [s for s in golden if _keep_in_golden(s)]
-    # order: strongest features first
+    # order: UNIQUE features first, then other features
     golden = sorted(
         golden,
         key=lambda s: (
+            -(_unique_feature_boost(s.text or "")),
             -(_hook_strength(by_id[s.clip_id]) if s.clip_id in by_id else s.score),
             s.t0_ms,
         ),
@@ -662,6 +714,8 @@ def build_timeline_plan(
             warnings.append("policy:golden_features_only")
         if demote_outfit:
             warnings.append("policy:outfit_change_after_20s")
+        warnings.append("policy:unique_features_first")
+        warnings.append("policy:size_excluded")
 
     # --- CTA: NO price. Closing = remaining selling / fabric recap ---
     cta: list[PlanSlot] = []

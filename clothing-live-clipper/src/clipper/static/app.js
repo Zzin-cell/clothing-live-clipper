@@ -442,15 +442,7 @@ function renderJob(data) {
   } else {
     renderTracks(data.plan || {});
   }
-  if (st === "failed") {
-    $("review-md").textContent = `失败：${data.error || "未知错误"}`;
-  } else if (data.review_md) {
-    $("review-md").textContent = data.review_md;
-  } else if (processing) {
-    $("review-md").textContent = "正在自动处理：听写打轴 → 过滤 → 排序 → 渲染…";
-  } else {
-    $("review-md").textContent = "暂无摘要";
-  }
+  // review text panel removed from UI; status shown in player bar / progress
 
   // actions
   const actions = [];

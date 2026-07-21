@@ -254,11 +254,11 @@ body {
   flex-wrap: wrap;
 }
 .jy-tracks {
-  flex: 0 0 auto;
+  flex: 1 1 auto;
+  min-height: 0;
   display: grid;
   gap: 8px;
-  margin-bottom: 10px;
-  max-height: 42%;
+  margin-bottom: 0;
   overflow-y: auto;
   overflow-x: hidden;
   overscroll-behavior: contain;
@@ -364,25 +364,8 @@ body {
   border-style: dashed;
 }
 
-.jy-review {
-  flex: 1 1 auto;
-  min-height: 80px;
-  overflow: auto;
-  overscroll-behavior: contain;
-  white-space: pre-wrap;
-  word-break: break-word;
-  background: #17171a;
-  border-radius: 10px;
-  border: 1px solid #2f2f34;
-  padding: 10px;
-  font-size: 12px;
-  color: #c8c8ce;
-  line-height: 1.5;
-}
-
 /* nicer scrollbars for structure panel */
 .jy-tracks::-webkit-scrollbar,
-.jy-review::-webkit-scrollbar,
 .jy-left::-webkit-scrollbar,
 .jy-right::-webkit-scrollbar,
 .jy-transcript::-webkit-scrollbar,
@@ -392,7 +375,6 @@ body {
   height: 10px;
 }
 .jy-tracks::-webkit-scrollbar-thumb,
-.jy-review::-webkit-scrollbar-thumb,
 .jy-left::-webkit-scrollbar-thumb,
 .jy-right::-webkit-scrollbar-thumb,
 .jy-transcript::-webkit-scrollbar-thumb,

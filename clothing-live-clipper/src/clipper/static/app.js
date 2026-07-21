@@ -517,7 +517,7 @@ function setupForm() {
       err.textContent = String(ex.message || ex);
     } finally {
       btn.disabled = false;
-      btn.textContent = "开始智能切片";
+      btn.textContent = "开始服装切片";
     }
   });
 }

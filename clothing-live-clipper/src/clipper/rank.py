@@ -30,8 +30,9 @@ _PRICE_TEXT = (
 _CLOTHING_TEXT_HINTS = (
     "面料", "布料", "材质", "牛仔", "蕾丝", "雷丝", "不透", "柔软", "软到", "超软",
     "洗水", "破洞", "天丝", "醋酸", "显瘦", "遮肉", "版型", "收腰", "上衣", "裙子",
-    "白色", "黑色", "口袋", "穿上", "上身", "这件", "这套", "裤子", "外套", "好看",
-    "推荐", "客户", "软", "弹", "拼接",
+    "裤子", "外套", "内搭", "连衣裙", "衣服", "服装", "衬衫", "毛衣", "大衣", "风衣",
+    "口袋", "穿上", "上身", "这件", "这套", "推荐", "软", "弹", "拼接", "领口", "袖口",
+    "开叉", "高腰", "梨形", "闭眼入", "显白", "垂感", "透气",
 )
 
 
@@ -249,11 +250,16 @@ def _hook_strength(c: Clip) -> float:
         s += 20.0
     if any(w in text for w in ("不透", "显瘦", "遮肉", "软到", "超级软", "面料")):
         s += 15.0
-    # demote pure vague 好看 / try-on without feature
+    # demote pure vague 好看 / try-on without garment feature
     if "好看" in text and hits == 0 and ClaimType.SELLING_POINT not in types:
-        s -= 20.0
+        s -= 35.0
     if re.search(r"穿一下|打一下", text) and hits == 0:
-        s -= 15.0
+        s -= 25.0
+    # hard: not garment-ish → not for front 20s
+    if hits == 0 and not (
+        types & {ClaimType.SELLING_POINT, ClaimType.FIT, ClaimType.FABRIC, ClaimType.DETAIL, ClaimType.OUTFIT}
+    ):
+        s -= 40.0
     s += c.score * 0.35
     return s
 

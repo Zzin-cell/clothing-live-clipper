@@ -25,7 +25,7 @@ JOBS_DIR = APP_ROOT / "output" / "web_jobs"
 SAMPLE_TRANSCRIPT = APP_ROOT / "tests" / "fixtures" / "sample_transcript.json"
 
 ALLOWED_TRANSCRIPT = {".json", ".srt"}
-ALLOWED_VIDEO = {".mp4", ".mov", ".mkv", ".webm", ".avi"}
+ALLOWED_VIDEO = {".mp4", ".mov", ".mkv", ".webm", ".avi", ".m4v", ".ts", ".mts", ".m2ts"}
 
 
 class ConfigUpdate(BaseModel):

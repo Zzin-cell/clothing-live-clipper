@@ -55,6 +55,21 @@ def test_create_video_only_queues(client, monkeypatch):
     assert list((jobs / job_id / "uploads").glob("*.mp4"))
 
 
+def test_create_accepts_ts(client, monkeypatch):
+    monkeypatch.setattr("clipper.web.start_job_async", lambda d: True)
+    c, jobs = client
+    # minimal MPEG-TS sync byte pattern is enough for extension acceptance
+    video_bytes = b"\x47" + b"\x00" * 187
+    r = c.post(
+        "/api/jobs",
+        data={"target_seconds": "60", "render": "true", "auto_process": "true"},
+        files={"video": ("live.ts", io.BytesIO(video_bytes), "video/mp2t")},
+    )
+    assert r.status_code == 200, r.text
+    job_id = r.json()["job_id"]
+    assert list((jobs / job_id / "uploads").glob("*.ts"))
+
+
 def test_agent_next_claim_and_complete(client, monkeypatch):
     monkeypatch.setattr("clipper.web.start_job_async", lambda d: False)
     c, jobs = client

@@ -13,7 +13,7 @@ SRC = Path(r"C:\Users\MR\Desktop\检查文件\待剪辑")
 DST = Path(r"C:\Users\MR\Desktop\检查文件\已经完成")
 WORK = ROOT / "output" / "agent_jobs" / "desktop_batch"
 
-VIDEO_EXT = {".mp4", ".mov", ".mkv", ".webm", ".avi", ".m4v", ".flv"}
+VIDEO_EXT = {".mp4", ".mov", ".mkv", ".webm", ".avi", ".m4v", ".flv", ".ts", ".mts", ".m2ts"}
 
 
 def main() -> int:

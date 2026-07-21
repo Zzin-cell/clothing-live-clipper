@@ -26,7 +26,12 @@ def main() -> int:
             meta = json.loads(meta_p.read_text(encoding="utf-8"))
             uploads = d / "uploads"
             vids = list(uploads.glob("*.*")) if uploads.exists() else []
-            vids = [v for v in vids if v.suffix.lower() in {".mp4", ".mov", ".mkv", ".webm", ".avi"}]
+            vids = [
+                v
+                for v in vids
+                if v.suffix.lower()
+                in {".mp4", ".mov", ".mkv", ".webm", ".avi", ".m4v", ".ts", ".mts", ".m2ts"}
+            ]
             if vids:
                 job_id = d.name
                 break

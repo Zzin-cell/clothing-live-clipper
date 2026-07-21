@@ -284,8 +284,11 @@ def main() -> int:
     meta = json.loads(meta_path.read_text(encoding="utf-8"))
     uploads = job_dir / "uploads"
     vids = [
-        p for p in uploads.iterdir()
-        if p.is_file() and p.suffix.lower() in {".mp4", ".mov", ".mkv", ".webm", ".avi"}
+        p
+        for p in uploads.iterdir()
+        if p.is_file()
+        and p.suffix.lower()
+        in {".mp4", ".mov", ".mkv", ".webm", ".avi", ".m4v", ".ts", ".mts", ".m2ts"}
     ] if uploads.exists() else []
     if not vids:
         fail(job_id, "missing video")

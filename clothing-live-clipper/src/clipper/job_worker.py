@@ -59,7 +59,17 @@ def _find_video(job_dir: Path) -> Path | None:
     if not uploads.exists():
         return None
     for p in uploads.iterdir():
-        if p.is_file() and p.suffix.lower() in {".mp4", ".mov", ".mkv", ".webm", ".avi", ".m4v"}:
+        if p.is_file() and p.suffix.lower() in {
+            ".mp4",
+            ".mov",
+            ".mkv",
+            ".webm",
+            ".avi",
+            ".m4v",
+            ".ts",
+            ".mts",
+            ".m2ts",
+        }:
             return p
     return None
 

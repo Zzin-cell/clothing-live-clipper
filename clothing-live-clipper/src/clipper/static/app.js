@@ -573,7 +573,7 @@ function setupForm() {
     }
   });
   fileInput.addEventListener("change", () => {
-    $("file-name").textContent = fileInput.files?.[0]?.name || "支持 mp4 / mov / mkv / webm";
+    $("file-name").textContent = fileInput.files?.[0]?.name || "支持 mp4 / mov / mkv / webm / ts";
   });
 
   form.addEventListener("submit", async (e) => {

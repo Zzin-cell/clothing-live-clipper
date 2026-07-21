@@ -2,25 +2,16 @@ const $ = (id) => document.getElementById(id);
 
 const STATUS_LABEL = {
   queued: "排队中",
-  claimed: "Agent处理中",
-  needs_transcript: "待补转写",
+  starting: "启动中",
   processing: "处理中",
+  claimed: "处理中",
   success: "完成",
   success_partial: "部分完成",
   failed: "失败",
 };
 
-function slotHtml(slots) {
-  if (!slots || !slots.length) return "<li class='muted'>（空）</li>";
-  return slots
-    .map((s) => {
-      const sec0 = (s.t0_ms / 1000).toFixed(1);
-      const sec1 = (s.t1_ms / 1000).toFixed(1);
-      const score = typeof s.score === "number" ? s.score.toFixed(0) : "-";
-      return `<li>${escapeHtml(s.text)}<span class="meta">${sec0}s–${sec1}s · score ${score} · ${escapeHtml(s.role || "")}</span></li>`;
-    })
-    .join("");
-}
+let currentJobId = null;
+let pollTimer = null;
 
 function escapeHtml(str) {
   return String(str ?? "")
@@ -30,506 +21,360 @@ function escapeHtml(str) {
     .replaceAll('"', "&quot;");
 }
 
-function statusChipClass(status) {
+function statusClass(status) {
   if (status === "success") return "ok";
-  if (status === "queued" || status === "claimed") return "needs";
-  if (status === "needs_transcript") return "needs";
-  if (status === "failed") return "warn";
-  if (status === "success_partial" || status === "processing") return "warn";
-  return "";
+  if (status === "failed") return "bad";
+  if (status === "success_partial") return "warn";
+  return "warn";
 }
 
-function applyLights(lights) {
-  const root = $("status-lights");
-  if (!root || !lights) return;
-  root.querySelectorAll(".light").forEach((el) => {
-    const k = el.getAttribute("data-k");
-    const v = lights[k] || "yellow";
-    el.classList.remove("green", "yellow", "red");
-    el.classList.add(v);
-  });
-}
-
-function row(label, ok, detail) {
-  const cls = ok === true ? "ok" : ok === false ? "bad" : "warn";
-  const mark = ok === true ? "✓" : ok === false ? "!" : "·";
-  return `<div class="check-row ${cls}"><span class="mark">${mark}</span><div><strong>${escapeHtml(
-    label
-  )}</strong><div class="muted">${escapeHtml(detail || "")}</div></div></div>`;
-}
-
-function renderStatus(st) {
-  window.__lastStatus = st;
-  applyLights(st.lights || {});
-  const banner = $("setup-banner");
-  if (banner) {
-    banner.hidden = false;
-    banner.innerHTML =
-      "输入<strong>只要视频</strong>。上传后<strong>排队中</strong>，请在 Agent 对话发送：<code>处理队列</code>";
-  }
-
-  const el = $("health");
-  if (el) {
-    el.className = "pill-status ok";
-    el.innerHTML = "<strong>提交台就绪</strong>";
-    el.title = `ffmpeg: ${st.ffmpeg?.ok ? "ok" : "no"} · 处理请 Agent 执行 skill`;
-  }
-
-  const list = [];
-  list.push(row("Web 服务", st.service?.ok, `${st.service?.host}:${st.service?.port}`));
-  list.push(row("ffmpeg", st.ffmpeg?.ok, st.ffmpeg?.version || st.ffmpeg?.path || "未找到"));
-  list.push(row("ffprobe", st.ffprobe?.ok, st.ffprobe?.path || "可选"));
-  list.push(
-    row(
-      "Whisper 听写",
-      st.asr?.ok === true ? true : st.asr?.configured ? null : false,
-      st.asr?.configured
-        ? `${st.asr.model} · ${st.asr.base_url} · ${st.asr.source || ""}${
-            st.asr.ok === true ? " · 探测通过" : st.asr.ok === false ? " · 探测失败" : ""
-          }`
-        : st.asr?.note || "未配置 API Key"
-    )
-  );
-  list.push(
-    row(
-      "LLM（可选）",
-      st.llm?.ok === true ? true : st.llm?.configured ? null : null,
-      st.llm?.configured ? `${st.llm.model}` : "未配置（规则降级）"
-    )
-  );
-  list.push(
-    row(
-      "输出目录",
-      st.storage?.ok,
-      `${st.storage?.path || ""} · 剩余 ${st.storage?.free_gb ?? "?"} GB`
-    )
-  );
-  list.push(
-    row(
-      "最近任务",
-      st.recent_health?.ok,
-      st.recent_health?.failed_count
-        ? `失败 ${st.recent_health.failed_count} 条`
-        : "近期正常"
-    )
-  );
-  const cl = $("checklist");
-  if (cl) cl.innerHTML = list.join("");
-
-  const compat = $("compat-box");
-  if (compat && st.compat) {
-    compat.innerHTML = [
-      `<div><strong>听写 ASR</strong><ul>${(st.compat.asr || [])
-        .map((x) => `<li>${escapeHtml(x)}</li>`)
-        .join("")}</ul></div>`,
-      `<div><strong>对话 LLM</strong><ul>${(st.compat.llm || [])
-        .map((x) => `<li>${escapeHtml(x)}</li>`)
-        .join("")}</ul></div>`,
-    ].join("");
-  }
-
-  const env = $("env-box");
-  if (env) {
-    env.textContent = JSON.stringify(
-      {
-        python: st.deps?.python,
-        platform: st.deps?.platform,
-        packages: st.deps?.packages,
-        storage: st.storage,
-        ffmpeg: st.ffmpeg,
-        config: st.config,
-        checked_at: st.checked_at,
-      },
-      null,
-      2
-    );
-  }
-
-  const rj = $("recent-jobs");
-  if (rj) {
-    const jobs = st.recent_jobs || [];
-    if (!jobs.length) rj.innerHTML = "<div class='empty'>暂无任务</div>";
-    else {
-      rj.innerHTML = jobs
-        .map((j) => {
-          return `<div class="job-item" data-id="${escapeHtml(j.job_id)}">
-            <div>
-              <div class="id">${escapeHtml(j.job_id)}</div>
-              <div class="muted">${escapeHtml(j.status || "")} ${
-            j.error ? "· " + escapeHtml(j.error) : ""
-          }</div>
-            </div>
-            <div class="muted">${escapeHtml(j.created_at || "")}</div>
-          </div>`;
-        })
-        .join("");
-      rj.querySelectorAll(".job-item").forEach((n) =>
-        n.addEventListener("click", () => {
-          closeSettings();
-          showJob(n.dataset.id);
-        })
-      );
-    }
-  }
-
-  // fill config form defaults
-  const cfg = st.config || {};
-  if ($("cfg-base-url") && !$("cfg-base-url").dataset.touched) {
-    $("cfg-base-url").value = cfg.base_url || "";
-  }
-  if ($("cfg-asr-model") && !$("cfg-asr-model").dataset.touched) {
-    $("cfg-asr-model").value = cfg.asr_model || "whisper-1";
-  }
-  if ($("cfg-llm-model") && !$("cfg-llm-model").dataset.touched) {
-    $("cfg-llm-model").value = cfg.llm_model || "gpt-4o-mini";
-  }
-  if ($("cfg-key-hint")) {
-    $("cfg-key-hint").textContent = cfg.has_api_key
-      ? `已配置 · 末尾 ${cfg.api_key_hint || "****"} · 来源 ${cfg.source || ""}`
-      : "未配置 API Key";
-  }
-  if ($("cfg-llm-enabled")) $("cfg-llm-enabled").checked = cfg.llm_enabled !== false;
-}
-
-async function loadSystemStatus() {
-  const res = await fetch("/api/system/status");
-  if (!res.ok) throw new Error("status failed");
-  const st = await res.json();
-  renderStatus(st);
-  return st;
+function stageLabel(stage) {
+  const map = {
+    queued: "排队",
+    starting: "启动",
+    extract_audio: "抽音频",
+    asr: "智能口播打轴",
+    filter: "过滤无效词",
+    clipper: "卖点排序",
+    render: "渲染成片",
+    done: "完成",
+    failed: "失败",
+  };
+  return map[stage] || stage || "处理中";
 }
 
 async function loadHealth() {
+  const el = $("health");
   try {
-    await loadSystemStatus();
+    const res = await fetch("/api/health");
+    const data = await res.json();
+    const ok = !!data.ok && !!data.ffmpeg;
+    el.className = "jy-pill " + (ok ? "ok" : "bad");
+    el.textContent = ok
+      ? `本机就绪 · ffmpeg${data.ffmpeg ? "✓" : "·"} · 自动切片`
+      : `环境异常 · ffmpeg${data.ffmpeg ? "✓" : "缺失"}`;
   } catch (e) {
-    const el = $("health");
-    if (el) {
-      el.className = "pill-status bad";
-      el.textContent = "无法连接后端";
-      el.title = String(e);
-    }
+    el.className = "jy-pill bad";
+    el.textContent = "无法连接后端";
   }
 }
 
-function openSettings() {
-  $("drawer-backdrop").hidden = false;
-  $("settings-drawer").hidden = false;
-  document.body.classList.add("drawer-open");
-  loadSystemStatus().catch(() => {});
+function renderTracks(plan) {
+  const mk = (arr, role) => {
+    if (!arr || !arr.length) return '<div class="jy-empty" style="padding:8px">（空）</div>';
+    return arr
+      .map((s) => {
+        const a = (s.t0_ms / 1000).toFixed(1);
+        const b = (s.t1_ms / 1000).toFixed(1);
+        return `<div class="jy-clip ${role}"><div>${escapeHtml(s.text || "")}</div><div class="meta">${a}s–${b}s</div></div>`;
+      })
+      .join("");
+  };
+  $("golden-track").innerHTML = mk(plan.golden, "hook");
+  $("trust-track").innerHTML = mk(plan.trust, "trust");
+  $("cta-track").innerHTML = mk(plan.cta, "cta");
 }
 
-function closeSettings() {
-  $("drawer-backdrop").hidden = true;
-  $("settings-drawer").hidden = true;
-  document.body.classList.remove("drawer-open");
-}
-
-function setupSettings() {
-  $("open-settings")?.addEventListener("click", openSettings);
-  $("close-settings")?.addEventListener("click", closeSettings);
-  $("drawer-backdrop")?.addEventListener("click", closeSettings);
-  document.addEventListener("keydown", (e) => {
-    if (e.key === "Escape") closeSettings();
-  });
-
-  document.querySelectorAll(".drawer-tabs .tab").forEach((tab) => {
-    tab.addEventListener("click", () => {
-      document.querySelectorAll(".drawer-tabs .tab").forEach((t) => t.classList.remove("active"));
-      document.querySelectorAll(".tab-panel").forEach((p) => p.classList.remove("active"));
-      tab.classList.add("active");
-      const id = "tab-" + tab.dataset.tab;
-      $(id)?.classList.add("active");
-    });
-  });
-
-  ["cfg-base-url", "cfg-asr-model", "cfg-llm-model", "cfg-api-key"].forEach((id) => {
-    $(id)?.addEventListener("input", () => {
-      $(id).dataset.touched = "1";
-    });
-  });
-
-  $("btn-refresh-status")?.addEventListener("click", () => loadSystemStatus());
-  $("btn-probe-whisper")?.addEventListener("click", async () => {
-    const res = await fetch("/api/system/probe", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ target: "whisper" }),
-    });
-    const data = await res.json();
-    if (data.status) renderStatus(data.status);
-    alert(
-      data.probe?.ok
-        ? "Whisper 探测通过"
-        : "Whisper 探测失败：" + (data.probe?.error || data.probe?.detail || "")
-    );
-  });
-  $("btn-probe-llm")?.addEventListener("click", async () => {
-    const res = await fetch("/api/system/probe", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ target: "llm" }),
-    });
-    const data = await res.json();
-    if (data.status) renderStatus(data.status);
-    alert(
-      data.probe?.ok
-        ? "LLM 探测通过"
-        : "LLM 探测失败：" + (data.probe?.error || data.probe?.detail || "")
-    );
-  });
-
-  $("config-form")?.addEventListener("submit", async (e) => {
-    e.preventDefault();
-    const err = $("cfg-error");
-    const ok = $("cfg-ok");
-    err.hidden = true;
-    ok.hidden = true;
-    const body = {
-      persist: !!$("cfg-persist")?.checked,
-      base_url: $("cfg-base-url")?.value || undefined,
-      asr_model: $("cfg-asr-model")?.value || undefined,
-      llm_model: $("cfg-llm-model")?.value || undefined,
-      llm_enabled: !!$("cfg-llm-enabled")?.checked,
-      asr_enabled: true,
-      asr_provider: "openai_whisper",
-    };
-    const key = ($("cfg-api-key")?.value || "").trim();
-    if (key) body.api_key = key;
-    try {
-      const res = await fetch("/api/system/config", {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body),
-      });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(data.detail || "保存失败");
-      if (data.status) renderStatus(data.status);
-      if ($("cfg-api-key")) $("cfg-api-key").value = "";
-      ok.hidden = false;
-      ok.textContent = body.persist ? "已保存到本机 .env" : "已应用到当前会话";
-    } catch (ex) {
-      err.hidden = false;
-      err.textContent = String(ex.message || ex);
+async function loadTranscript(jobId) {
+  const box = $("transcript-list");
+  $("asr-count").textContent = "—";
+  try {
+    const res = await fetch(`/api/jobs/${encodeURIComponent(jobId)}/files/transcript_for_clipper.json`);
+    if (!res.ok) {
+      // fallback asr
+      const res2 = await fetch(`/api/jobs/${encodeURIComponent(jobId)}/files/transcript_asr.json`);
+      if (!res2.ok) {
+        box.innerHTML = '<div class="jy-empty">口播尚未生成</div>';
+        return;
+      }
+      const raw = await res2.json();
+      $("asr-count").textContent = `${raw.length || 0} 句`;
+      box.innerHTML = (raw || [])
+        .slice(0, 80)
+        .map((u) => {
+          const a = ((u.t0_ms || 0) / 1000).toFixed(1);
+          const b = ((u.t1_ms || 0) / 1000).toFixed(1);
+          return `<div class="jy-line"><div class="t">${a}s–${b}s</div>${escapeHtml(u.text || "")}</div>`;
+        })
+        .join("");
+      return;
     }
+    const kept = await res.json();
+    $("asr-count").textContent = `保留 ${kept.length || 0} 句`;
+    box.innerHTML = (kept || [])
+      .map((u) => {
+        const a = ((u.t0_ms || 0) / 1000).toFixed(1);
+        const b = ((u.t1_ms || 0) / 1000).toFixed(1);
+        return `<div class="jy-line keep"><div class="t">${a}s–${b}s</div>${escapeHtml(u.text || "")}</div>`;
+      })
+      .join("") || '<div class="jy-empty">无保留句子</div>';
+  } catch {
+    box.innerHTML = '<div class="jy-empty">口播加载失败</div>';
+  }
+}
+
+function renderJob(data) {
+  currentJobId = data.job_id;
+  $("current-job-title").textContent = data.video_source || data.job_id;
+  const st = data.status || "";
+  $("current-job-status").textContent = `${STATUS_LABEL[st] || st}${
+    data.final_duration_s ? ` · ${data.final_duration_s}s` : ""
+  }`;
+
+  // progress
+  const pb = $("progress-block");
+  const processing = ["queued", "processing", "starting", "claimed"].includes(st);
+  if (processing) {
+    pb.hidden = false;
+    const pct = Number(data.progress || (st === "queued" ? 2 : 15));
+    $("progress-bar").style.width = `${pct}%`;
+    $("progress-text").textContent = `${pct}%`;
+    $("stage-text").textContent = stageLabel(data.stage) + (data.stage_detail ? ` · ${data.stage_detail}` : "");
+  } else {
+    pb.hidden = st !== "failed";
+    if (st === "failed") {
+      pb.hidden = false;
+      $("progress-bar").style.width = "100%";
+      $("progress-text").textContent = "失败";
+      $("stage-text").textContent = data.error || "处理失败";
+    }
+  }
+
+  // video
+  const video = $("preview");
+  const files = data.files || {};
+  if (files.final) {
+    video.src = `/api/jobs/${encodeURIComponent(data.job_id)}/files/final.mp4?t=${Date.now()}`;
+    $("export-btn").disabled = false;
+    $("export-btn").onclick = () => {
+      window.open(`/api/jobs/${encodeURIComponent(data.job_id)}/files/final.mp4`, "_blank");
+    };
+  } else {
+    video.removeAttribute("src");
+    $("export-btn").disabled = true;
+  }
+
+  // tracks + review
+  renderTracks(data.plan || {});
+  if (st === "failed") {
+    $("review-md").textContent = `失败：${data.error || "未知错误"}`;
+  } else if (data.review_md) {
+    $("review-md").textContent = data.review_md;
+  } else if (processing) {
+    $("review-md").textContent = "正在自动处理：听写打轴 → 过滤 → 排序 → 渲染…";
+  } else {
+    $("review-md").textContent = "暂无摘要";
+  }
+
+  // actions
+  const actions = [];
+  if (files.final) {
+    actions.push(`<a class="jy-btn primary" href="/api/jobs/${encodeURIComponent(data.job_id)}/files/final.mp4" download>下载 final.mp4</a>`);
+  }
+  if (files.plan) {
+    actions.push(`<a class="jy-btn" href="/api/jobs/${encodeURIComponent(data.job_id)}/files/plan.json" target="_blank">plan.json</a>`);
+  }
+  if (files.review) {
+    actions.push(`<a class="jy-btn" href="/api/jobs/${encodeURIComponent(data.job_id)}/files/review.md" target="_blank">review.md</a>`);
+  }
+  if (st === "failed") {
+    actions.push(`<button type="button" class="jy-btn" id="retry-btn">重试</button>`);
+  }
+  $("actions").innerHTML = actions.join("") || '<span class="muted">暂无导出</span>';
+  const retry = $("retry-btn");
+  if (retry) {
+    retry.onclick = async () => {
+      await fetch(`/api/jobs/${encodeURIComponent(data.job_id)}/retry`, { method: "POST" });
+      pollJob(data.job_id);
+    };
+  }
+
+  loadTranscript(data.job_id);
+  highlightJob(data.job_id);
+}
+
+function highlightJob(id) {
+  document.querySelectorAll(".jy-job").forEach((el) => {
+    el.classList.toggle("active", el.dataset.id === id);
   });
+}
+
+async function showJob(jobId) {
+  const res = await fetch(`/api/jobs/${encodeURIComponent(jobId)}`);
+  if (!res.ok) return;
+  const data = await res.json();
+  renderJob(data);
+  if (["queued", "processing", "starting", "claimed"].includes(data.status)) {
+    pollJob(jobId);
+  } else if (pollTimer) {
+    clearInterval(pollTimer);
+    pollTimer = null;
+  }
+}
+
+function pollJob(jobId) {
+  if (pollTimer) clearInterval(pollTimer);
+  pollTimer = setInterval(async () => {
+    try {
+      const res = await fetch(`/api/jobs/${encodeURIComponent(jobId)}`);
+      if (!res.ok) return;
+      const data = await res.json();
+      renderJob(data);
+      loadJobs();
+      if (!["queued", "processing", "starting", "claimed"].includes(data.status)) {
+        clearInterval(pollTimer);
+        pollTimer = null;
+      }
+    } catch (_) {}
+  }, 2000);
 }
 
 async function loadJobs() {
   const box = $("job-list");
   try {
-    const res = await fetch("/api/jobs");
+    const res = await fetch("/api/jobs?limit=30");
     const data = await res.json();
     const jobs = data.jobs || [];
     if (!jobs.length) {
-      box.innerHTML = "<div class='empty'>暂无历史任务</div>";
+      box.innerHTML = '<div class="jy-empty">暂无任务</div>';
       return;
     }
     box.innerHTML = jobs
       .map((j) => {
-        const status = j.status || "?";
-        const label = STATUS_LABEL[status] || status;
-        const dur = j.duration_s != null ? `${Number(j.duration_s).toFixed(1)}s` : "-";
-        const g20 = j.golden20_passed ? "黄金20✓" : "黄金20·";
-        const flags = [
-          j.has_video ? "有视频" : "无视频",
-          j.has_final ? "有成片" : "无成片",
-        ].join(" · ");
-        const statusClass = statusChipClass(status);
-        return `<div class="job-item ${statusClass ? "status-" + statusClass : ""}" data-id="${escapeHtml(j.job_id)}">
-          <div>
-            <div class="id">${escapeHtml(j.job_id)}</div>
-            <div class="muted"><span class="chip ${statusClass}">${escapeHtml(label)}</span> · ${dur} · ${g20} · ${flags}</div>
-          </div>
-          <div class="muted">${escapeHtml(j.created_at || "")}</div>
+        const st = j.status || "";
+        const cls = statusClass(st);
+        return `<div class="jy-job" data-id="${escapeHtml(j.job_id)}">
+          <div class="id">${escapeHtml(j.job_id)}</div>
+          <div class="st ${cls}">${escapeHtml(STATUS_LABEL[st] || st)}${
+            j.progress != null && ["processing", "starting", "queued"].includes(st)
+              ? ` · ${j.progress}%`
+              : ""
+          }${j.final_duration_s ? ` · ${j.final_duration_s}s` : ""}</div>
+          <div class="st">${escapeHtml(j.video_source || "")}</div>
         </div>`;
       })
       .join("");
-    box.querySelectorAll(".job-item").forEach((node) => {
-      node.addEventListener("click", () => showJob(node.dataset.id));
+    box.querySelectorAll(".jy-job").forEach((el) => {
+      el.addEventListener("click", () => showJob(el.dataset.id));
     });
+    if (currentJobId) highlightJob(currentJobId);
   } catch (e) {
     box.textContent = "加载失败：" + e;
   }
 }
 
-function renderJob(data) {
-  $("result-empty").hidden = true;
-  const panel = $("result-panel");
-  panel.hidden = false;
-  panel.dataset.jobId = data.job_id || "";
-
-  const status = data.status || "";
-  const label = STATUS_LABEL[status] || status;
-  const chips = [];
-  chips.push(`<span class="chip">任务 ${escapeHtml(data.job_id)}</span>`);
-  chips.push(
-    `<span class="chip ${statusChipClass(status)}">状态 ${escapeHtml(label)}</span>`
-  );
-  if (data.duration_s != null) {
-    chips.push(`<span class="chip">成片规划 ${Number(data.duration_s).toFixed(1)}s</span>`);
-  }
-  if (data.queue_hint && (status === "queued" || status === "claimed")) {
-    chips.push(`<span class="chip needs">${escapeHtml(data.queue_hint)}</span>`);
-  }
-  if (data.process_mode) {
-    chips.push(`<span class="chip">模式 ${escapeHtml(data.process_mode)}</span>`);
-  }
-  if (data.transcript_source) {
-    chips.push(
-      `<span class="chip">口播 ${escapeHtml(
-        data.transcript_source === "whisper_api" ? "智能听写" : String(data.transcript_source)
-      )}</span>`
-    );
-  }
-  if (status !== "queued" && status !== "claimed") {
-    chips.push(
-      `<span class="chip ${data.golden20_passed ? "ok" : "warn"}">黄金20 ${
-        data.golden20_passed ? "通过" : "待审"
-      }</span>`
-    );
-  }
-  if (data.selected_clips != null) {
-    chips.push(`<span class="chip">选中 ${data.selected_clips} 段</span>`);
-  }
-  if (data.warnings && data.warnings.length) {
-    chips.push(`<span class="chip warn">警告 ${escapeHtml(data.warnings.join(", "))}</span>`);
-  }
-  if (data.render_skipped) {
-    chips.push(
-      `<span class="chip warn">未渲染 ${escapeHtml(data.render_error || "")}</span>`
-    );
-  }
-  if (data.error) {
-    chips.push(`<span class="chip warn">错误 ${escapeHtml(data.error)}</span>`);
-  }
-  $("stats").innerHTML = chips.join("");
-
-  const attach = $("attach-panel");
-  if (attach) attach.hidden = true;
-
-  const files = data.files || {};
-  const actions = [];
-  if (files.plan) {
-    actions.push(
-      `<a class="btn" href="/api/jobs/${encodeURIComponent(data.job_id)}/files/plan.json" target="_blank">plan.json</a>`
-    );
-  }
-  if (files.review) {
-    actions.push(
-      `<a class="btn" href="/api/jobs/${encodeURIComponent(data.job_id)}/files/review.md" target="_blank">review.md</a>`
-    );
-  }
-  if (files.clips) {
-    actions.push(
-      `<a class="btn" href="/api/jobs/${encodeURIComponent(data.job_id)}/files/clips.json" target="_blank">clips.json</a>`
-    );
-  }
-  if (files.transcript_asr) {
-    actions.push(
-      `<a class="btn" href="/api/jobs/${encodeURIComponent(data.job_id)}/files/transcript_asr.json" target="_blank">智能口播</a>`
-    );
-  } else if (files.transcript) {
-    actions.push(
-      `<a class="btn" href="/api/jobs/${encodeURIComponent(data.job_id)}/files/transcript.json" target="_blank">口播轴</a>`
-    );
-  }
-  if (files.final) {
-    actions.push(
-      `<a class="btn primary" style="width:auto" href="/api/jobs/${encodeURIComponent(data.job_id)}/files/final.mp4" download>下载 final.mp4</a>`
-    );
-  }
-  $("actions").innerHTML = actions.join("") || "<span class='muted'>无文件</span>";
-
-  const video = $("preview");
-  if (files.final) {
-    video.hidden = false;
-    video.src = `/api/jobs/${encodeURIComponent(data.job_id)}/files/final.mp4?t=${Date.now()}`;
-  } else {
-    video.hidden = true;
-    video.removeAttribute("src");
-  }
-
-  const plan = data.plan || {};
-  $("golden-list").innerHTML = slotHtml(plan.golden);
-  $("trust-list").innerHTML = slotHtml(plan.trust);
-  $("cta-list").innerHTML = slotHtml(plan.cta);
-  if (status === "queued") {
-    $("review-md").textContent =
-      "任务已入队。\n\n请在 Agent 对话发送：\n  处理队列\n\nAgent 将调用 clothing-live-clip skill 完成智能口播打轴与切片，完成后此处自动可刷新查看。";
-  } else if (status === "claimed") {
-    $("review-md").textContent = "Agent 正在处理，请稍候后点刷新…";
-  } else {
-    $("review-md").textContent = data.review_md || "（无 review）";
-  }
-}
-
-async function showJob(jobId) {
-  const res = await fetch(`/api/jobs/${encodeURIComponent(jobId)}`);
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({}));
-    alert(err.detail || "加载任务失败");
-    return;
-  }
-  const data = await res.json();
-  renderJob(data);
-}
-
 function setupForm() {
   const form = $("job-form");
+  const fileInput = $("video");
+  const drop = $("drop-zone");
   const err = $("form-error");
   const btn = $("submit-btn");
+
+  ["dragenter", "dragover"].forEach((ev) => {
+    drop.addEventListener(ev, (e) => {
+      e.preventDefault();
+      drop.classList.add("drag");
+    });
+  });
+  ["dragleave", "drop"].forEach((ev) => {
+    drop.addEventListener(ev, (e) => {
+      e.preventDefault();
+      drop.classList.remove("drag");
+    });
+  });
+  drop.addEventListener("drop", (e) => {
+    const f = e.dataTransfer?.files?.[0];
+    if (f) {
+      fileInput.files = e.dataTransfer.files;
+      $("file-name").textContent = f.name;
+    }
+  });
+  fileInput.addEventListener("change", () => {
+    $("file-name").textContent = fileInput.files?.[0]?.name || "支持 mp4 / mov / mkv / webm";
+  });
 
   form.addEventListener("submit", async (e) => {
     e.preventDefault();
     err.hidden = true;
-    err.textContent = "";
+    if (!fileInput.files?.[0]) {
+      err.hidden = false;
+      err.textContent = "请选择视频";
+      return;
+    }
     btn.disabled = true;
-    btn.textContent = "上传中…";
-
+    btn.textContent = "上传并启动…";
     try {
-      const video = $("video");
-      if (!video.files || !video.files[0]) {
-        throw new Error("请选择直播视频（唯一输入）");
-      }
-
       const fd = new FormData();
-      fd.append("video", video.files[0]);
+      fd.append("video", fileInput.files[0]);
       fd.append("target_seconds", $("target_seconds").value || "60");
       fd.append("render", $("render").checked ? "true" : "false");
-      fd.append("mode", "agent");
-
+      fd.append("auto_process", "true");
       const res = await fetch("/api/jobs", { method: "POST", body: fd });
       const data = await res.json().catch(() => ({}));
-      if (!res.ok) {
-        throw new Error(data.detail || res.statusText || "创建失败");
-      }
+      if (!res.ok) throw new Error(data.detail || "创建失败");
       renderJob(data);
       await loadJobs();
+      pollJob(data.job_id);
     } catch (ex) {
       err.hidden = false;
       err.textContent = String(ex.message || ex);
     } finally {
       btn.disabled = false;
-      btn.textContent = "上传视频并排队";
+      btn.textContent = "开始智能切片";
     }
   });
 }
 
-$("refresh-jobs").addEventListener("click", loadJobs);
+function setupSettings() {
+  const open = () => {
+    $("drawer-backdrop").hidden = false;
+    $("settings-drawer").hidden = false;
+    loadSystemStatus();
+  };
+  const close = () => {
+    $("drawer-backdrop").hidden = true;
+    $("settings-drawer").hidden = true;
+  };
+  $("open-settings")?.addEventListener("click", open);
+  $("close-settings")?.addEventListener("click", close);
+  $("drawer-backdrop")?.addEventListener("click", close);
+}
 
-// Auto-refresh while waiting for Agent
-setInterval(() => {
-  const st = $("result-panel")?.dataset?.jobId;
-  const panelHidden = $("result-panel")?.hidden;
-  if (!st || panelHidden) return;
-  const chips = $("stats")?.textContent || "";
-  if (chips.includes("排队") || chips.includes("Agent处理")) {
-    showJob(st).catch(() => {});
-    loadJobs().catch(() => {});
+async function loadSystemStatus() {
+  try {
+    const res = await fetch("/api/system/status");
+    const st = await res.json();
+    const rows = [];
+    const row = (label, ok, detail) => {
+      const cls = ok === true ? "ok" : ok === false ? "bad" : "warn";
+      const mark = ok === true ? "✓" : ok === false ? "!" : "·";
+      rows.push(
+        `<div class="check-row ${cls}"><span class="mark">${mark}</span><div><strong>${escapeHtml(
+          label
+        )}</strong><div class="muted">${escapeHtml(detail || "")}</div></div></div>`
+      );
+    };
+    row("服务", st.service?.ok, `${st.service?.host}:${st.service?.port}`);
+    row("ffmpeg", st.ffmpeg?.ok, st.ffmpeg?.path || "未找到");
+    row("本地自动切片", true, "上传后后台处理，无需 Agent");
+    row("磁盘", st.storage?.ok, `${st.storage?.path || ""} · ${st.storage?.free_gb ?? "?"} GB`);
+    $("checklist").innerHTML = rows.join("");
+    $("env-box").textContent = JSON.stringify(
+      {
+        python: st.deps?.python,
+        ffmpeg: st.ffmpeg,
+        storage: st.storage,
+        checked_at: st.checked_at,
+      },
+      null,
+      2
+    );
+  } catch (e) {
+    $("checklist").textContent = "状态加载失败：" + e;
   }
-}, 5000);
+}
 
+$("refresh-jobs")?.addEventListener("click", loadJobs);
 loadHealth();
 loadJobs();
 setupForm();

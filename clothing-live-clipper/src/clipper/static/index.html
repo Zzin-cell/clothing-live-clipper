@@ -3,227 +3,162 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>服装带货智能切片</title>
-  <link rel="stylesheet" href="/static/styles.css?v=status1" />
+  <title>智能口播切片 · CapCut 风格</title>
+  <link rel="stylesheet" href="/static/styles.css?v=jy1" />
 </head>
 <body>
-  <div class="app-shell">
-    <header class="titlebar">
-      <div class="titlebar-left">
-        <div class="traffic" aria-hidden="true">
-          <span class="dot red"></span>
-          <span class="dot yellow"></span>
-          <span class="dot green"></span>
-        </div>
-        <div class="brand">
-          <span class="brand-mark" aria-hidden="true"></span>
-          <div class="brand-text">
-            <strong>Clipper</strong>
-            <span>智能口播切片</span>
-          </div>
+  <div class="jy-app">
+    <!-- Top bar -->
+    <header class="jy-top">
+      <div class="jy-top-left">
+        <div class="jy-logo">剪</div>
+        <div class="jy-title-wrap">
+          <div class="jy-title">智能口播切片</div>
+          <div class="jy-sub">只要视频 · 自动打轴 · 特点前置 · 约60s</div>
         </div>
       </div>
-      <div class="titlebar-right">
-        <div class="status-lights" id="status-lights" title="系统状态">
-          <span class="light" data-k="service" title="服务">服</span>
-          <span class="light" data-k="ffmpeg" title="ffmpeg">F</span>
-          <span class="light" data-k="asr" title="Whisper 听写">W</span>
-          <span class="light" data-k="llm" title="LLM（可选）">L</span>
-          <span class="light" data-k="disk" title="磁盘">盘</span>
-        </div>
-        <div class="pill-status" id="health">检查环境…</div>
-        <button type="button" class="btn ghost settings-btn" id="open-settings">设置</button>
+      <div class="jy-top-mid">
+        <span class="jy-pill" id="health">检查环境…</span>
+      </div>
+      <div class="jy-top-right">
+        <button type="button" class="jy-btn ghost" id="open-settings">设置</button>
+        <button type="button" class="jy-btn primary" id="export-btn" disabled>导出成片</button>
       </div>
     </header>
 
-    <div class="drawer-backdrop" id="drawer-backdrop" hidden></div>
-    <aside class="drawer" id="settings-drawer" hidden aria-label="系统设置">
-      <div class="drawer-head">
-        <div>
-          <h2>系统状态与 API</h2>
-          <p class="card-desc">配置密钥 · 全链路自检 · 兼容模型</p>
-        </div>
-        <button type="button" class="btn ghost" id="close-settings">关闭</button>
-      </div>
-
-      <div class="drawer-tabs">
-        <button type="button" class="tab active" data-tab="overview">总览</button>
-        <button type="button" class="tab" data-tab="api">API</button>
-        <button type="button" class="tab" data-tab="env">环境</button>
-        <button type="button" class="tab" data-tab="jobs">任务</button>
-      </div>
-
-      <div class="drawer-body">
-        <section class="tab-panel active" id="tab-overview">
-          <div class="drawer-actions">
-            <button type="button" class="btn" id="btn-refresh-status">一键自检</button>
-            <button type="button" class="btn" id="btn-probe-whisper">测试 Whisper</button>
-            <button type="button" class="btn" id="btn-probe-llm">测试 LLM</button>
+    <div class="jy-main">
+      <!-- Left: upload + transcript-like list -->
+      <aside class="jy-left">
+        <div class="jy-panel">
+          <div class="jy-panel-head">
+            <span>导入视频</span>
+            <span class="muted">唯一输入</span>
           </div>
-          <div id="checklist" class="checklist">加载中…</div>
-          <div class="compat-card">
-            <h3>兼容模型提示</h3>
-            <div id="compat-box" class="compat-box"></div>
-          </div>
-        </section>
+          <form id="job-form" class="jy-form">
+            <label class="jy-drop" id="drop-zone">
+              <input type="file" id="video" accept="video/*,.mp4,.mov,.mkv,.webm" required hidden />
+              <div class="jy-drop-icon">⬆</div>
+              <div class="jy-drop-text">点击或拖入直播视频</div>
+              <div class="jy-drop-sub" id="file-name">支持 mp4 / mov / mkv / webm</div>
+            </label>
 
-        <section class="tab-panel" id="tab-api">
-          <form id="config-form" class="config-form">
-            <label class="field">
-              <span>API Key</span>
-              <input type="password" id="cfg-api-key" placeholder="sk-... 或中转密钥" autocomplete="off" />
-              <span class="hint" id="cfg-key-hint">未配置</span>
-            </label>
-            <label class="field">
-              <span>Base URL</span>
-              <input type="text" id="cfg-base-url" placeholder="https://api.openai.com/v1" />
-            </label>
-            <label class="field">
-              <span>Whisper 模型</span>
-              <input type="text" id="cfg-asr-model" placeholder="whisper-1" />
-            </label>
-            <label class="field">
-              <span>LLM 模型（可选）</span>
-              <input type="text" id="cfg-llm-model" placeholder="gpt-4o-mini" />
-            </label>
-            <label class="row-field toggle-row" style="padding:0;border:0">
-              <span class="row-label">
-                <span class="row-title">记住本机（写入 .env）</span>
-                <span class="row-sub">关闭则仅当前服务进程会话</span>
-              </span>
-              <input type="checkbox" id="cfg-persist" class="ios-toggle" checked />
-            </label>
-            <label class="row-field toggle-row" style="padding:0;border:0;margin-top:10px">
-              <span class="row-label">
-                <span class="row-title">启用 LLM</span>
-                <span class="row-sub">关闭则卖点用本地规则</span>
-              </span>
-              <input type="checkbox" id="cfg-llm-enabled" class="ios-toggle" checked />
-            </label>
-            <button type="submit" class="btn primary" id="cfg-save">保存配置</button>
-            <p class="hint">官方：whisper-1 / gpt-4o-mini。中转请改 Base URL，模型名以服务商为准。需支持 transcriptions 的 verbose_json segments。</p>
-            <p class="error" id="cfg-error" hidden></p>
-            <p class="hint" id="cfg-ok" hidden style="color:var(--ok)"></p>
+            <div class="jy-row">
+              <label class="jy-field">
+                <span>目标时长</span>
+                <div class="jy-stepper">
+                  <input type="number" id="target_seconds" value="60" min="15" max="180" />
+                  <span>秒</span>
+                </div>
+              </label>
+              <label class="jy-switch">
+                <input type="checkbox" id="render" checked />
+                <span>渲染成片</span>
+              </label>
+            </div>
+
+            <button type="submit" class="jy-btn primary block" id="submit-btn">开始智能切片</button>
+            <p class="jy-hint">上传后自动：听写打轴 → 去废话/去价格 → 特点放前20s → 1.3x 约60s</p>
+            <p class="jy-error" id="form-error" hidden></p>
           </form>
-        </section>
+        </div>
 
-        <section class="tab-panel" id="tab-env">
-          <pre id="env-box" class="review env-box">加载中…</pre>
-        </section>
+        <div class="jy-panel grow">
+          <div class="jy-panel-head">
+            <span>口播时间轴</span>
+            <span class="muted" id="asr-count">—</span>
+          </div>
+          <div class="jy-transcript" id="transcript-list">
+            <div class="jy-empty">处理后在这里显示口播句子</div>
+          </div>
+        </div>
+      </aside>
 
-        <section class="tab-panel" id="tab-jobs">
-          <div id="recent-jobs" class="job-list">加载中…</div>
-        </section>
-      </div>
-    </aside>
+      <!-- Center: player + timeline -->
+      <section class="jy-center">
+        <div class="jy-player-wrap">
+          <div class="jy-player-bar">
+            <span id="current-job-title">未选择任务</span>
+            <span class="muted" id="current-job-status"></span>
+          </div>
+          <video id="preview" class="jy-player" controls playsinline></video>
+          <div class="jy-progress-block" id="progress-block" hidden>
+            <div class="jy-progress-label">
+              <span id="stage-text">处理中</span>
+              <span id="progress-text">0%</span>
+            </div>
+            <div class="jy-progress"><i id="progress-bar"></i></div>
+          </div>
+        </div>
 
-    <div class="page">
-      <section class="hero">
-        <div class="hero-copy">
-          <p class="eyebrow">Web 提交 · Agent 干活</p>
-          <h1>只上传视频，队列交给 Agent</h1>
-          <p class="sub">本页只负责<strong>提交与查看</strong>。真正的智能口播打轴、黄金 20 秒重排与成片，由对话里的 Agent 调用 <strong>clothing-live-clip skill</strong> 完成。</p>
+        <div class="jy-timeline-panel">
+          <div class="jy-panel-head">
+            <span>成片结构</span>
+            <span class="muted">黄金20s · 信任 · 收尾</span>
+          </div>
+          <div class="jy-tracks">
+            <div class="jy-track">
+              <div class="jy-track-label">黄金</div>
+              <div class="jy-track-body" id="golden-track"></div>
+            </div>
+            <div class="jy-track">
+              <div class="jy-track-label">信任</div>
+              <div class="jy-track-body" id="trust-track"></div>
+            </div>
+            <div class="jy-track">
+              <div class="jy-track-label">收尾</div>
+              <div class="jy-track-body" id="cta-track"></div>
+            </div>
+          </div>
+          <div class="jy-review" id="review-md">上传视频后自动处理，结果摘要显示在这里。</div>
         </div>
       </section>
 
-      <main class="grid">
-        <section class="card">
-          <div class="card-head">
-            <div>
-              <h2>新建任务</h2>
-              <p class="card-desc">只传视频入队 · Agent 处理</p>
-            </div>
+      <!-- Right: jobs + actions -->
+      <aside class="jy-right">
+        <div class="jy-panel">
+          <div class="jy-panel-head">
+            <span>草稿参数</span>
           </div>
-
-          <form id="job-form">
-            <div class="inset-group">
-              <label class="row-field">
-                <span class="row-label">
-                  <span class="row-title">直播视频</span>
-                  <span class="row-sub">唯一输入 · 上传后进入排队</span>
-                </span>
-                <input type="file" name="video" id="video" accept="video/*,.mp4,.mov,.mkv,.webm" required />
-              </label>
-              <label class="row-field">
-                <span class="row-label">
-                  <span class="row-title">目标时长</span>
-                  <span class="row-sub">默认 60 秒</span>
-                </span>
-                <div class="stepper">
-                  <input type="number" name="target_seconds" id="target_seconds" value="60" min="15" max="180" />
-                  <span class="unit">秒</span>
-                </div>
-              </label>
-              <label class="row-field toggle-row">
-                <span class="row-label">
-                  <span class="row-title">渲染成片</span>
-                  <span class="row-sub">需要本机 ffmpeg</span>
-                </span>
-                <input type="checkbox" name="render" id="render" class="ios-toggle" checked />
-              </label>
-            </div>
-
-            <div id="setup-banner" class="setup-banner">
-              输入只要<strong>视频</strong>。口播打轴与切片由 Agent skill 完成：对话发送 <code>处理队列</code>
-            </div>
-            <button type="submit" id="submit-btn" class="btn primary">上传视频并排队</button>
-            <p class="hint" id="form-hint">不需要口播稿/转写。上传成功后到 Agent 对话发送「处理队列」，再回本页刷新查看结果。</p>
-            <p class="error" id="form-error" hidden></p>
-          </form>
-        </section>
-
-        <section class="card">
-          <div class="card-head">
-            <div>
-              <h2>任务结果</h2>
-              <p class="card-desc">口播时间轴 · 黄金开头 · 预览下载</p>
-            </div>
-            <button type="button" class="btn ghost" id="refresh-jobs">刷新</button>
+          <div class="jy-kv">
+            <div><span>倍速</span><b>1.3x</b></div>
+            <div><span>目标</span><b>~60s</b></div>
+            <div><span>价格</span><b>不进成片</b></div>
+            <div><span>前20s</span><b>特点优先</b></div>
+            <div><span>拼接</span><b>直接接</b></div>
           </div>
+        </div>
 
-          <div id="result-empty" class="empty">
-            <div class="empty-icon" aria-hidden="true"></div>
-            <p>上传视频后，这里显示智能口播结果、重排时间轴和成片预览。</p>
+        <div class="jy-panel grow">
+          <div class="jy-panel-head">
+            <span>历史任务</span>
+            <button type="button" class="jy-btn tiny" id="refresh-jobs">刷新</button>
           </div>
+          <div class="jy-jobs" id="job-list">加载中…</div>
+        </div>
 
-          <div id="result-panel" hidden>
-            <div class="stats" id="stats"></div>
-            <div id="attach-panel" class="attach" hidden></div>
-            <div class="actions" id="actions"></div>
-            <video id="preview" class="preview" controls playsinline hidden></video>
-            <div class="columns">
-              <div class="panel">
-                <h3>黄金开头</h3>
-                <ol id="golden-list" class="slots"></ol>
-                <h3>信任建设</h3>
-                <ol id="trust-list" class="slots"></ol>
-                <h3>促单收尾</h3>
-                <ol id="cta-list" class="slots"></ol>
-              </div>
-              <div class="panel">
-                <h3>Review</h3>
-                <pre id="review-md" class="review"></pre>
-              </div>
-            </div>
-          </div>
-        </section>
-
-        <section class="card full">
-          <div class="card-head">
-            <div>
-              <h2>历史任务</h2>
-              <p class="card-desc">自动保存在本机，可回看与下载</p>
-            </div>
-          </div>
-          <div id="job-list" class="job-list">加载中…</div>
-        </section>
-      </main>
-
-      <footer>
-        <span>本地编排 · 听写走 Whisper API · 成片保存在 output/web_jobs</span>
-      </footer>
+        <div class="jy-panel">
+          <div class="jy-actions" id="actions"></div>
+        </div>
+      </aside>
     </div>
   </div>
-  <script src="/static/app.js?v=status1"></script>
+
+  <!-- settings drawer kept simple -->
+  <div class="drawer-backdrop" id="drawer-backdrop" hidden></div>
+  <aside class="drawer" id="settings-drawer" hidden>
+    <div class="drawer-head">
+      <div>
+        <h2>设置 / 状态</h2>
+        <p class="card-desc">本机环境 · 可选 API（默认不需要）</p>
+      </div>
+      <button type="button" class="jy-btn ghost" id="close-settings">关闭</button>
+    </div>
+    <div class="drawer-body">
+      <div id="checklist" class="checklist">加载中…</div>
+      <pre id="env-box" class="review env-box"></pre>
+    </div>
+  </aside>
+
+  <script src="/static/app.js?v=jy1"></script>
 </body>
 </html>

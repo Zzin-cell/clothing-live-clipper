@@ -12,6 +12,7 @@ from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 
 from clipper.config import Settings, apply_config_update, asr_status, public_config
+from clipper.job_worker import start_job_async
 from clipper.media import which_ffmpeg
 from clipper.pipeline import run_pipeline
 from clipper.system_status import build_status, run_probe
@@ -380,8 +381,9 @@ def create_app() -> FastAPI:
         video: UploadFile | None = File(default=None),
         target_seconds: int = Form(default=60),
         render: bool = Form(default=True),
+        auto_process: bool = Form(default=True),
     ) -> dict[str, Any]:
-        """Video-only intake: save file and queue for Agent skill worker."""
+        """Video-only intake: save file and auto-run local pipeline (no Agent needed)."""
         target_seconds = int(target_seconds)
         if target_seconds < 15 or target_seconds > 180:
             raise HTTPException(status_code=400, detail="target_seconds must be 15-180")
@@ -413,12 +415,41 @@ def create_app() -> FastAPI:
             "error": None,
             "has_video": True,
             "has_final": False,
-            "process_mode": "agent",
+            "process_mode": "local_auto",
             "video_source": video.filename,
-            "queue_hint": "在 Agent 对话发送：处理队列",
-            "user_hint": "输入只要视频；口播打轴由 Agent skill 完成",
+            "progress": 0,
+            "stage": "queued",
+            "user_hint": "上传后自动听写打轴并切片，无需 Agent",
         }
         _write_meta(d, meta)
+
+        # Fire-and-forget local worker (ASR + clipper)
+        if auto_process:
+            started = start_job_async(d)
+            meta = _read_json(d / "job_meta.json")
+            meta["auto_started"] = bool(started)
+            if started:
+                meta["status"] = "processing"
+                meta["stage"] = "starting"
+                meta["progress"] = 1
+            _write_meta(d, meta)
+
+        return get_job(job_id)
+
+    @app.post("/api/jobs/{job_id}/retry")
+    def retry_job(job_id: str) -> dict[str, Any]:
+        d = _job_dir(job_id)
+        meta_path = d / "job_meta.json"
+        if not meta_path.exists():
+            raise HTTPException(status_code=404, detail="job not found")
+        meta = _read_json(meta_path)
+        meta["status"] = "queued"
+        meta["error"] = None
+        meta["stage"] = "queued"
+        meta["progress"] = 0
+        meta.pop("finished_at", None)
+        _write_meta(d, meta)
+        start_job_async(d)
         return get_job(job_id)
 
     @app.post("/api/jobs/{job_id}/transcript")

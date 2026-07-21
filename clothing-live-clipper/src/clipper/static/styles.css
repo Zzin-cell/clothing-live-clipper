@@ -17,19 +17,24 @@
 }
 
 * { box-sizing: border-box; }
-html, body { height: 100%; }
-body {
+html, body {
+  height: 100%;
   margin: 0;
+}
+body {
   font-family: var(--font);
   color: var(--text);
   background: var(--bg2);
-  overflow: hidden;
+  overflow: hidden; /* app handles scroll in columns */
 }
 
 .jy-app {
   height: 100vh;
+  max-height: 100vh;
   display: flex;
   flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
 }
 
 /* top */
@@ -86,19 +91,35 @@ body {
 
 /* layout */
 .jy-main {
-  flex: 1;
+  flex: 1 1 auto;
   min-height: 0;
   display: grid;
   grid-template-columns: 320px 1fr 300px;
   gap: 10px;
   padding: 10px;
+  overflow: hidden;
 }
 
 .jy-left, .jy-right, .jy-center {
   min-height: 0;
+  max-height: 100%;
   display: flex;
   flex-direction: column;
   gap: 10px;
+  overflow: hidden;
+}
+
+/* each column scrolls as a whole when content is tall */
+.jy-left,
+.jy-right {
+  overflow-y: auto;
+  overflow-x: hidden;
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
+}
+
+.jy-center {
+  overflow: hidden;
 }
 
 .jy-panel {
@@ -110,7 +131,10 @@ body {
   flex-direction: column;
   min-height: 0;
 }
-.jy-panel.grow { flex: 1; }
+.jy-panel.grow {
+  flex: 1 1 auto;
+  min-height: 160px;
+}
 .jy-panel-head {
   display: flex;
   justify-content: space-between;
@@ -166,6 +190,7 @@ body {
 
 /* center */
 .jy-player-wrap {
+  flex: 0 0 auto;
   background: var(--panel);
   border: 1px solid #303036;
   border-radius: 14px;
@@ -177,8 +202,8 @@ body {
 }
 .jy-player {
   width: 100%;
-  max-height: 42vh;
-  min-height: 220px;
+  max-height: min(36vh, 360px);
+  min-height: 180px;
   background: #000;
   border-radius: 12px;
   border: 1px solid #333;
@@ -197,25 +222,48 @@ body {
 }
 
 .jy-timeline-panel {
-  flex: 1; min-height: 0;
+  flex: 1 1 auto;
+  min-height: 0;
   background: var(--panel);
   border: 1px solid #303036;
   border-radius: 14px;
   padding: 10px;
-  display: flex; flex-direction: column;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden; /* children scroll */
 }
 .jy-track-tools {
+  flex: 0 0 auto;
   display: flex; align-items: center; gap: 8px; margin: -2px 0 10px;
+  flex-wrap: wrap;
 }
-.jy-tracks { display: grid; gap: 8px; margin-bottom: 10px; }
+.jy-tracks {
+  flex: 0 0 auto;
+  display: grid;
+  gap: 8px;
+  margin-bottom: 10px;
+  max-height: 42%;
+  overflow-y: auto;
+  overflow-x: hidden;
+  overscroll-behavior: contain;
+  padding-right: 2px;
+}
 .jy-track { display: grid; grid-template-columns: 48px 1fr; gap: 8px; align-items: stretch; }
 .jy-track-label {
   font-size: 11px; color: var(--muted); display: grid; place-items: center;
   background: #1a1a1d; border-radius: 8px;
 }
 .jy-track-body {
-  min-height: 42px; background: #17171a; border-radius: 10px; border: 1px solid #2f2f34;
-  display: flex; gap: 6px; overflow-x: auto; padding: 6px;
+  min-height: 52px;
+  background: #17171a;
+  border-radius: 10px;
+  border: 1px solid #2f2f34;
+  display: flex;
+  gap: 6px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding: 6px;
+  -webkit-overflow-scrolling: touch;
 }
 .jy-clip {
   position: relative;
@@ -249,9 +297,47 @@ body {
 }
 
 .jy-review {
-  flex: 1; overflow: auto; white-space: pre-wrap; word-break: break-word;
-  background: #17171a; border-radius: 10px; border: 1px solid #2f2f34;
-  padding: 10px; font-size: 12px; color: #c8c8ce; line-height: 1.5;
+  flex: 1 1 auto;
+  min-height: 80px;
+  overflow: auto;
+  overscroll-behavior: contain;
+  white-space: pre-wrap;
+  word-break: break-word;
+  background: #17171a;
+  border-radius: 10px;
+  border: 1px solid #2f2f34;
+  padding: 10px;
+  font-size: 12px;
+  color: #c8c8ce;
+  line-height: 1.5;
+}
+
+/* nicer scrollbars for structure panel */
+.jy-tracks::-webkit-scrollbar,
+.jy-review::-webkit-scrollbar,
+.jy-left::-webkit-scrollbar,
+.jy-right::-webkit-scrollbar,
+.jy-transcript::-webkit-scrollbar,
+.jy-jobs::-webkit-scrollbar,
+.tr-list::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+.jy-tracks::-webkit-scrollbar-thumb,
+.jy-review::-webkit-scrollbar-thumb,
+.jy-left::-webkit-scrollbar-thumb,
+.jy-right::-webkit-scrollbar-thumb,
+.jy-transcript::-webkit-scrollbar-thumb,
+.jy-jobs::-webkit-scrollbar-thumb,
+.tr-list::-webkit-scrollbar-thumb,
+.jy-track-body::-webkit-scrollbar-thumb {
+  background: #4a4a52;
+  border-radius: 8px;
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+.jy-track-body::-webkit-scrollbar {
+  height: 10px;
 }
 
 .jy-kv { display: grid; gap: 8px; font-size: 12px; }
@@ -261,7 +347,15 @@ body {
 }
 .jy-kv b { color: var(--text); font-weight: 700; }
 
-.jy-jobs { flex: 1; overflow: auto; display: grid; gap: 8px; align-content: start; }
+.jy-jobs {
+  flex: 1 1 auto;
+  min-height: 120px;
+  overflow: auto;
+  overscroll-behavior: contain;
+  display: grid;
+  gap: 8px;
+  align-content: start;
+}
 .jy-job {
   padding: 10px; border-radius: 12px; background: #1a1a1d; border: 1px solid #303036;
   cursor: pointer;
@@ -353,7 +447,27 @@ body {
 
 @media (max-width: 1100px) {
   body { overflow: auto; }
-  .jy-app { height: auto; min-height: 100vh; }
-  .jy-main { grid-template-columns: 1fr; }
+  .jy-app {
+    height: auto;
+    min-height: 100vh;
+    max-height: none;
+    overflow: visible;
+  }
+  .jy-main {
+    grid-template-columns: 1fr;
+    overflow: visible;
+  }
+  .jy-left, .jy-right, .jy-center {
+    overflow: visible;
+    max-height: none;
+  }
+  .jy-timeline-panel {
+    max-height: none;
+    overflow: visible;
+  }
+  .jy-tracks {
+    max-height: none;
+    overflow: visible;
+  }
   .jy-player { max-height: 50vh; }
 }

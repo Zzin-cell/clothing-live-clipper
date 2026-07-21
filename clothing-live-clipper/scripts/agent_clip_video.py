@@ -86,12 +86,65 @@ def extract_wav(video: Path, wav: Path) -> None:
         raise RuntimeError(f"ffmpeg extract failed: {(p.stderr or '')[-800:]}")
 
 
+_WHISPER_MODEL = None
+_WHISPER_MODEL_KEY = None
+
+
+def _inject_nvidia_dll_path() -> None:
+    """Ensure pip-installed CUDA DLLs (cublas/cudnn) are on PATH for ctranslate2."""
+    try:
+        import site
+        from pathlib import Path as _P
+
+        candidates: list[_P] = []
+        for sp in site.getsitepackages() + [site.getusersitepackages()]:
+            root = _P(sp) / "nvidia"
+            if not root.exists():
+                continue
+            for sub in ("cublas", "cudnn", "cuda_runtime", "cufft", "curand"):
+                # wheels use bin/ or lib/
+                for leaf in ("bin", "lib"):
+                    d = root / sub / leaf
+                    if d.exists():
+                        candidates.append(d)
+        if not candidates:
+            return
+        prepend = os.pathsep.join(str(p) for p in candidates)
+        os.environ["PATH"] = prepend + os.pathsep + os.environ.get("PATH", "")
+        # Python 3.8+ Windows DLL directory
+        if hasattr(os, "add_dll_directory"):
+            for p in candidates:
+                try:
+                    os.add_dll_directory(str(p))
+                except Exception:
+                    pass
+    except Exception as e:
+        print(f"[asr] inject cuda dll path skipped: {e}", flush=True)
+
+
+def _cuda_available() -> bool:
+    """CTranslate2 CUDA (used by faster-whisper), not necessarily torch CUDA."""
+    force = (os.environ.get("CLIPPER_ASR_DEVICE") or "").strip().lower()
+    if force in {"cpu"}:
+        return False
+    _inject_nvidia_dll_path()
+    if force in {"cuda", "gpu"}:
+        return True
+    try:
+        import ctranslate2
+
+        return int(ctranslate2.get_cuda_device_count() or 0) > 0
+    except Exception:
+        return False
+
+
 def resolve_local_model() -> str:
     """
-    Model selection.
-    Default prefers SPEED: local tiny if present, else small, else base.
-    Set CLIPPER_LOCAL_WHISPER_MODEL=small for higher accuracy.
-    Set CLIPPER_ASR_QUALITY=high to force small/base over tiny.
+    Prefer better models when GPU is available.
+    Order:
+      env CLIPPER_LOCAL_WHISPER_MODEL
+      GPU: small → base → tiny
+      CPU fast: tiny → base → small
     """
     env = (os.environ.get("CLIPPER_LOCAL_WHISPER_MODEL") or "").strip()
     known = {
@@ -111,43 +164,46 @@ def resolve_local_model() -> str:
     if env and (Path(env).exists() or env in known):
         return env
 
-    quality = (os.environ.get("CLIPPER_ASR_QUALITY") or "fast").strip().lower()
     models_root = Path(r"C:\Users\MR\AppData\grok\models")
-    pointer = Path(__file__).resolve().parent / "local_whisper_model_path.txt"
+    quality = (os.environ.get("CLIPPER_ASR_QUALITY") or "").strip().lower()
+    use_gpu = _cuda_available()
 
-    # quality mode: prefer small/base
-    if quality in {"high", "hq", "quality", "accurate"}:
+    # GPU: prefer accuracy (small) because GPU makes it fast enough
+    if use_gpu or quality in {"high", "hq", "quality", "accurate", "gpu"}:
         for name in ("whisper-small", "whisper-base", "whisper-tiny"):
             d = models_root / name
             if (d / "model.bin").exists():
                 return str(d)
+        pointer = Path(__file__).resolve().parent / "local_whisper_model_path.txt"
         if pointer.exists():
             p = pointer.read_text(encoding="utf-8").strip()
-            if p and Path(p).exists():
+            if p and Path(p).exists() and (Path(p) / "model.bin").exists():
                 return p
         return (os.environ.get("CLIPPER_WHISPER_HUB_MODEL") or "small").strip() or "small"
 
-    # FAST mode (default): tiny first if available
+    # CPU: prefer speed
     for name in ("whisper-tiny", "whisper-base", "whisper-small"):
         d = models_root / name
         if (d / "model.bin").exists():
             return str(d)
+    pointer = Path(__file__).resolve().parent / "local_whisper_model_path.txt"
     if pointer.exists():
         p = pointer.read_text(encoding="utf-8").strip()
         if p and Path(p).exists() and (Path(p) / "model.bin").exists():
-            # if pointer points to small, still honor it only when tiny missing
             return p
     return "tiny"
-
-
-_WHISPER_MODEL = None
-_WHISPER_MODEL_KEY = None
 
 
 def _get_whisper_model(model_size: str):
     """Reuse model in-process (big speedup for multi jobs / reclip)."""
     global _WHISPER_MODEL, _WHISPER_MODEL_KEY
-    key = str(model_size)
+    use_cuda = _cuda_available()
+    compute = (os.environ.get("CLIPPER_ASR_COMPUTE_TYPE") or "").strip()
+    if not compute:
+        # float16 is usually fastest/best on RTX 40xx for whisper
+        compute = "float16" if use_cuda else "int8"
+    device = "cuda" if use_cuda else "cpu"
+    key = f"{model_size}|{device}|{compute}"
     if _WHISPER_MODEL is not None and _WHISPER_MODEL_KEY == key:
         return _WHISPER_MODEL
     from faster_whisper import WhisperModel
@@ -155,14 +211,31 @@ def _get_whisper_model(model_size: str):
     if "HF_ENDPOINT" not in os.environ:
         os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
     cpu_threads = max(2, min(8, (os.cpu_count() or 4)))
-    print(f"[asr] loading faster-whisper model={key!r} threads={cpu_threads}")
-    _WHISPER_MODEL = WhisperModel(
-        key,
-        device="cpu",
-        compute_type="int8",
-        cpu_threads=cpu_threads,
-        num_workers=1,
+    print(
+        f"[asr] loading faster-whisper model={model_size!r} device={device} "
+        f"compute={compute} threads={cpu_threads}",
+        flush=True,
     )
+    try:
+        _WHISPER_MODEL = WhisperModel(
+            str(model_size),
+            device=device,
+            compute_type=compute,
+            device_index=int(os.environ.get("CLIPPER_ASR_GPU_INDEX") or "0"),
+            cpu_threads=cpu_threads,
+            num_workers=1,
+        )
+    except Exception as e:
+        # fallback CPU if CUDA runtime libs mismatch
+        print(f"[asr] CUDA load failed ({e}); fallback CPU int8", flush=True)
+        _WHISPER_MODEL = WhisperModel(
+            str(model_size),
+            device="cpu",
+            compute_type="int8",
+            cpu_threads=cpu_threads,
+            num_workers=1,
+        )
+        key = f"{model_size}|cpu|int8"
     _WHISPER_MODEL_KEY = key
     return _WHISPER_MODEL
 
@@ -180,10 +253,11 @@ def asr_local(wav: Path) -> list[dict]:
     model_size = resolve_local_model()
     model = _get_whisper_model(model_size)
 
-    # SPEED-first defaults (CPU). Accuracy still better than old tiny because of small model + postprocess.
-    # Override: set CLIPPER_ASR_BEAM_SIZE=5 for higher accuracy.
-    beam = int(os.environ.get("CLIPPER_ASR_BEAM_SIZE") or "1")
-    best_of = int(os.environ.get("CLIPPER_ASR_BEST_OF") or "1")
+    # GPU: can afford higher accuracy; CPU: greedy for speed
+    use_cuda = _cuda_available()
+    default_beam = "3" if use_cuda else "1"
+    beam = int(os.environ.get("CLIPPER_ASR_BEAM_SIZE") or default_beam)
+    best_of = int(os.environ.get("CLIPPER_ASR_BEST_OF") or default_beam)
 
     try:
         from asr_enhance import CLOTHING_INITIAL_PROMPT, enhance_asr_segments
@@ -193,32 +267,31 @@ def asr_local(wav: Path) -> list[dict]:
             enhance_asr_segments,
         )
 
-    # Optional: only first N minutes of audio for draft speed (0 = full)
-    max_sec = float(os.environ.get("CLIPPER_ASR_MAX_SECONDS") or "0")
-
-    print(f"[asr] FAST transcribe beam={beam} model={model_size!r}", flush=True)
+    print(
+        f"[asr] transcribe beam={beam} model={model_size!r} device={'cuda' if use_cuda else 'cpu'}",
+        flush=True,
+    )
     kwargs = dict(
         language="zh",
         task="transcribe",
         vad_filter=True,
         vad_parameters={
-            "min_silence_duration_ms": 600,
-            "speech_pad_ms": 120,
+            "min_silence_duration_ms": 450 if use_cuda else 600,
+            "speech_pad_ms": 160 if use_cuda else 120,
             "threshold": 0.5,
         },
         beam_size=max(1, beam),
         best_of=max(1, best_of),
-        patience=0.5,
+        patience=0.8 if use_cuda else 0.5,
         temperature=0.0,
-        compression_ratio_threshold=2.6,
+        compression_ratio_threshold=2.5,
         log_prob_threshold=-1.0,
-        no_speech_threshold=0.65,
-        condition_on_previous_text=False,
+        no_speech_threshold=0.6 if use_cuda else 0.65,
+        condition_on_previous_text=bool(use_cuda),
         initial_prompt=CLOTHING_INITIAL_PROMPT,
         without_timestamps=False,
         word_timestamps=False,
     )
-    # faster-whisper supports clip_timestamps in some versions; fallback: full file
     segments, info = model.transcribe(str(wav), **kwargs)
     out: list[dict] = []
     for i, seg in enumerate(segments):

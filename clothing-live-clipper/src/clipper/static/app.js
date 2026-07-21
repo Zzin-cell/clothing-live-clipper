@@ -35,7 +35,7 @@ function stageLabel(stage) {
     queued: "排队",
     starting: "启动",
     extract_audio: "抽音频",
-    asr: "口播打轴（加速模式，通常几十秒到2分钟）",
+    asr: "GPU 口播打轴（small/float16，通常十几秒到1分钟）",
     asr_done: "听写完成",
     filter: "过滤无效词",
     clipper: "卖点排序",

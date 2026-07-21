@@ -221,65 +221,122 @@ def _is_pure_filler(c: Clip) -> bool:
     return False
 
 
+# True product FEATURES for first ~20s only (not outfit / try-on / change clothes)
 _HOOK_FEATURE_WORDS = (
-    "显瘦", "遮肉", "遮胯", "不透", "柔软", "超软", "软到", "软的", "百搭",
+    "显瘦", "遮肉", "遮胯", "不透", "柔软", "超软", "软到", "软的", "超级软",
     "闭眼入", "垂感", "弹力", "不起球", "透气", "显白", "收腰", "修身",
-    "面料", "布料", "材质", "天丝", "醋酸", "凉感", "蕾丝", "雷丝",
-    "破洞", "牛仔", "版型", "高腰", "梨形",
+    "面料", "布料", "材质", "天丝", "醋酸", "凉感", "雪纺", "纯棉",
+    "版型", "高腰", "梨形", "显腿长", "不挑人", "好打理", "可机洗",
+)
+
+# Outfit / change-look / try-on → keep for later body, NOT golden 20s
+_OUTFIT_CHANGE_WORDS = (
+    "搭配", "换装", "换上", "换件", "换一个", "下一件", "再穿", "套装",
+    "一整套", "穿一下", "打一下", "试穿", "上身看看", "搭个", "配个",
+    "牛仔裤", "小白鞋", "内搭", "外套怎么", "怎么搭", "破洞牛仔", "破洞牛",
+    "小破洞", "你的衣服里", "衣服人",
 )
 
 
-def _hook_strength(c: Clip) -> float:
-    """How strongly this clip belongs in first ~20s (features/selling first)."""
+def _is_outfit_or_change(c: Clip) -> bool:
+    """Outfit / try-on / change-clothes talk should not lead the first 20s."""
+    text = c.text or ""
+    types = set(c.claim_types)
+    if ClaimType.OUTFIT in types or ClaimType.SCENE in types:
+        # still allow if it is mainly a strong fabric/selling feature line
+        if ClaimType.SELLING_POINT in types or ClaimType.FABRIC in types or ClaimType.FIT in types:
+            # e.g. 面料软 + 搭配 → feature first if has strong feature words
+            if any(w in text for w in _HOOK_FEATURE_WORDS):
+                return False
+        return True
+    if any(w in text for w in _OUTFIT_CHANGE_WORDS):
+        # pure try-on / change / match without clear product feature
+        if not any(w in text for w in _HOOK_FEATURE_WORDS):
+            return True
+        # "穿一下牛仔裤" style → outfit
+        if re.search(r"(穿一下|打一下|试穿|换装|换上).{0,8}(牛仔|裤子|裙子|外套|上衣)", text):
+            return True
+        if "搭配" in text or "搭个" in text or "配个" in text:
+            # matching talk after features
+            if not any(w in text for w in ("显瘦", "遮肉", "不透", "面料", "版型", "柔软", "软到")):
+                return True
+    return False
+
+
+def _is_true_feature(c: Clip) -> bool:
+    """True clothing features for golden 20s."""
+    if _is_outfit_or_change(c):
+        return False
     types = set(c.claim_types)
     text = c.text or ""
+    if types & {ClaimType.SELLING_POINT, ClaimType.FIT, ClaimType.FABRIC}:
+        return True
+    if any(w in text for w in _HOOK_FEATURE_WORDS):
+        return True
+    # detail alone is weaker; allow only with feature word
+    if ClaimType.DETAIL in types and any(w in text for w in ("蕾丝", "雷丝", "拼接", "面料", "不透")):
+        return True
+    return False
+
+
+def _hook_strength(c: Clip) -> float:
+    """How strongly this clip belongs in first ~20s (features/selling ONLY)."""
+    types = set(c.claim_types)
+    text = c.text or ""
+    # hard ban outfit/change from front 20s ranking
+    if _is_outfit_or_change(c):
+        return -100.0
+
     s = 0.0
     if ClaimType.SELLING_POINT in types:
-        s += 50.0
+        s += 55.0
     if ClaimType.FIT in types:
-        s += 28.0
+        s += 32.0
     if ClaimType.FABRIC in types:
-        s += 30.0
+        s += 34.0
     if ClaimType.DETAIL in types:
-        s += 12.0
-    # text features even if ASR typing missed claim tags
+        s += 8.0  # detail secondary even in golden
+
     hits = sum(1 for w in _HOOK_FEATURE_WORDS if w in text)
-    s += min(36.0, hits * 8.0)
-    # combo: selling + structure/material
+    s += min(40.0, hits * 9.0)
+
     if ClaimType.SELLING_POINT in types and (ClaimType.FIT in types or ClaimType.FABRIC in types):
-        s += 20.0
-    if any(w in text for w in ("不透", "显瘦", "遮肉", "软到", "超级软", "面料")):
-        s += 15.0
-    # demote pure vague 好看 / try-on without garment feature
+        s += 25.0
+    if any(w in text for w in ("不透", "显瘦", "遮肉", "软到", "超级软", "面料", "版型", "收腰")):
+        s += 18.0
+
+    # demote vague praise
     if "好看" in text and hits == 0 and ClaimType.SELLING_POINT not in types:
-        s -= 35.0
-    if re.search(r"穿一下|打一下", text) and hits == 0:
-        s -= 25.0
-    # hard: not garment-ish → not for front 20s
-    if hits == 0 and not (
-        types & {ClaimType.SELLING_POINT, ClaimType.FIT, ClaimType.FABRIC, ClaimType.DETAIL, ClaimType.OUTFIT}
-    ):
+        s -= 50.0
+    if re.search(r"穿一下|打一下|试穿|换装", text):
         s -= 40.0
-    s += c.score * 0.35
+    if not _is_true_feature(c):
+        s -= 60.0
+
+    s += c.score * 0.30
     return s
 
 
 def _primary_stage(c: Clip) -> int:
-    """Narrative stage index (logic order). Lower = earlier in story after hook."""
+    """Narrative stage: 0=feature hook, then fit/fabric, detail, outfit last."""
     types = set(c.claim_types)
     text = c.text or ""
-    # 0 hook-ish: selling + fabric/fit combo feel
+    # outfit / change always late body
+    if _is_outfit_or_change(c):
+        return 4
     if ClaimType.SELLING_POINT in types and (ClaimType.FABRIC in types or ClaimType.FIT in types):
         return 0
     if ClaimType.SELLING_POINT in types or any(
         w in text for w in ("显瘦", "遮肉", "不透", "软到", "超级软", "闭眼入")
     ):
         return 0
-    if ClaimType.FIT in types:
+    if ClaimType.FIT in types or any(w in text for w in ("收腰", "修身", "版型", "高腰", "梨形")):
         return 1
-    if ClaimType.FABRIC in types or any(k in text for k in ("面料", "牛仔", "蕾丝", "雷丝", "天丝", "软")):
+    if ClaimType.FABRIC in types or any(
+        k in text for k in ("面料", "材质", "布料", "天丝", "醋酸", "柔软", "软", "蕾丝", "雷丝")
+    ):
         return 2
-    if ClaimType.DETAIL in types or any(k in text for k in ("细节", "拼接", "口袋", "破洞")):
+    if ClaimType.DETAIL in types or any(k in text for k in ("细节", "拼接", "口袋", "开叉", "领口")):
         return 3
     if ClaimType.OUTFIT in types or ClaimType.SCENE in types or "搭配" in text:
         return 4
@@ -510,54 +567,63 @@ def build_timeline_plan(
     if abs(speed - 1.0) > 0.01:
         warnings.append(f"source_select_for_speed={speed:.2f}x")
 
-    # --- Golden (~front 20s final): FORCE features/selling first ---
-    # Seed with absolute top feature clips, then fill with nearby logical talk.
+    # --- Golden (~front 20s final): ONLY true product features ---
+    # No outfit / change-clothes / try-on leading the first 20s.
     golden: list[PlanSlot] = []
     feature_pool = sorted(
-        [c for c in scored if not _is_pure_filler(c) and c.score > 0],
+        [
+            c
+            for c in scored
+            if not _is_pure_filler(c)
+            and c.score > 0
+            and _is_true_feature(c)
+            and not _is_outfit_or_change(c)
+            and ClaimType.PRICE not in c.claim_types
+            and not any(p in (c.text or "") for p in _PRICE_TEXT)
+        ],
         key=_hook_strength,
         reverse=True,
     )
-    # take top feature seeds first (1–3)
-    seed_budget = int(golden_ms * 0.72)
+    seed_budget = golden_ms  # fill golden with features as much as possible
     seed_used = 0
     for c in feature_pool:
         if seed_used >= seed_budget:
             break
         if c.clip_id in used:
             continue
-        if any(p in (c.text or "") for p in _PRICE_TEXT) or ClaimType.PRICE in c.claim_types:
-            continue
-        if _hook_strength(c) < 25 and golden:
-            break
+        if _hook_strength(c) < 20 and golden:
+            # only pad with weaker features if golden still short
+            if seed_used >= int(seed_budget * 0.55):
+                break
         golden.append(_to_slot(c, "hook"))
         used.add(c.clip_id)
         seed_used += c.duration_ms
-        if len(golden) >= 4:
+        if len(golden) >= 6:
             break
 
+    # if still short, only allow more FIT/FABRIC/SELLING — never outfit/change
     remain_g = max(0, golden_ms - sum(s.t1_ms - s.t0_ms for s in golden))
-    golden.extend(
-        _pick_logical(
-            scored,
+    if remain_g > 400:
+        more = _pick_logical(
+            [
+                c
+                for c in scored
+                if not _is_outfit_or_change(c) and _is_true_feature(c)
+            ],
             remain_g,
             used,
             role="hook",
-            prefer_types={
-                ClaimType.SELLING_POINT,
-                ClaimType.FIT,
-                ClaimType.FABRIC,
-                ClaimType.DETAIL,
-            },
+            prefer_types={ClaimType.SELLING_POINT, ClaimType.FIT, ClaimType.FABRIC},
             prefer_stages={0, 1, 2},
             dedupe_threshold=0.70,
             logic_over_dedupe=True,
-            chronological_bias=0.55,
+            chronological_bias=0.45,
             feature_first=True,
             time_chain=True,
         )
-    )
-    golden = _reorder_section_logical(golden, by_id, "hook")
+        golden.extend(more)
+
+    # hard filter golden: remove outfit/change/price that slipped in
     golden = [
         s
         for s in golden
@@ -565,18 +631,20 @@ def build_timeline_plan(
         and not (
             s.clip_id in by_id and ClaimType.PRICE in by_id[s.clip_id].claim_types
         )
+        and not (s.clip_id in by_id and _is_outfit_or_change(by_id[s.clip_id]))
     ]
+    # order: strongest features first
+    golden = sorted(
+        golden,
+        key=lambda s: (
+            -(_hook_strength(by_id[s.clip_id]) if s.clip_id in by_id else s.score),
+            s.t0_ms,
+        ),
+    )
     if not golden:
         warnings.append("no_golden_clips")
     else:
-        # ensure first clip is the strongest feature available in golden
-        golden = sorted(
-            golden,
-            key=lambda s: (
-                -(_hook_strength(by_id[s.clip_id]) if s.clip_id in by_id else s.score),
-                s.t0_ms,
-            ),
-        )
+        warnings.append("golden_features_only")
 
     # --- CTA: NO price. Closing = remaining selling / fabric recap ---
     cta: list[PlanSlot] = []
@@ -606,6 +674,7 @@ def build_timeline_plan(
     ]
 
     # --- Trust: expand fabric → detail → outfit; stronger time chain ---
+    # Trust body: outfit / change-clothes / try-on go HERE (after features)
     trust = _pick_logical(
         scored,
         trust_ms,
@@ -614,12 +683,12 @@ def build_timeline_plan(
         prefer_types={
             ClaimType.DETAIL,
             ClaimType.FABRIC,
-            ClaimType.SCENE,
             ClaimType.OUTFIT,
+            ClaimType.SCENE,
             ClaimType.FIT,
             ClaimType.SELLING_POINT,
         },
-        prefer_stages={2, 3, 1, 4},
+        prefer_stages={2, 3, 4, 1},  # fabric/detail first, outfit later in body
         dedupe_threshold=0.68,
         logic_over_dedupe=True,
         chronological_bias=0.65,
@@ -627,6 +696,15 @@ def build_timeline_plan(
         time_chain=True,
     )
     trust = _reorder_section_logical(trust, by_id, "trust")
+    # push pure outfit/change toward end of trust
+    trust = sorted(
+        trust,
+        key=lambda s: (
+            1 if (s.clip_id in by_id and _is_outfit_or_change(by_id[s.clip_id])) else 0,
+            _primary_stage(by_id[s.clip_id]) if s.clip_id in by_id else 3,
+            s.t0_ms,
+        ),
+    )
 
     min_plan = getattr(settings, "source_min_plan_ms", None)
     max_plan = getattr(settings, "source_max_plan_ms", None)

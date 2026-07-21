@@ -525,20 +525,54 @@ function setupForm() {
 let transcriptCache = [];
 
 function openTranscriptDrawer() {
-  $("drawer-backdrop").hidden = false;
-  $("transcript-drawer").hidden = false;
+  const mask = $("drawer-backdrop");
+  const drawer = $("transcript-drawer");
+  if (mask) {
+    mask.hidden = false;
+    mask.style.display = "block";
+  }
+  if (drawer) {
+    drawer.hidden = false;
+    drawer.style.display = "flex";
+  }
   loadTranscriptEditor(currentJobId);
 }
 
 function closeTranscriptDrawer() {
-  $("drawer-backdrop").hidden = true;
-  $("transcript-drawer").hidden = true;
+  const mask = $("drawer-backdrop");
+  const drawer = $("transcript-drawer");
+  if (mask) {
+    mask.hidden = true;
+    mask.style.display = "none";
+  }
+  if (drawer) {
+    drawer.hidden = true;
+    drawer.style.display = "none";
+  }
 }
 
 function setupTranscriptModule() {
-  $("open-transcript")?.addEventListener("click", openTranscriptDrawer);
-  $("close-transcript")?.addEventListener("click", closeTranscriptDrawer);
-  $("drawer-backdrop")?.addEventListener("click", closeTranscriptDrawer);
+  $("open-transcript")?.addEventListener("click", (e) => {
+    e.preventDefault();
+    openTranscriptDrawer();
+  });
+  // capture phase so close always works even if something stops bubbling
+  $("close-transcript")?.addEventListener(
+    "click",
+    (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      closeTranscriptDrawer();
+    },
+    true
+  );
+  $("drawer-backdrop")?.addEventListener("click", (e) => {
+    e.preventDefault();
+    closeTranscriptDrawer();
+  });
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") closeTranscriptDrawer();
+  });
   $("tr-reload")?.addEventListener("click", () => loadTranscriptEditor(currentJobId));
   $("tr-all")?.addEventListener("click", () => setAllKeep(true));
   $("tr-none")?.addEventListener("click", () => setAllKeep(false));

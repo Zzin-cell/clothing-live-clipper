@@ -285,6 +285,16 @@ body {
   background: #1e1e22; border-left: 1px solid #333; z-index: 50;
   display: flex; flex-direction: column;
 }
+/* Critical: class display:flex would otherwise override HTML hidden */
+.drawer[hidden],
+.drawer-backdrop[hidden] {
+  display: none !important;
+}
+.drawer-head .jy-btn {
+  position: relative;
+  z-index: 2;
+  pointer-events: auto;
+}
 .drawer-head {
   display: flex; justify-content: space-between; gap: 10px; align-items: flex-start;
   padding: 14px; border-bottom: 1px solid #333;

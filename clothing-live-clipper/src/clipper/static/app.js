@@ -596,13 +596,19 @@ function setupForm() {
       fd.append("auto_process", "true");
       const res = await fetch("/api/jobs", { method: "POST", body: fd });
       const data = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(data.detail || "创建失败");
+      if (!res.ok) throw new Error(data.detail || res.statusText || "创建失败");
       renderJob(data);
       await loadJobs();
       pollJob(data.job_id);
     } catch (ex) {
       err.hidden = false;
-      err.textContent = String(ex.message || ex);
+      const msg = String(ex.message || ex);
+      if (msg.includes("Failed to fetch") || msg.includes("NetworkError") || msg.includes("fetch")) {
+        err.textContent =
+          "无法连接本地服务 (127.0.0.1:8787)。请先运行 start-web.bat 并保持窗口不关闭，然后刷新页面再试。";
+      } else {
+        err.textContent = msg;
+      }
     } finally {
       btn.disabled = false;
       btn.textContent = "开始服装切片";

@@ -47,13 +47,16 @@ STRONG = (
     "遮胯", "高腰", "梨形", "闭眼入", "显白", "开叉", "领口", "袖口",
     "破洞", "拼接", "小雷丝", "马洗", "超级软", "天丝", "小破洞",
     "衣服", "服装", "连衣裙", "半身裙", "风衣", "大衣", "衬衫", "毛衣",
+    "不爱穿牛仔", "穿牛仔", "下天的面料", "两块的面料",
 )
 
-# Only valid as secondary WHEN garment noun/feature also present
+# secondary clothing talk (must still pass is_garment_line)
 MEDIUM = (
     "这件", "这套", "这一套", "穿上", "上身", "试穿", "廓形", "宽松", "直筒",
     "耐造", "好穿", "百搭", "通勤", "口袋", "拉链", "扣子", "下摆", "细节",
     "推荐", "破洞牛", "小破洞牛", "一整套", "搭配牛仔裤", "搭配裙子",
+    "白色", "黑色", "颜色", "上身效果", "版型好", "垂感好", "弹力好",
+    "打一下牛仔", "穿一下牛仔", "天丝白", "玻璃",  # ASR noise around clothing demos
 )
 
 PRICE = (
@@ -75,7 +78,10 @@ def is_garment_line(text: str) -> bool:
     if _has_any(t, GARMENT_NOUNS) or _has_any(t, STRONG):
         return True
     # 显瘦/遮肉 etc without noun still clothing feature
-    if _has_any(t, ("显瘦", "遮肉", "遮胯", "不透", "显白", "闭眼入", "梨形")):
+    if _has_any(t, ("显瘦", "遮肉", "遮胯", "不透", "显白", "闭眼入", "梨形", "百搭", "垂感", "弹力")):
+        return True
+    # ASR often says 牛仔/面料 variants
+    if "牛仔" in t or "面料" in t or "雷丝" in t or "蕾丝" in t or "天丝" in t:
         return True
     return False
 
@@ -111,15 +117,8 @@ def classify(text: str) -> str:
         return "drop"
     if filler and not (strong or (medium and garment)):
         return "drop"
-    # try-on filler without real feature
-    if re.search(r"(穿一下|打一下).{0,8}牛仔", t) and not _has_any(
-        t, ("面料", "显瘦", "遮肉", "版型", "不透", "柔软", "软", "弹力")
-    ):
-        return "drop"
-    if re.search(r"不爱穿牛仔|穿牛仔很快|牛仔本身就是", t) and not _has_any(
-        t, ("面料", "显瘦", "版型", "弹力", "不透", "软")
-    ):
-        return "drop"
+    # pure try-on without any garment noun already dropped by is_garment_line
+    # keep 牛仔/面料 demo lines as medium/strong for clothing continuity
     # 只有「好看」类形容词，没有衣服词
     if re.fullmatch(r"[好看太超很也挺真的,，。！!？?\s]+", t):
         return "drop"

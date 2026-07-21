@@ -165,12 +165,12 @@ def asr_local(wav: Path) -> list[dict]:
     model_size = resolve_local_model()
     model = _get_whisper_model(model_size)
 
-    # Quality-first defaults; override via env for speed if needed
-    beam = int(os.environ.get("CLIPPER_ASR_BEAM_SIZE") or "5")
+    # Balanced defaults: better than tiny, not as slow as beam=5 on CPU
+    beam = int(os.environ.get("CLIPPER_ASR_BEAM_SIZE") or "3")
     best_of = int(os.environ.get("CLIPPER_ASR_BEST_OF") or str(max(1, beam)))
     # tiny can stay faster
     if "tiny" in str(model_size).lower() and not os.environ.get("CLIPPER_ASR_BEAM_SIZE"):
-        beam, best_of = 3, 3
+        beam, best_of = 1, 1
 
     try:
         from asr_enhance import CLOTHING_INITIAL_PROMPT, enhance_asr_segments
@@ -180,24 +180,24 @@ def asr_local(wav: Path) -> list[dict]:
             enhance_asr_segments,
         )
 
-    print(f"[asr] transcribe beam={beam} model={model_size!r}")
+    print(f"[asr] transcribe beam={beam} model={model_size!r}", flush=True)
     segments, info = model.transcribe(
         str(wav),
         language="zh",
         task="transcribe",
         vad_filter=True,
         vad_parameters={
-            "min_silence_duration_ms": 400,
-            "speech_pad_ms": 200,
+            "min_silence_duration_ms": 500,
+            "speech_pad_ms": 180,
         },
         beam_size=max(1, beam),
         best_of=max(1, best_of),
-        patience=1.0,
+        patience=0.8,
         temperature=0.0,
         compression_ratio_threshold=2.4,
         log_prob_threshold=-1.0,
-        no_speech_threshold=0.55,
-        condition_on_previous_text=True,
+        no_speech_threshold=0.6,
+        condition_on_previous_text=False,  # faster + less error cascade on noisy live
         initial_prompt=CLOTHING_INITIAL_PROMPT,
         without_timestamps=False,
         word_timestamps=False,

@@ -125,6 +125,13 @@ class Settings:
     # e.g. speed=1.3 → select ~78s source for ~60s output.
     playback_speed: float = 1.3
     golden_weight_ratio: float = 0.60
+    # ---- GLOBAL product policy (all jobs: Web / CLI / reclip) ----
+    # First ~20s final (golden): ONLY clothing features/selling (面料/显瘦/版型…).
+    # Outfit / change-clothes / try-on ("换装/搭配/穿一下") must go AFTER golden.
+    golden_features_only: bool = True
+    demote_outfit_change_from_golden: bool = True
+    exclude_price_from_cut: bool = True
+    clothing_only: bool = True
     llm_api_key: str | None = None
     llm_base_url: str = "https://api.openai.com/v1"
     llm_model: str = "gpt-4o-mini"
@@ -154,8 +161,18 @@ class Settings:
             speed = 1.3
         if speed < 0.8 or speed > 2.5:
             speed = 1.3
+        def _flag(name: str, default: bool = True) -> bool:
+            raw = (_get(name) or ("true" if default else "false")).strip().lower()
+            return raw in {"1", "true", "yes", "on"}
+
         return cls(
             playback_speed=speed,
+            golden_features_only=_flag("CLIPPER_GOLDEN_FEATURES_ONLY", True),
+            demote_outfit_change_from_golden=_flag(
+                "CLIPPER_DEMOTE_OUTFIT_FROM_GOLDEN", True
+            ),
+            exclude_price_from_cut=_flag("CLIPPER_EXCLUDE_PRICE", True),
+            clothing_only=_flag("CLIPPER_CLOTHING_ONLY", True),
             llm_api_key=resolve_llm_key() or None,
             llm_base_url=resolve_llm_base_url(),
             llm_model=resolve_llm_model(),

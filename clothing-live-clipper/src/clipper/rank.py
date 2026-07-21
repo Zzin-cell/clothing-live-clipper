@@ -550,6 +550,9 @@ def build_timeline_plan(
     settings: Settings | None = None,
 ) -> TimelinePlan:
     settings = settings or Settings()
+    # GLOBAL policy flags (default ON for all jobs)
+    features_only = bool(getattr(settings, "golden_features_only", True))
+    demote_outfit = bool(getattr(settings, "demote_outfit_change_from_golden", True))
     scored = score_all(clips)
     by_id = {c.clip_id: c for c in scored}
 
@@ -567,8 +570,9 @@ def build_timeline_plan(
     if abs(speed - 1.0) > 0.01:
         warnings.append(f"source_select_for_speed={speed:.2f}x")
 
-    # --- Golden (~front 20s final): ONLY true product features ---
-    # No outfit / change-clothes / try-on leading the first 20s.
+    # --- Golden (~front 20s final): ONLY true product features (GLOBAL) ---
+    # Applies to every job (Web auto / CLI / reclip / batch). Not per-file.
+    # No outfit / change-clothes / try-on in the first 20s when flags enabled.
     golden: list[PlanSlot] = []
     feature_pool = sorted(
         [
@@ -576,8 +580,12 @@ def build_timeline_plan(
             for c in scored
             if not _is_pure_filler(c)
             and c.score > 0
-            and _is_true_feature(c)
-            and not _is_outfit_or_change(c)
+            and (
+                _is_true_feature(c)
+                if features_only
+                else (c.score > 0)
+            )
+            and (not demote_outfit or not _is_outfit_or_change(c))
             and ClaimType.PRICE not in c.claim_types
             and not any(p in (c.text or "") for p in _PRICE_TEXT)
         ],
@@ -604,12 +612,14 @@ def build_timeline_plan(
     # if still short, only allow more FIT/FABRIC/SELLING — never outfit/change
     remain_g = max(0, golden_ms - sum(s.t1_ms - s.t0_ms for s in golden))
     if remain_g > 400:
+        more_pool = [
+            c
+            for c in scored
+            if (not demote_outfit or not _is_outfit_or_change(c))
+            and (not features_only or _is_true_feature(c))
+        ]
         more = _pick_logical(
-            [
-                c
-                for c in scored
-                if not _is_outfit_or_change(c) and _is_true_feature(c)
-            ],
+            more_pool,
             remain_g,
             used,
             role="hook",
@@ -623,16 +633,20 @@ def build_timeline_plan(
         )
         golden.extend(more)
 
-    # hard filter golden: remove outfit/change/price that slipped in
-    golden = [
-        s
-        for s in golden
-        if not any(p in (s.text or "") for p in _PRICE_TEXT)
-        and not (
-            s.clip_id in by_id and ClaimType.PRICE in by_id[s.clip_id].claim_types
-        )
-        and not (s.clip_id in by_id and _is_outfit_or_change(by_id[s.clip_id]))
-    ]
+    # GLOBAL hard filter on golden (every job)
+    def _keep_in_golden(s: PlanSlot) -> bool:
+        if any(p in (s.text or "") for p in _PRICE_TEXT):
+            return False
+        c = by_id.get(s.clip_id)
+        if c and ClaimType.PRICE in c.claim_types:
+            return False
+        if demote_outfit and c and _is_outfit_or_change(c):
+            return False
+        if features_only and c and not _is_true_feature(c):
+            return False
+        return True
+
+    golden = [s for s in golden if _keep_in_golden(s)]
     # order: strongest features first
     golden = sorted(
         golden,
@@ -644,7 +658,10 @@ def build_timeline_plan(
     if not golden:
         warnings.append("no_golden_clips")
     else:
-        warnings.append("golden_features_only")
+        if features_only:
+            warnings.append("policy:golden_features_only")
+        if demote_outfit:
+            warnings.append("policy:outfit_change_after_20s")
 
     # --- CTA: NO price. Closing = remaining selling / fabric recap ---
     cta: list[PlanSlot] = []

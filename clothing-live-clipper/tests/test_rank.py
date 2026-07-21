@@ -46,6 +46,43 @@ def test_golden_excludes_chitchat_and_has_value():
     assert any(k in golden_text for k in ("显瘦", "闭眼入", "醋酸", "收腰", "面料", "版型"))
 
 
+def test_global_policy_de_live_and_attract_hook():
+    from clipper.models import ClaimType, Clip
+
+    clips = [
+        Clip(
+            clip_id="live1",
+            text="家人们扣1点关注直播间有福袋",
+            t0_ms=0,
+            t1_ms=2000,
+            claim_types=[ClaimType.CHITCHAT],
+            score=10,
+        ),
+        Clip(
+            clip_id="feat1",
+            text="独家专利凉感面料显瘦不透",
+            t0_ms=3000,
+            t1_ms=7000,
+            claim_types=[ClaimType.FABRIC, ClaimType.SELLING_POINT],
+            score=40,
+        ),
+        Clip(
+            clip_id="fit1",
+            text="收腰版型梨形闭眼入",
+            t0_ms=8000,
+            t1_ms=11000,
+            claim_types=[ClaimType.FIT, ClaimType.SELLING_POINT],
+            score=38,
+        ),
+    ]
+    plan = build_timeline_plan(clips, Settings(target_duration_s=60, playback_speed=1.0))
+    all_text = " ".join(s.text for s in plan.all_slots())
+    assert "扣1" not in all_text and "福袋" not in all_text and "直播间" not in all_text
+    assert plan.golden
+    assert "独家" in plan.golden[0].text or "凉感" in plan.golden[0].text or "显瘦" in plan.golden[0].text
+    assert any("de_live_room_feel" in w or "hook_attract_first" in w for w in plan.warnings)
+
+
 def test_global_policy_size_excluded_and_unique_first():
     from clipper.models import ClaimType, Clip
 

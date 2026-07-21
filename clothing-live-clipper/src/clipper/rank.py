@@ -234,14 +234,38 @@ def _similarity(a: str, b: str) -> float:
     return max(jacc, substr)
 
 
+_LIVE_ROOM_MARKERS = (
+    "家人们", "老铁", "宝宝们", "姐妹们", "宝贝们", "直播间", "扣1", "扣一",
+    "点关注", "双击", "刷波", "公屏", "弹幕", "福袋", "连麦", "上链接",
+    "小黄车", "欢迎进来", "新进来", "听得到", "在不在", "来了吗", "过一下",
+)
+
+
+def _looks_like_live_room(text: str) -> bool:
+    t = text or ""
+    hits = sum(1 for w in _LIVE_ROOM_MARKERS if w in t)
+    if hits >= 1 and not any(h in t for h in _CLOTHING_TEXT_HINTS):
+        return True
+    if hits >= 2:
+        return True
+    if re.search(r"(扣|点|刷).{0,2}(1|一|关注)", t):
+        return True
+    return False
+
+
 def _is_pure_filler(c: Clip) -> bool:
     if c.score <= 0:
         return True
+    text = c.text or ""
     types = set(c.claim_types)
+    if _looks_like_live_room(text) and not (
+        types & {ClaimType.SELLING_POINT, ClaimType.FIT, ClaimType.FABRIC}
+    ):
+        return True
     if ClaimType.CHITCHAT in types and len(types) == 1:
-        if not any(h in (c.text or "") for h in _CLOTHING_TEXT_HINTS):
+        if not any(h in text for h in _CLOTHING_TEXT_HINTS):
             return True
-    if is_chitchat_text(c.text) and not any(h in (c.text or "") for h in _CLOTHING_TEXT_HINTS):
+    if is_chitchat_text(c.text) and not any(h in text for h in _CLOTHING_TEXT_HINTS):
         if not (types & {ClaimType.SELLING_POINT, ClaimType.FIT, ClaimType.FABRIC, ClaimType.PRICE}):
             return True
     return False
@@ -320,10 +344,12 @@ def _unique_feature_boost(text: str) -> float:
 
 
 def _hook_strength(c: Clip) -> float:
-    """How strongly this clip belongs in first ~20s (unique features first)."""
+    """Front 20s score: attractive product claims only; no live-room feel."""
     types = set(c.claim_types)
     text = c.text or ""
-    # hard ban outfit/change / size from front 20s ranking
+    # hard ban outfit/change / size / live-room from front 20s ranking
+    if _looks_like_live_room(text):
+        return -150.0
     if _is_outfit_or_change(c):
         return -100.0
     if ClaimType.SIZE in types or any(p in text for p in _SIZE_TEXT):
@@ -333,35 +359,38 @@ def _hook_strength(c: Clip) -> float:
 
     s = 0.0
     if ClaimType.SELLING_POINT in types:
-        s += 55.0
+        s += 60.0
     if ClaimType.FIT in types:
-        s += 32.0
-    if ClaimType.FABRIC in types:
         s += 34.0
+    if ClaimType.FABRIC in types:
+        s += 36.0
     if ClaimType.DETAIL in types:
         s += 8.0  # detail secondary even in golden
 
     hits = sum(1 for w in _HOOK_FEATURE_WORDS if w in text)
-    s += min(40.0, hits * 9.0)
+    s += min(45.0, hits * 10.0)
 
-    # UNIQUE features float to the very front
+    # UNIQUE features float to the very front (吸引力核心)
     uniq = _unique_feature_boost(text)
-    s += uniq
+    s += uniq * 1.25
 
     if ClaimType.SELLING_POINT in types and (ClaimType.FIT in types or ClaimType.FABRIC in types):
-        s += 25.0
-    if any(w in text for w in ("不透", "显瘦", "遮肉", "软到", "超级软", "面料", "版型", "收腰")):
-        s += 18.0
+        s += 28.0
+    # high-attraction concrete benefits
+    if any(w in text for w in ("不透", "显瘦", "遮肉", "软到", "超级软", "面料", "版型", "收腰", "闭眼入", "梨形")):
+        s += 22.0
+    if any(w in text for w in ("独家", "专利", "限定", "首创", "凉感", "不起球", "可机洗", "抗皱")):
+        s += 26.0
 
-    # demote vague praise
+    # demote vague praise / demo filler
     if "好看" in text and hits == 0 and ClaimType.SELLING_POINT not in types:
-        s -= 50.0
+        s -= 55.0
     if re.search(r"穿一下|打一下|试穿|换装", text):
-        s -= 40.0
+        s -= 45.0
     if not _is_true_feature(c):
-        s -= 60.0
+        s -= 70.0
 
-    s += c.score * 0.30
+    s += c.score * 0.28
     return s
 
 
@@ -686,6 +715,8 @@ def build_timeline_plan(
         text = s.text or ""
         if any(p in text for p in _PRICE_TEXT) or any(p in text for p in _SIZE_TEXT):
             return False
+        if _looks_like_live_room(text):
+            return False
         c = by_id.get(s.clip_id)
         if c and ClaimType.PRICE in c.claim_types:
             return False
@@ -716,6 +747,8 @@ def build_timeline_plan(
             warnings.append("policy:outfit_change_after_20s")
         warnings.append("policy:unique_features_first")
         warnings.append("policy:size_excluded")
+        warnings.append("policy:de_live_room_feel")
+        warnings.append("policy:hook_attract_first")
 
     # --- CTA: NO price. Closing = remaining selling / fabric recap ---
     cta: list[PlanSlot] = []

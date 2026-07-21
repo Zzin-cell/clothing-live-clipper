@@ -126,12 +126,15 @@ class Settings:
     playback_speed: float = 1.3
     golden_weight_ratio: float = 0.60
     # ---- GLOBAL product policy (all jobs: Web / CLI / reclip) ----
-    # First ~20s final (golden): ONLY clothing features/selling (面料/显瘦/版型…).
-    # Outfit / change-clothes / try-on ("换装/搭配/穿一下") must go AFTER golden.
+    # Goal: short video should NOT feel like a livestream room.
+    # First ~20s: strongest unique product features only (attract attention).
+    # Outfit / change-clothes / try-on go AFTER golden. Size/price never keep.
     golden_features_only: bool = True
     demote_outfit_change_from_golden: bool = True
     exclude_price_from_cut: bool = True
     clothing_only: bool = True
+    de_live_room_feel: bool = True
+    unique_features_first: bool = True
     llm_api_key: str | None = None
     llm_base_url: str = "https://api.openai.com/v1"
     llm_model: str = "gpt-4o-mini"

@@ -14,14 +14,23 @@ SENTIMENT_WORDS = (
     "做了五年", "不容易", "感谢陪伴", "创业", "初心", "故事是这样", "一路走来",
     "谢谢支持我", "喜欢我的人",
 )
+# Livestream-feel markers: remove so cut feels like a product short, not a live room
 FILLER_WORDS = (
-    "家人们", "老铁们", "听得到吗", "扣1", "扣一", "点点关注", "双击", "晚上好啊", "来了吗",
-    "过一下", "过一遍", "带过", "先过", "往下过", "咱们过",
-    "看一看", "说一下", "讲一下", "介绍一下",
-    "给大家看", "给你们看", "来看一下", "注意看",
-    "一会儿", "待会", "等会", "马上", "接下来",
-    "铃铃铃", "有没有人", "在不在", "刚进来", "欢迎",
-    "感谢", "谢谢老板", "谢谢姐妹", "公屏", "弹幕", "刷波",
+    "家人们", "老铁们", "宝宝们", "姐妹们", "宝贝们", "友友们",
+    "听得到吗", "扣1", "扣一", "扣个1", "点点关注", "双击", "点关注",
+    "晚上好啊", "早上好", "下午好", "来了吗", "在吗", "在不在",
+    "过一下", "过一遍", "带过", "先过", "往下过", "咱们过", "带大家过",
+    "看一看", "说一下", "讲一下", "介绍一下", "跟大家说", "跟你们说",
+    "给大家看", "给你们看", "来看一下", "注意看", "看公屏",
+    "一会儿", "待会", "等会", "马上", "接下来", "稍等", "等一下",
+    "铃铃铃", "有没有人", "刚进来", "欢迎", "欢迎进来", "新进来的",
+    "感谢", "谢谢老板", "谢谢姐妹", "谢谢家人们", "谢谢支持",
+    "公屏", "弹幕", "刷波", "刷礼物", "刷一波", "扣波",
+    "直播间", "直播价", "今天直播", "在直播", "开播", "下播",
+    "连麦", "福袋", "抽奖", "倒计时", "最后几件", "手慢无",
+    "左上角", "右上角", "右下角", "点小黄车", "上车", "挂车",
+    "一二三上链接", "上链接", "看链接", "点链接", "戳链接",
+    "声音可以吗", "卡吗", "卡不卡", "清楚吗", "听清吗",
 )
 # Non-clothing product / scene noise
 OFFTOPIC_WORDS = (
@@ -88,6 +97,23 @@ def is_garment_line(text: str) -> bool:
     return False
 
 
+def _live_room_score(text: str) -> int:
+    """Higher = more livestream-room feel (should drop)."""
+    t = text.strip()
+    n = 0
+    for w in FILLER_WORDS:
+        if w in t:
+            n += 1
+    # interactive / room commands
+    if re.search(r"(扣|点|刷).{0,2}(1|一|关注|赞)", t):
+        n += 2
+    if re.search(r"(直播间|家人们|老铁|宝宝们|姐妹们)", t):
+        n += 2
+    if re.search(r"(有没有人|在不在|来了吗|听得到)", t):
+        n += 2
+    return n
+
+
 def classify(text: str) -> str:
     t = text.strip()
     if not t or len(t) < 2:
@@ -101,11 +127,17 @@ def classify(text: str) -> str:
     filler = _has_any(t, FILLER_WORDS)
     off = _has_any(t, OFFTOPIC_WORDS)
     garment = is_garment_line(t)
+    live = _live_room_score(t)
 
     # never keep price / size (global product policy)
     if price:
         return "drop"
     if size:
+        return "drop"
+    # kill pure livestream feel
+    if live >= 2 and not strong:
+        return "drop"
+    if filler and not strong:
         return "drop"
     # non-clothing topics
     if off and not strong:
@@ -117,7 +149,8 @@ def classify(text: str) -> str:
         return "drop"
     if ("过一下" in t or "过一遍" in t) and not strong:
         return "drop"
-    if filler and not (strong or (medium and garment)):
+    # even with garment words, heavy room-control still drop
+    if live >= 3:
         return "drop"
     # pure try-on without any garment noun already dropped by is_garment_line
     # keep 牛仔/面料 demo lines as medium/strong for clothing continuity

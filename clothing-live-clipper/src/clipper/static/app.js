@@ -337,16 +337,16 @@ function renderJob(data) {
   }
 
   // tracks + review
-  // only refresh editable plan when not mid-local-edit, or first load
-  if (!planEdit || jobChanged || ["success", "success_partial"].includes(st)) {
-    if (!planEdit || jobChanged) {
-      renderTracks(data.plan || {});
-    } else {
-      // keep local edits while processing finishes
-      renderTracks(planEdit);
-    }
-  } else {
+  // Keep local plan edits while user is adjusting; only reset on job switch
+  // or when server returns a finished plan and we have no local edits yet.
+  if (jobChanged) {
+    planEdit = null;
+    planOriginal = null;
+    renderTracks(data.plan || {});
+  } else if (planEdit) {
     renderTracks(planEdit);
+  } else {
+    renderTracks(data.plan || {});
   }
   if (st === "failed") {
     $("review-md").textContent = `失败：${data.error || "未知错误"}`;
@@ -559,7 +559,7 @@ function collectEditorItems() {
     const text = (row.querySelector(".tr-text")?.value || "").trim();
     const t0 = Number(row.querySelector(".tr-t0")?.value || 0);
     const t1 = Number(row.querySelector(".tr-t1")?.value || 0);
-    const utt_id = row.dataset.uid || `e${i:04d}`;
+    const utt_id = row.dataset.uid || `e${String(i).padStart(4, "0")}`;
     items.push({ utt_id, text, t0_ms: t0, t1_ms: t1, keep });
   });
   return items;

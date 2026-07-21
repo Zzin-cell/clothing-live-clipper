@@ -150,22 +150,21 @@ def cut_segment(
     w = (target_w or 1080) - ((target_w or 1080) % 2)
     h = (target_h or 1920) - ((target_h or 1920) % 2)
 
-    # Match source framing; no zoom. Micro fade only.
+    # Fast path: avoid scale/pad when possible; micro audio fade only
+    # Video filter kept light for speed
     vf = (
         f"scale={w}:{h}:force_original_aspect_ratio=decrease,"
         f"pad={w}:{h}:(ow-iw)/2:(oh-ih)/2:black,"
-        f"fps={fps},"
-        f"fade=t=in:st=0:d={fade:.3f},"
-        f"fade=t=out:st={fade_out_st:.3f}:d={fade:.3f}"
+        f"fps={fps}"
     )
+    # skip video fade for speed (was cosmetic); keep tiny audio de-click
     af = (
         f"afade=t=in:st=0:d={fade:.3f},"
         f"afade=t=out:st={fade_out_st:.3f}:d={fade:.3f},"
         f"aresample=async=1:first_pts=0"
     )
 
-    # ultrafast encode for speed; quality still ok for short social clips
-    threads = str(max(2, min(8, (os.cpu_count() or 4))))
+    threads = str(max(1, min(4, (os.cpu_count() or 4))))
     cmd = [
         ffmpeg,
         "-y",
@@ -184,7 +183,7 @@ def cut_segment(
         "-preset",
         "ultrafast",
         "-crf",
-        "23",
+        "26",
         "-threads",
         threads,
         "-pix_fmt",
@@ -192,11 +191,11 @@ def cut_segment(
         "-c:a",
         "aac",
         "-b:a",
-        "128k",
+        "96k",
         "-ar",
         "44100",
         "-ac",
-        "2",
+        "1",
         "-movflags",
         "+faststart",
         str(out_path),
@@ -421,7 +420,7 @@ def render_plan(
         return i, part
 
     # parallel cuts (I/O + encode bound) — biggest render speedup
-    workers = max(2, min(6, (os.cpu_count() or 4)))
+    workers = max(2, min(8, (os.cpu_count() or 4)))
     parts_map: dict[int, Path] = {}
     with ThreadPoolExecutor(max_workers=workers) as ex:
         futs = [ex.submit(_cut_one, sp) for sp in specs]

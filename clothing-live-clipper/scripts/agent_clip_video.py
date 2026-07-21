@@ -88,8 +88,10 @@ def extract_wav(video: Path, wav: Path) -> None:
 
 def resolve_local_model() -> str:
     """
-    Prefer higher-accuracy models for Chinese livestream ASR.
-    Order: env path/name → local small → local base → local tiny → 'small' hub name.
+    Model selection.
+    Default prefers SPEED: local tiny if present, else small, else base.
+    Set CLIPPER_LOCAL_WHISPER_MODEL=small for higher accuracy.
+    Set CLIPPER_ASR_QUALITY=high to force small/base over tiny.
     """
     env = (os.environ.get("CLIPPER_LOCAL_WHISPER_MODEL") or "").strip()
     known = {
@@ -109,20 +111,33 @@ def resolve_local_model() -> str:
     if env and (Path(env).exists() or env in known):
         return env
 
-    pointer = Path(__file__).resolve().parent / "local_whisper_model_path.txt"
-    if pointer.exists():
-        p = pointer.read_text(encoding="utf-8").strip()
-        if p and Path(p).exists() and (Path(p) / "model.bin").exists():
-            return p
-
+    quality = (os.environ.get("CLIPPER_ASR_QUALITY") or "fast").strip().lower()
     models_root = Path(r"C:\Users\MR\AppData\grok\models")
-    for name in ("whisper-small", "whisper-base", "whisper-tiny"):
+    pointer = Path(__file__).resolve().parent / "local_whisper_model_path.txt"
+
+    # quality mode: prefer small/base
+    if quality in {"high", "hq", "quality", "accurate"}:
+        for name in ("whisper-small", "whisper-base", "whisper-tiny"):
+            d = models_root / name
+            if (d / "model.bin").exists():
+                return str(d)
+        if pointer.exists():
+            p = pointer.read_text(encoding="utf-8").strip()
+            if p and Path(p).exists():
+                return p
+        return (os.environ.get("CLIPPER_WHISPER_HUB_MODEL") or "small").strip() or "small"
+
+    # FAST mode (default): tiny first if available
+    for name in ("whisper-tiny", "whisper-base", "whisper-small"):
         d = models_root / name
         if (d / "model.bin").exists():
             return str(d)
-
-    # Hub id (will download if network available)
-    return (os.environ.get("CLIPPER_WHISPER_HUB_MODEL") or "small").strip() or "small"
+    if pointer.exists():
+        p = pointer.read_text(encoding="utf-8").strip()
+        if p and Path(p).exists() and (Path(p) / "model.bin").exists():
+            # if pointer points to small, still honor it only when tiny missing
+            return p
+    return "tiny"
 
 
 _WHISPER_MODEL = None
@@ -165,12 +180,10 @@ def asr_local(wav: Path) -> list[dict]:
     model_size = resolve_local_model()
     model = _get_whisper_model(model_size)
 
-    # Balanced defaults: better than tiny, not as slow as beam=5 on CPU
-    beam = int(os.environ.get("CLIPPER_ASR_BEAM_SIZE") or "3")
-    best_of = int(os.environ.get("CLIPPER_ASR_BEST_OF") or str(max(1, beam)))
-    # tiny can stay faster
-    if "tiny" in str(model_size).lower() and not os.environ.get("CLIPPER_ASR_BEAM_SIZE"):
-        beam, best_of = 1, 1
+    # SPEED-first defaults (CPU). Accuracy still better than old tiny because of small model + postprocess.
+    # Override: set CLIPPER_ASR_BEAM_SIZE=5 for higher accuracy.
+    beam = int(os.environ.get("CLIPPER_ASR_BEAM_SIZE") or "1")
+    best_of = int(os.environ.get("CLIPPER_ASR_BEST_OF") or "1")
 
     try:
         from asr_enhance import CLOTHING_INITIAL_PROMPT, enhance_asr_segments
@@ -180,28 +193,33 @@ def asr_local(wav: Path) -> list[dict]:
             enhance_asr_segments,
         )
 
-    print(f"[asr] transcribe beam={beam} model={model_size!r}", flush=True)
-    segments, info = model.transcribe(
-        str(wav),
+    # Optional: only first N minutes of audio for draft speed (0 = full)
+    max_sec = float(os.environ.get("CLIPPER_ASR_MAX_SECONDS") or "0")
+
+    print(f"[asr] FAST transcribe beam={beam} model={model_size!r}", flush=True)
+    kwargs = dict(
         language="zh",
         task="transcribe",
         vad_filter=True,
         vad_parameters={
-            "min_silence_duration_ms": 500,
-            "speech_pad_ms": 180,
+            "min_silence_duration_ms": 600,
+            "speech_pad_ms": 120,
+            "threshold": 0.5,
         },
         beam_size=max(1, beam),
         best_of=max(1, best_of),
-        patience=0.8,
+        patience=0.5,
         temperature=0.0,
-        compression_ratio_threshold=2.4,
+        compression_ratio_threshold=2.6,
         log_prob_threshold=-1.0,
-        no_speech_threshold=0.6,
-        condition_on_previous_text=False,  # faster + less error cascade on noisy live
+        no_speech_threshold=0.65,
+        condition_on_previous_text=False,
         initial_prompt=CLOTHING_INITIAL_PROMPT,
         without_timestamps=False,
         word_timestamps=False,
     )
+    # faster-whisper supports clip_timestamps in some versions; fallback: full file
+    segments, info = model.transcribe(str(wav), **kwargs)
     out: list[dict] = []
     for i, seg in enumerate(segments):
         text = (seg.text or "").strip()

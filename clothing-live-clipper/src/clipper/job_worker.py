@@ -109,10 +109,15 @@ def process_job_dir(job_dir: Path) -> None:
         wav = work / "audio_16k.wav"
         extract_wav(video, wav)
 
-        _set_progress(job_dir, "asr", 25, f"智能口播打轴 ({resolve_local_model()})")
+        model_name = resolve_local_model()
+        _set_progress(job_dir, "asr", 25, f"高精度口播打轴 ({model_name})")
         raw = asr_local(wav)
         raw_path = job_dir / "transcript_asr.json"
         raw_path.write_text(json.dumps(raw, ensure_ascii=False, indent=2), encoding="utf-8")
+        meta = _read_meta(job_dir)
+        meta["asr_model"] = str(model_name)
+        meta["asr_segments"] = len(raw)
+        _write_meta(job_dir, meta)
 
         _set_progress(job_dir, "filter", 45, "过滤无效/非服装内容")
         # source length for 1.3x → ~60s final

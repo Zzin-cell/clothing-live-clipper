@@ -87,22 +87,42 @@ def extract_wav(video: Path, wav: Path) -> None:
 
 
 def resolve_local_model() -> str:
-    """Prefer explicit path / pointer file / default local download dir."""
+    """
+    Prefer higher-accuracy models for Chinese livestream ASR.
+    Order: env path/name → local small → local base → local tiny → 'small' hub name.
+    """
     env = (os.environ.get("CLIPPER_LOCAL_WHISPER_MODEL") or "").strip()
-    if env and (Path(env).exists() or env in {
-        "tiny", "base", "small", "medium", "large-v2", "large-v3", "turbo",
-        "tiny.en", "base.en", "small.en", "medium.en",
-    }):
+    known = {
+        "tiny",
+        "base",
+        "small",
+        "medium",
+        "large-v2",
+        "large-v3",
+        "turbo",
+        "distil-large-v3",
+        "tiny.en",
+        "base.en",
+        "small.en",
+        "medium.en",
+    }
+    if env and (Path(env).exists() or env in known):
         return env
+
     pointer = Path(__file__).resolve().parent / "local_whisper_model_path.txt"
     if pointer.exists():
         p = pointer.read_text(encoding="utf-8").strip()
-        if p and Path(p).exists():
+        if p and Path(p).exists() and (Path(p) / "model.bin").exists():
             return p
-    default_dir = Path(r"C:\Users\MR\AppData\grok\models\whisper-tiny")
-    if default_dir.exists() and (default_dir / "model.bin").exists():
-        return str(default_dir)
-    return "tiny"
+
+    models_root = Path(r"C:\Users\MR\AppData\grok\models")
+    for name in ("whisper-small", "whisper-base", "whisper-tiny"):
+        d = models_root / name
+        if (d / "model.bin").exists():
+            return str(d)
+
+    # Hub id (will download if network available)
+    return (os.environ.get("CLIPPER_WHISPER_HUB_MODEL") or "small").strip() or "small"
 
 
 _WHISPER_MODEL = None
@@ -119,7 +139,6 @@ def _get_whisper_model(model_size: str):
 
     if "HF_ENDPOINT" not in os.environ:
         os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
-    # Prefer more CPU threads when available
     cpu_threads = max(2, min(8, (os.cpu_count() or 4)))
     print(f"[asr] loading faster-whisper model={key!r} threads={cpu_threads}")
     _WHISPER_MODEL = WhisperModel(
@@ -134,17 +153,52 @@ def _get_whisper_model(model_size: str):
 
 
 def asr_local(wav: Path) -> list[dict]:
+    """
+    Higher-accuracy Chinese ASR for clothing livestreams.
+
+    Practices adapted from open-source stacks:
+    - faster-whisper (SYSTRAN) + VAD
+    - domain initial_prompt (FunASR-style hotword bias)
+    - beam search (better than greedy for Chinese)
+    - post-correct + merge short crumbs
+    """
     model_size = resolve_local_model()
     model = _get_whisper_model(model_size)
-    # Fast path: greedy decode, no condition on previous, VAD on
+
+    # Quality-first defaults; override via env for speed if needed
+    beam = int(os.environ.get("CLIPPER_ASR_BEAM_SIZE") or "5")
+    best_of = int(os.environ.get("CLIPPER_ASR_BEST_OF") or str(max(1, beam)))
+    # tiny can stay faster
+    if "tiny" in str(model_size).lower() and not os.environ.get("CLIPPER_ASR_BEAM_SIZE"):
+        beam, best_of = 3, 3
+
+    try:
+        from asr_enhance import CLOTHING_INITIAL_PROMPT, enhance_asr_segments
+    except Exception:
+        from scripts.asr_enhance import (  # type: ignore
+            CLOTHING_INITIAL_PROMPT,
+            enhance_asr_segments,
+        )
+
+    print(f"[asr] transcribe beam={beam} model={model_size!r}")
     segments, info = model.transcribe(
         str(wav),
         language="zh",
+        task="transcribe",
         vad_filter=True,
-        beam_size=1,
-        best_of=1,
+        vad_parameters={
+            "min_silence_duration_ms": 400,
+            "speech_pad_ms": 200,
+        },
+        beam_size=max(1, beam),
+        best_of=max(1, best_of),
+        patience=1.0,
         temperature=0.0,
-        condition_on_previous_text=False,
+        compression_ratio_threshold=2.4,
+        log_prob_threshold=-1.0,
+        no_speech_threshold=0.55,
+        condition_on_previous_text=True,
+        initial_prompt=CLOTHING_INITIAL_PROMPT,
         without_timestamps=False,
         word_timestamps=False,
     )
@@ -163,7 +217,11 @@ def asr_local(wav: Path) -> list[dict]:
         )
     if not out:
         raise RuntimeError("ASR produced no speech segments")
-    print(f"[asr] segments={len(out)} language={getattr(info, 'language', None)}")
+    out = enhance_asr_segments(out)
+    print(
+        f"[asr] segments={len(out)} language={getattr(info, 'language', None)} "
+        f"prob={getattr(info, 'language_probability', None)}"
+    )
     return out
 
 

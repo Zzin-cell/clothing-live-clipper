@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>智能口播切片 · CapCut 风格</title>
-  <link rel="stylesheet" href="/static/styles.css?v=jy8" />
+  <link rel="stylesheet" href="/static/styles.css?v=jy9" />
 </head>
 <body>
   <div class="jy-app">
@@ -62,10 +62,13 @@
           </form>
         </div>
 
-        <div class="jy-panel grow">
+        <div class="jy-panel grow" id="panel-transcript">
           <div class="jy-panel-head">
             <span>口播时间轴</span>
-            <span class="muted" id="asr-count">—</span>
+            <div class="jy-head-actions">
+              <span class="muted" id="asr-count">—</span>
+              <button type="button" class="jy-btn tiny" id="toggle-transcript-panel" title="折叠/展开">收起</button>
+            </div>
           </div>
           <div class="jy-transcript" id="transcript-list">
             <div class="jy-empty">处理后在这里显示口播句子</div>
@@ -179,6 +182,6 @@
     </div>
   </aside>
 
-  <script src="/static/app.js?v=jy8"></script>
+  <script src="/static/app.js?v=jy9"></script>
 </body>
 </html>

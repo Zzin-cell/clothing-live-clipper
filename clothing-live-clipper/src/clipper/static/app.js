@@ -774,9 +774,34 @@ async function saveTranscript(reclip) {
   }
 }
 
+function setupTranscriptPanelToggle() {
+  const panel = $("panel-transcript");
+  const btn = $("toggle-transcript-panel");
+  if (!panel || !btn) return;
+  const apply = (collapsed) => {
+    panel.classList.toggle("collapsed", collapsed);
+    btn.textContent = collapsed ? "展开" : "收起";
+    try {
+      localStorage.setItem("clipper_transcript_panel_collapsed", collapsed ? "1" : "0");
+    } catch (_) {}
+  };
+  // restore preference
+  let collapsed = false;
+  try {
+    collapsed = localStorage.getItem("clipper_transcript_panel_collapsed") === "1";
+  } catch (_) {}
+  apply(collapsed);
+  btn.addEventListener("click", (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    apply(!panel.classList.contains("collapsed"));
+  });
+}
+
 $("refresh-jobs")?.addEventListener("click", loadJobs);
 loadHealth();
 loadJobs();
 setupForm();
 setupTranscriptModule();
 setupPlanTools();
+setupTranscriptPanelToggle();

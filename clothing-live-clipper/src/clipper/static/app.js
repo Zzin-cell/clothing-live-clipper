@@ -12,6 +12,8 @@ const STATUS_LABEL = {
 
 let currentJobId = null;
 let pollTimer = null;
+let planEdit = null; // {golden, trust, cta}
+let planOriginal = null;
 
 function escapeHtml(str) {
   return String(str ?? "")
@@ -59,20 +61,194 @@ async function loadHealth() {
   }
 }
 
+function clonePlan(plan) {
+  const copySlot = (s, role) => ({
+    clip_id: s.clip_id || `${role}_${Math.random().toString(16).slice(2, 8)}`,
+    role: s.role || role,
+    t0_ms: Number(s.t0_ms || 0),
+    t1_ms: Number(s.t1_ms || 0),
+    text: s.text || "",
+    score: Number(s.score || 0),
+    removed: !!s.removed,
+  });
+  return {
+    golden: (plan.golden || []).map((s) => copySlot(s, "hook")),
+    trust: (plan.trust || []).map((s) => copySlot(s, "trust")),
+    cta: (plan.cta || []).map((s) => copySlot(s, "cta")),
+  };
+}
+
+function activeCount(plan) {
+  if (!plan) return 0;
+  return ["golden", "trust", "cta"]
+    .map((k) => (plan[k] || []).filter((s) => !s.removed).length)
+    .reduce((a, b) => a + b, 0);
+}
+
+function setPlanToolsEnabled(on) {
+  if ($("plan-reset")) $("plan-reset").disabled = !on;
+  if ($("plan-apply")) $("plan-apply").disabled = !on;
+}
+
+function updatePlanHint() {
+  const el = $("plan-edit-hint");
+  if (!el || !planEdit) {
+    if (el) el.textContent = "";
+    return;
+  }
+  const n = activeCount(planEdit);
+  const total = ["golden", "trust", "cta"]
+    .map((k) => (planEdit[k] || []).length)
+    .reduce((a, b) => a + b, 0);
+  const removed = total - n;
+  el.textContent = removed > 0 ? `已删 ${removed} 段 · 保留 ${n} 段` : `共 ${n} 段，可点 × 删除`;
+}
+
 function renderTracks(plan) {
-  const mk = (arr, role) => {
-    if (!arr || !arr.length) return '<div class="jy-empty" style="padding:8px">（空）</div>';
-    return arr
-      .map((s) => {
+  // prefer editable working copy
+  const src = planEdit || clonePlan(plan || {});
+  if (!planEdit && (plan?.golden?.length || plan?.trust?.length || plan?.cta?.length)) {
+    planEdit = clonePlan(plan);
+    planOriginal = clonePlan(plan);
+    setPlanToolsEnabled(true);
+  }
+
+  const mk = (arr, role, key) => {
+    const list = arr || [];
+    if (!list.length) return '<div class="jy-empty" style="padding:8px">（空）</div>';
+    return list
+      .map((s, idx) => {
         const a = (s.t0_ms / 1000).toFixed(1);
         const b = (s.t1_ms / 1000).toFixed(1);
-        return `<div class="jy-clip ${role}"><div>${escapeHtml(s.text || "")}</div><div class="meta">${a}s–${b}s</div></div>`;
+        const removed = !!s.removed;
+        return `<div class="jy-clip ${role} ${removed ? "removed" : ""}" data-role="${key}" data-idx="${idx}">
+          <button type="button" class="clip-x" title="${removed ? "恢复" : "删除"}">${removed ? "+" : "×"}</button>
+          <div>${escapeHtml(s.text || "")}</div>
+          <div class="meta">${a}s–${b}s</div>
+          <div class="clip-tools">
+            <button type="button" class="clip-up" ${idx === 0 ? "disabled" : ""}>上移</button>
+            <button type="button" class="clip-down" ${idx >= list.length - 1 ? "disabled" : ""}>下移</button>
+            <button type="button" class="clip-prev" title="移到上一段">◀段</button>
+            <button type="button" class="clip-next" title="移到下一段">段▶</button>
+          </div>
+        </div>`;
       })
       .join("");
   };
-  $("golden-track").innerHTML = mk(plan.golden, "hook");
-  $("trust-track").innerHTML = mk(plan.trust, "trust");
-  $("cta-track").innerHTML = mk(plan.cta, "cta");
+
+  $("golden-track").innerHTML = mk(src.golden, "hook", "golden");
+  $("trust-track").innerHTML = mk(src.trust, "trust", "trust");
+  $("cta-track").innerHTML = mk(src.cta, "cta", "cta");
+  bindTrackEditors();
+  updatePlanHint();
+}
+
+function bindTrackEditors() {
+  document.querySelectorAll(".jy-clip .clip-x").forEach((btn) => {
+    btn.onclick = (e) => {
+      e.stopPropagation();
+      const card = btn.closest(".jy-clip");
+      const role = card.dataset.role;
+      const idx = Number(card.dataset.idx);
+      if (!planEdit?.[role]?.[idx]) return;
+      planEdit[role][idx].removed = !planEdit[role][idx].removed;
+      renderTracks(planEdit);
+    };
+  });
+  document.querySelectorAll(".jy-clip .clip-up").forEach((btn) => {
+    btn.onclick = (e) => {
+      e.stopPropagation();
+      const card = btn.closest(".jy-clip");
+      const role = card.dataset.role;
+      const idx = Number(card.dataset.idx);
+      if (!planEdit?.[role] || idx <= 0) return;
+      const arr = planEdit[role];
+      [arr[idx - 1], arr[idx]] = [arr[idx], arr[idx - 1]];
+      renderTracks(planEdit);
+    };
+  });
+  document.querySelectorAll(".jy-clip .clip-down").forEach((btn) => {
+    btn.onclick = (e) => {
+      e.stopPropagation();
+      const card = btn.closest(".jy-clip");
+      const role = card.dataset.role;
+      const idx = Number(card.dataset.idx);
+      if (!planEdit?.[role] || idx >= planEdit[role].length - 1) return;
+      const arr = planEdit[role];
+      [arr[idx + 1], arr[idx]] = [arr[idx], arr[idx + 1]];
+      renderTracks(planEdit);
+    };
+  });
+  const order = ["golden", "trust", "cta"];
+  document.querySelectorAll(".jy-clip .clip-prev").forEach((btn) => {
+    btn.onclick = (e) => {
+      e.stopPropagation();
+      const card = btn.closest(".jy-clip");
+      moveClipSection(card.dataset.role, Number(card.dataset.idx), -1);
+    };
+  });
+  document.querySelectorAll(".jy-clip .clip-next").forEach((btn) => {
+    btn.onclick = (e) => {
+      e.stopPropagation();
+      const card = btn.closest(".jy-clip");
+      moveClipSection(card.dataset.role, Number(card.dataset.idx), +1);
+    };
+  });
+
+  function moveClipSection(role, idx, dir) {
+    if (!planEdit?.[role]?.[idx]) return;
+    const i = order.indexOf(role);
+    const j = i + dir;
+    if (j < 0 || j >= order.length) return;
+    const item = planEdit[role].splice(idx, 1)[0];
+    // role label for backend
+    item.role = order[j] === "golden" ? "hook" : order[j];
+    planEdit[order[j]].push(item);
+    renderTracks(planEdit);
+  }
+}
+
+async function applyPlanEdit() {
+  if (!currentJobId || !planEdit) return;
+  const payload = {
+    reclip: true,
+    golden: (planEdit.golden || []).filter((s) => !s.removed),
+    trust: (planEdit.trust || []).filter((s) => !s.removed),
+    cta: (planEdit.cta || []).filter((s) => !s.removed),
+  };
+  if (!payload.golden.length && !payload.trust.length && !payload.cta.length) {
+    alert("请至少保留一个片段");
+    return;
+  }
+  $("plan-edit-hint").textContent = "正在按调整后的结构重剪…";
+  $("plan-apply").disabled = true;
+  try {
+    const res = await fetch(`/api/jobs/${encodeURIComponent(currentJobId)}/plan`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.detail || "应用失败");
+    // reset local edit baseline after server accepts
+    planEdit = null;
+    planOriginal = null;
+    renderJob(data);
+    await loadJobs();
+    pollJob(currentJobId);
+  } catch (e) {
+    alert(String(e.message || e));
+    $("plan-apply").disabled = false;
+  }
+}
+
+function setupPlanTools() {
+  $("plan-reset")?.addEventListener("click", () => {
+    if (!planOriginal) return;
+    planEdit = clonePlan(planOriginal);
+    renderTracks(planEdit);
+  });
+  $("plan-apply")?.addEventListener("click", applyPlanEdit);
 }
 
 async function loadTranscript(jobId) {
@@ -114,7 +290,13 @@ async function loadTranscript(jobId) {
 }
 
 function renderJob(data) {
+  const jobChanged = currentJobId !== data.job_id;
   currentJobId = data.job_id;
+  if (jobChanged) {
+    planEdit = null;
+    planOriginal = null;
+    setPlanToolsEnabled(false);
+  }
   $("current-job-title").textContent = data.video_source || data.job_id;
   const st = data.status || "";
   $("current-job-status").textContent = `${STATUS_LABEL[st] || st}${
@@ -155,7 +337,17 @@ function renderJob(data) {
   }
 
   // tracks + review
-  renderTracks(data.plan || {});
+  // only refresh editable plan when not mid-local-edit, or first load
+  if (!planEdit || jobChanged || ["success", "success_partial"].includes(st)) {
+    if (!planEdit || jobChanged) {
+      renderTracks(data.plan || {});
+    } else {
+      // keep local edits while processing finishes
+      renderTracks(planEdit);
+    }
+  } else {
+    renderTracks(planEdit);
+  }
   if (st === "failed") {
     $("review-md").textContent = `失败：${data.error || "未知错误"}`;
   } else if (data.review_md) {
@@ -459,3 +651,4 @@ loadHealth();
 loadJobs();
 setupForm();
 setupTranscriptModule();
+setupPlanTools();

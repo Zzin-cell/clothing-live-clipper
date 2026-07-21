@@ -204,6 +204,9 @@ body {
   padding: 10px;
   display: flex; flex-direction: column;
 }
+.jy-track-tools {
+  display: flex; align-items: center; gap: 8px; margin: -2px 0 10px;
+}
 .jy-tracks { display: grid; gap: 8px; margin-bottom: 10px; }
 .jy-track { display: grid; grid-template-columns: 48px 1fr; gap: 8px; align-items: stretch; }
 .jy-track-label {
@@ -215,15 +218,35 @@ body {
   display: flex; gap: 6px; overflow-x: auto; padding: 6px;
 }
 .jy-clip {
-  flex: 0 0 auto; min-width: 88px; max-width: 160px;
+  position: relative;
+  flex: 0 0 auto; min-width: 108px; max-width: 180px;
   background: linear-gradient(180deg, #2b3b4a, #22303c);
-  border: 1px solid #3d5a6e; border-radius: 8px; padding: 6px 8px;
+  border: 1px solid #3d5a6e; border-radius: 8px; padding: 8px 26px 8px 8px;
   font-size: 11px; line-height: 1.3; color: #d7e8f4;
 }
 .jy-clip.hook { background: linear-gradient(180deg, #2f4b3b, #243a30); border-color: #3f6d55; }
 .jy-clip.trust { background: linear-gradient(180deg, #2b3b4a, #22303c); }
 .jy-clip.cta { background: linear-gradient(180deg, #3a3348, #2c2738); border-color: #5b4f78; }
 .jy-clip .meta { color: #9bb; font-size: 10px; margin-top: 3px; }
+.jy-clip .clip-x {
+  position: absolute; top: 4px; right: 4px;
+  width: 18px; height: 18px; border: 0; border-radius: 50%;
+  background: rgba(0,0,0,.45); color: #fff; cursor: pointer; font-size: 12px; line-height: 18px;
+}
+.jy-clip .clip-x:hover { background: #ff5c5c; }
+.jy-clip .clip-tools {
+  display: flex; gap: 4px; margin-top: 6px;
+}
+.jy-clip .clip-tools button {
+  border: 1px solid #4a5560; background: rgba(0,0,0,.25); color: #cfe;
+  border-radius: 6px; font-size: 10px; padding: 2px 6px; cursor: pointer;
+}
+.jy-clip .clip-tools button:hover { border-color: var(--accent); color: #fff; }
+.jy-clip.removed {
+  opacity: .35;
+  filter: grayscale(0.7);
+  border-style: dashed;
+}
 
 .jy-review {
   flex: 1; overflow: auto; white-space: pre-wrap; word-break: break-word;

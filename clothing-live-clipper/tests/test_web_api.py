@@ -123,6 +123,44 @@ def test_list_jobs_includes_queued(client, monkeypatch):
     assert job_id in ids
 
 
+def test_plan_edit_and_render(client, monkeypatch):
+    monkeypatch.setattr("clipper.web.start_job_async", lambda d: False)
+    monkeypatch.setattr("clipper.job_worker.start_render_plan_async", lambda d: True)
+    c, jobs = client
+    video_bytes = b"\x00\x00\x00\x18ftypmp42fake"
+    r = c.post(
+        "/api/jobs",
+        data={"target_seconds": "60", "auto_process": "false"},
+        files={"video": ("demo.mp4", io.BytesIO(video_bytes), "video/mp4")},
+    )
+    job_id = r.json()["job_id"]
+    plan = {
+        "golden": [
+            {"clip_id": "g1", "role": "hook", "t0_ms": 0, "t1_ms": 2000, "text": "面料很软", "score": 10},
+            {"clip_id": "g2", "role": "hook", "t0_ms": 3000, "t1_ms": 4000, "text": "过一下", "score": 1},
+        ],
+        "trust": [],
+        "cta": [],
+        "total_duration_ms": 3000,
+        "golden20_passed": True,
+        "warnings": [],
+    }
+    (jobs / job_id / "plan.json").write_text(json.dumps(plan, ensure_ascii=False), encoding="utf-8")
+    res = c.put(
+        f"/api/jobs/{job_id}/plan",
+        json={
+            "reclip": True,
+            "golden": [plan["golden"][0]],
+            "trust": [],
+            "cta": [],
+        },
+    )
+    assert res.status_code == 200, res.text
+    saved = json.loads((jobs / job_id / "plan.json").read_text(encoding="utf-8"))
+    assert len(saved["golden"]) == 1
+    assert saved["golden"][0]["text"] == "面料很软"
+
+
 def test_transcript_get_and_save(client, monkeypatch):
     monkeypatch.setattr("clipper.web.start_job_async", lambda d: False)
     monkeypatch.setattr("clipper.job_worker.start_reclip_async", lambda d: True)

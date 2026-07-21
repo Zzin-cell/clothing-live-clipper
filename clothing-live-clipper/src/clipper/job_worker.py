@@ -320,3 +320,114 @@ def start_reclip_async(job_dir: Path) -> bool:
     t = threading.Thread(target=reclip_from_saved_transcript, args=(job_dir,), daemon=True)
     t.start()
     return True
+
+
+def render_from_plan_only(job_dir: Path) -> None:
+    """Render final.mp4 from existing plan.json segments (manual structure edit)."""
+    job_dir = Path(job_dir)
+    job_id = job_dir.name
+    meta = _read_meta(job_dir)
+    try:
+        video = _find_video(job_dir)
+        if not video:
+            raise RuntimeError("未找到上传视频")
+        plan_path = job_dir / "plan.json"
+        if not plan_path.exists():
+            raise RuntimeError("未找到 plan.json")
+        plan = json.loads(plan_path.read_text(encoding="utf-8"))
+        segs = []
+        for key in ("golden", "trust", "cta"):
+            for s in plan.get(key) or []:
+                t0 = int(s.get("t0_ms") or 0)
+                t1 = int(s.get("t1_ms") or 0)
+                if t1 > t0:
+                    segs.append((t0, t1))
+        if not segs:
+            raise RuntimeError("plan 无有效片段")
+
+        speed = float(meta.get("playback_speed") or os.environ.get("CLIPPER_PLAYBACK_SPEED") or 1.3)
+        _set_progress(job_dir, "render", 75, "按调整后的结构渲染")
+        from clipper.media import probe_duration_ms, render_plan
+
+        render_plan(
+            video,
+            segs,
+            job_dir / "final.mp4",
+            work_dir=job_dir / "_parts",
+            smooth=True,
+            crossfade_s=0.0,
+            edge_fade_s=0.03,
+            playback_speed=speed if speed > 0 else 1.3,
+        )
+        has_final = (job_dir / "final.mp4").exists()
+        meta = _read_meta(job_dir)
+        meta.update(
+            {
+                "status": "success" if has_final else "success_partial",
+                "stage": "done",
+                "progress": 100,
+                "finished_at": _utc_now(),
+                "has_final": has_final,
+                "output_mp4": has_final,
+                "worker": "manual_plan_render",
+                "error": None if has_final else "渲染未生成 final.mp4",
+            }
+        )
+        if has_final:
+            try:
+                meta["final_duration_s"] = round(
+                    probe_duration_ms(job_dir / "final.mp4") / 1000.0, 2
+                )
+            except Exception:
+                pass
+        # refresh review snippet
+        try:
+            lines = [
+                "# Clip review (manual edit)",
+                "",
+                f"- selected_clips: {len(segs)}",
+                f"- source_plan_ms: {sum(b - a for a, b in segs)}",
+                f"- playback_speed: {speed}",
+                "",
+                "## Golden",
+            ]
+            for s in plan.get("golden") or []:
+                lines.append(f"- [{s.get('t0_ms')}-{s.get('t1_ms')}] {s.get('text')}")
+            lines += ["", "## Trust"]
+            for s in plan.get("trust") or []:
+                lines.append(f"- [{s.get('t0_ms')}-{s.get('t1_ms')}] {s.get('text')}")
+            lines += ["", "## CTA"]
+            for s in plan.get("cta") or []:
+                lines.append(f"- [{s.get('t0_ms')}-{s.get('t1_ms')}] {s.get('text')}")
+            (job_dir / "review.md").write_text("\n".join(lines), encoding="utf-8")
+        except Exception:
+            pass
+        _write_meta(job_dir, meta)
+    except Exception as e:
+        meta = _read_meta(job_dir)
+        meta.update(
+            {
+                "status": "failed",
+                "stage": "failed",
+                "error": str(e),
+                "traceback": traceback.format_exc()[-2000:],
+                "finished_at": _utc_now(),
+                "worker": "manual_plan_render",
+            }
+        )
+        _write_meta(job_dir, meta)
+    finally:
+        with _lock:
+            _running.discard(job_id)
+
+
+def start_render_plan_async(job_dir: Path) -> bool:
+    job_dir = Path(job_dir)
+    job_id = job_dir.name
+    with _lock:
+        if job_id in _running:
+            return False
+        _running.add(job_id)
+    t = threading.Thread(target=render_from_plan_only, args=(job_dir,), daemon=True)
+    t.start()
+    return True

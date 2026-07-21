@@ -59,6 +59,13 @@ class TranscriptSaveBody(BaseModel):
     reclip: bool = True
 
 
+class PlanEditBody(BaseModel):
+    golden: list[dict] = Field(default_factory=list)
+    trust: list[dict] = Field(default_factory=list)
+    cta: list[dict] = Field(default_factory=list)
+    reclip: bool = True
+
+
 def _utc_now() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
@@ -508,6 +515,99 @@ def create_app() -> FastAPI:
             "count": len(items),
             "items": items,
         }
+
+    @app.put("/api/jobs/{job_id}/plan")
+    def save_plan(job_id: str, body: PlanEditBody) -> dict[str, Any]:
+        """Save human-edited plan structure and optionally re-render final video."""
+        d = _job_dir(job_id)
+        meta_path = d / "job_meta.json"
+        if not meta_path.exists():
+            raise HTTPException(status_code=404, detail="job not found")
+
+        def clean_slots(items: list[dict], role: str) -> list[dict]:
+            out: list[dict] = []
+            for i, s in enumerate(items or []):
+                if not isinstance(s, dict):
+                    continue
+                if s.get("removed") is True:
+                    continue
+                text = str(s.get("text") or "").strip()
+                t0 = int(s.get("t0_ms") or 0)
+                t1 = int(s.get("t1_ms") or 0)
+                if t1 <= t0:
+                    continue
+                out.append(
+                    {
+                        "clip_id": str(s.get("clip_id") or f"{role}_{i:03d}"),
+                        "role": role if role != "hook" else "hook",
+                        "t0_ms": t0,
+                        "t1_ms": t1,
+                        "text": text,
+                        "score": float(s.get("score") or 0),
+                    }
+                )
+            return out
+
+        golden = clean_slots(body.golden, "hook")
+        trust = clean_slots(body.trust, "trust")
+        cta = clean_slots(body.cta, "cta")
+        if not (golden or trust or cta):
+            raise HTTPException(status_code=400, detail="成片结构不能为空，请至少保留一个片段")
+
+        total_ms = sum((s["t1_ms"] - s["t0_ms"]) for s in golden + trust + cta)
+        plan = {
+            "target_duration_s": _read_json(meta_path).get("target_seconds", 60),
+            "golden": golden,
+            "trust": trust,
+            "cta": cta,
+            "total_duration_ms": total_ms,
+            "golden20_passed": bool(golden),
+            "golden_weight_ratio": 0.0,
+            "warnings": ["manual_plan_edit"],
+        }
+        (d / "plan.json").write_text(
+            json.dumps(plan, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        (d / "plan_edited.json").write_text(
+            json.dumps(plan, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+
+        # Derive transcript lines from remaining slots for reclip pipeline compatibility
+        lines = []
+        for i, s in enumerate(golden + trust + cta):
+            if not s.get("text"):
+                continue
+            lines.append(
+                {
+                    "utt_id": str(s.get("clip_id") or f"p{i:04d}"),
+                    "text": s["text"],
+                    "t0_ms": s["t0_ms"],
+                    "t1_ms": s["t1_ms"],
+                }
+            )
+        if lines:
+            (d / "transcript_for_clipper.json").write_text(
+                json.dumps(lines, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
+
+        meta = _read_json(meta_path)
+        meta["plan_edited_at"] = _utc_now()
+        meta["selected_clips"] = len(golden) + len(trust) + len(cta)
+        meta["duration_s"] = total_ms / 1000.0
+        meta["warnings"] = plan["warnings"]
+        _write_meta(d, meta)
+
+        if body.reclip:
+            from clipper.job_worker import start_render_plan_async
+
+            meta["status"] = "processing"
+            meta["stage"] = "render"
+            meta["progress"] = 70
+            meta["error"] = None
+            meta.pop("finished_at", None)
+            _write_meta(d, meta)
+            start_render_plan_async(d)
+        return get_job(job_id)
 
     @app.put("/api/jobs/{job_id}/transcript")
     def save_transcript(job_id: str, body: TranscriptSaveBody) -> dict[str, Any]:

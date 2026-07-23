@@ -13,6 +13,7 @@ from fastapi.staticfiles import StaticFiles
 
 from clipper.config import Settings, apply_config_update, asr_status, public_config
 from clipper.job_worker import start_job_async
+from clipper.learning import learning_status, record_plan_feedback
 from clipper.media import which_ffmpeg
 from clipper.pipeline import run_pipeline
 from clipper.system_status import build_status, run_probe
@@ -175,7 +176,16 @@ def create_app() -> FastAPI:
 
     @app.get("/api/system/status")
     def system_status() -> dict[str, Any]:
-        return build_status()
+        st = build_status()
+        try:
+            st["learning"] = learning_status()
+        except Exception as e:
+            st["learning"] = {"enabled": False, "error": str(e)}
+        return st
+
+    @app.get("/api/learning/status")
+    def api_learning_status() -> dict[str, Any]:
+        return learning_status()
 
     @app.get("/api/system/config")
     def system_config_get() -> dict[str, Any]:
@@ -524,6 +534,14 @@ def create_app() -> FastAPI:
         if not meta_path.exists():
             raise HTTPException(status_code=404, detail="job not found")
 
+        # baseline before overwrite (for learning)
+        before_plan = None
+        if (d / "plan.json").exists():
+            try:
+                before_plan = _read_json(d / "plan.json")
+            except Exception:
+                before_plan = None
+
         def clean_slots(items: list[dict], role: str) -> list[dict]:
             out: list[dict] = []
             for i, s in enumerate(items or []):
@@ -572,6 +590,23 @@ def create_app() -> FastAPI:
             json.dumps(plan, ensure_ascii=False, indent=2), encoding="utf-8"
         )
 
+        # Plan D: learn from human reverse-edit
+        try:
+            prefs = record_plan_feedback(
+                job_id=job_id,
+                before_plan=before_plan if isinstance(before_plan, dict) else None,
+                after_plan=plan,
+                source="plan_edit",
+            )
+            plan.setdefault("warnings", []).append(
+                f"learning_events={((prefs.get('stats') or {}).get('events') or 0)}"
+            )
+            (d / "plan.json").write_text(
+                json.dumps(plan, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
+        except Exception as e:
+            plan.setdefault("warnings", []).append(f"learning_skip:{e}")
+
         # Derive transcript lines from remaining slots for reclip pipeline compatibility
         lines = []
         for i, s in enumerate(golden + trust + cta):
@@ -595,6 +630,7 @@ def create_app() -> FastAPI:
         meta["selected_clips"] = len(golden) + len(trust) + len(cta)
         meta["duration_s"] = total_ms / 1000.0
         meta["warnings"] = plan["warnings"]
+        meta["learning"] = True
         _write_meta(d, meta)
 
         if body.reclip:

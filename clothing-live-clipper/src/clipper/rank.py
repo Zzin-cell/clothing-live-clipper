@@ -5,6 +5,7 @@ from collections.abc import Iterable
 
 from clipper.config import Settings
 from clipper.extract import is_chitchat_text
+from clipper.learning import learned_text_score
 from clipper.models import ClaimType, Clip, PlanSlot, TimelinePlan
 
 # Simplified weights for MVP
@@ -161,6 +162,15 @@ def score_clip(clip: Clip) -> Clip:
         raw += 1.0
     else:
         breakdown["duration_bonus"] = 0.0
+
+    # Plan D learning boost for general ranking (non-hook too)
+    try:
+        learned = learned_text_score(text, for_hook=False)
+        if abs(learned) > 0.01:
+            raw += learned
+            breakdown["learned"] = learned
+    except Exception:
+        pass
 
     breakdown["raw"] = raw
     clip.score = raw
@@ -389,6 +399,12 @@ def _hook_strength(c: Clip) -> float:
         s -= 45.0
     if not _is_true_feature(c):
         s -= 70.0
+
+    # Plan D: human feedback memory (what you kept/dropped/hooked)
+    try:
+        s += learned_text_score(text, for_hook=True)
+    except Exception:
+        pass
 
     s += c.score * 0.28
     return s

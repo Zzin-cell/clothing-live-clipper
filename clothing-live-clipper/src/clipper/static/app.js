@@ -63,6 +63,21 @@ async function loadHealth() {
     el.className = "jy-pill bad";
     el.textContent = "无法连接后端";
   }
+  // learning status
+  try {
+    const lr = await fetch("/api/learning/status");
+    if (lr.ok) {
+      const L = await lr.json();
+      const n = Number(L.events || 0);
+      if ($("learn-stat")) $("learn-stat").textContent = n > 0 ? `已学 ${n} 次` : "人机闭环";
+      if ($("learn-hint")) {
+        $("learn-hint").textContent =
+          n > 0
+            ? `已学习 ${n} 次人工反剪（保留 ${L.kept_slots || 0} / 丢弃 ${L.dropped_slots || 0}）。继续改结构会更像你。`
+            : "你每次「保存口播并重剪」都会被记住，后续自动更像你的口味。";
+      }
+    }
+  } catch (_) {}
 }
 
 function clonePlan(plan) {

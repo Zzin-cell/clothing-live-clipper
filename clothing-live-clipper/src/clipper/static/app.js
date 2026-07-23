@@ -16,6 +16,10 @@ let planEdit = null; // {golden, trust, cta}
 let planOriginal = null;
 let asrCards = []; // left transcript editable cards
 let selectedAsr = new Set(); // selected asr indices for bulk add
+let planDirty = false; // user is editing plan; avoid poll clobber
+let planRenderQueued = false;
+let planEventsBound = false;
+let asrEventsBound = false;
 
 function escapeHtml(str) {
   return String(str ?? "")
@@ -136,32 +140,40 @@ function moveClip(fromRole, fromIdx, toRole, toIdx) {
   item.role = roleLabel(toRole);
   const insertAt = Math.max(0, Math.min(toIdx, planEdit[toRole].length));
   planEdit[toRole].splice(insertAt, 0, item);
-  renderTracks(planEdit);
+  planDirty = true;
+  queueRenderTracks();
 }
 
 function syncPlanFieldsFromDom() {
   if (!planEdit) return;
-  document.querySelectorAll(".jy-clip").forEach((card) => {
+  // only plan cards in center tracks (not left asr cards)
+  document.querySelectorAll("#golden-track .jy-clip, #trust-track .jy-clip, #cta-track .jy-clip").forEach((card) => {
     const role = card.dataset.role;
     const idx = Number(card.dataset.idx);
     if (!planEdit?.[role]?.[idx]) return;
     const ta = card.querySelector(".clip-text-edit");
-    const t0 = card.querySelector(".clip-t0");
-    const t1 = card.querySelector(".clip-t1");
+    const t0s = card.querySelector(".clip-t0s");
+    const t1s = card.querySelector(".clip-t1s");
     if (ta) planEdit[role][idx].text = ta.value;
-    if (t0) planEdit[role][idx].t0_ms = Math.max(0, Number(t0.value || 0));
-    if (t1) {
-      const v1 = Math.max(0, Number(t1.value || 0));
-      const v0 = planEdit[role][idx].t0_ms;
-      planEdit[role][idx].t1_ms = v1 > v0 ? v1 : v0 + 500;
+    if (t0s) planEdit[role][idx].t0_ms = Math.max(0, Math.round(Number(t0s.value || 0) * 1000));
+    if (t1s) {
+      const v0 = planEdit[role][idx].t0_ms || 0;
+      const v1 = Math.max(v0 + 300, Math.round(Number(t1s.value || 0) * 1000));
+      planEdit[role][idx].t1_ms = v1;
     }
   });
 }
 
-function renderTracks(plan) {
-  // keep in-progress edits when re-rendering same plan
-  if (planEdit) syncPlanFieldsFromDom();
+function queueRenderTracks() {
+  if (planRenderQueued) return;
+  planRenderQueued = true;
+  requestAnimationFrame(() => {
+    planRenderQueued = false;
+    renderTracks(planEdit || {});
+  });
+}
 
+function renderTracks(plan) {
   // prefer editable working copy
   const src = planEdit || clonePlan(plan || {});
   if (!planEdit && (plan?.golden?.length || plan?.trust?.length || plan?.cta?.length)) {
@@ -169,6 +181,20 @@ function renderTracks(plan) {
     planOriginal = clonePlan(plan);
     setPlanToolsEnabled(true);
   }
+
+  // preserve focus/cursor across re-render
+  const ae = document.activeElement;
+  let focusKey = null;
+  let caret = null;
+  if (ae && ae.closest && ae.closest(".jy-clip") && (ae.tagName === "TEXTAREA" || ae.tagName === "INPUT")) {
+    const card = ae.closest(".jy-clip");
+    focusKey = `${card.dataset.role}:${card.dataset.idx}:${ae.className}`;
+    try {
+      caret = { s: ae.selectionStart, e: ae.selectionEnd };
+    } catch (_) {}
+  }
+  const scrollBox = document.querySelector(".jy-tracks");
+  const scrollTop = scrollBox ? scrollBox.scrollTop : 0;
 
   const mk = (arr, role, key) => {
     const list = arr || [];
@@ -182,7 +208,7 @@ function renderTracks(plan) {
         const removed = !!s.removed;
         return `<div class="jy-clip expanded ${role} ${removed ? "removed" : ""}" draggable="true" data-role="${key}" data-idx="${idx}" data-id="${escapeHtml(s.clip_id || "")}">
           <div class="clip-top">
-            <span class="clip-drag" title="拖动调整位置">⠿</span>
+            <span class="clip-drag" title="拖动调整位置" draggable="false">⠿</span>
             <span class="clip-badge">${key === "golden" ? "黄金" : key === "trust" ? "信任" : "收尾"} #${idx + 1}</span>
             <button type="button" class="clip-x" title="${removed ? "恢复" : "删除"}">${removed ? "+" : "×"}</button>
           </div>
@@ -190,8 +216,6 @@ function renderTracks(plan) {
           <div class="clip-time-row">
             <label>开始(s)<input class="clip-t0s" type="number" step="0.1" min="0" value="${a}" /></label>
             <label>结束(s)<input class="clip-t1s" type="number" step="0.1" min="0" value="${b}" /></label>
-            <input class="clip-t0" type="hidden" value="${Number(s.t0_ms || 0)}" />
-            <input class="clip-t1" type="hidden" value="${Number(s.t1_ms || 0)}" />
           </div>
           <div class="meta">可改口播词与时间 · 拖拽排序 · 应用后按此反向剪视频</div>
           <div class="clip-tools">
@@ -208,226 +232,221 @@ function renderTracks(plan) {
   $("golden-track").innerHTML = mk(src.golden, "hook", "golden");
   $("trust-track").innerHTML = mk(src.trust, "trust", "trust");
   $("cta-track").innerHTML = mk(src.cta, "cta", "cta");
-  bindTrackEditors();
+  ensurePlanEventsBound();
   updatePlanHint();
+
+  if (scrollBox) scrollBox.scrollTop = scrollTop;
+  if (focusKey) {
+    const [role, idx, cls] = focusKey.split(":");
+    const card = document.querySelector(`#${role}-track .jy-clip[data-idx="${idx}"]`);
+    const el = card?.querySelector(`.${cls.split(" ").filter(Boolean).join(".")}`) || card?.querySelector(".clip-text-edit");
+    if (el) {
+      el.focus({ preventScroll: true });
+      if (caret && typeof el.setSelectionRange === "function") {
+        try {
+          el.setSelectionRange(caret.s ?? el.value.length, caret.e ?? el.value.length);
+        } catch (_) {}
+      }
+    }
+  }
 }
 
-function bindTrackEditors() {
-  // sync seconds inputs <-> ms hidden fields + model
-  document.querySelectorAll(".jy-clip").forEach((card) => {
+function ensurePlanEventsBound() {
+  if (planEventsBound) return;
+  planEventsBound = true;
+  const root = document.querySelector(".jy-timeline-panel");
+  if (!root) return;
+
+  // text/time edits: update model only, NO full re-render (smooth typing)
+  root.addEventListener("input", (e) => {
+    const t = e.target;
+    if (!(t instanceof HTMLElement)) return;
+    if (!t.classList.contains("clip-text-edit") && !t.classList.contains("clip-t0s") && !t.classList.contains("clip-t1s")) return;
+    const card = t.closest(".jy-clip");
+    if (!card || !planEdit) return;
     const role = card.dataset.role;
     const idx = Number(card.dataset.idx);
+    if (!planEdit?.[role]?.[idx]) return;
+    planDirty = true;
+    if (t.classList.contains("clip-text-edit")) {
+      planEdit[role][idx].text = t.value;
+    } else if (t.classList.contains("clip-t0s")) {
+      planEdit[role][idx].t0_ms = Math.max(0, Math.round(Number(t.value || 0) * 1000));
+    } else if (t.classList.contains("clip-t1s")) {
+      const v0 = planEdit[role][idx].t0_ms || 0;
+      planEdit[role][idx].t1_ms = Math.max(v0 + 300, Math.round(Number(t.value || 0) * 1000));
+    }
+  });
+
+  root.addEventListener("click", (e) => {
+    const btn = e.target.closest("button");
+    if (!btn) return;
+    const card = btn.closest(".jy-clip");
+    if (!card || !planEdit) return;
+    e.preventDefault();
+    e.stopPropagation();
+    // capture latest fields first (cheap)
+    const role = card.dataset.role;
+    const idx = Number(card.dataset.idx);
+    const ta = card.querySelector(".clip-text-edit");
     const t0s = card.querySelector(".clip-t0s");
     const t1s = card.querySelector(".clip-t1s");
-    const t0 = card.querySelector(".clip-t0");
-    const t1 = card.querySelector(".clip-t1");
-    const ta = card.querySelector(".clip-text-edit");
-
-    const push = () => {
-      if (!planEdit?.[role]?.[idx]) return;
+    if (planEdit?.[role]?.[idx]) {
       if (ta) planEdit[role][idx].text = ta.value;
-      if (t0s && t0) {
-        const ms0 = Math.max(0, Math.round(Number(t0s.value || 0) * 1000));
-        t0.value = String(ms0);
-        planEdit[role][idx].t0_ms = ms0;
+      if (t0s) planEdit[role][idx].t0_ms = Math.max(0, Math.round(Number(t0s.value || 0) * 1000));
+      if (t1s) {
+        const v0 = planEdit[role][idx].t0_ms || 0;
+        planEdit[role][idx].t1_ms = Math.max(v0 + 300, Math.round(Number(t1s.value || 0) * 1000));
       }
-      if (t1s && t1) {
-        const ms1 = Math.max(0, Math.round(Number(t1s.value || 0) * 1000));
-        t1.value = String(ms1);
-        const ms0 = planEdit[role][idx].t0_ms || 0;
-        planEdit[role][idx].t1_ms = ms1 > ms0 ? ms1 : ms0 + 500;
-        if (ms1 <= ms0) t1s.value = ((ms0 + 500) / 1000).toFixed(1);
-      }
-      updatePlanHint();
-    };
-    ta?.addEventListener("input", push);
-    t0s?.addEventListener("change", push);
-    t1s?.addEventListener("change", push);
-    // don't start drag from editors
-    ta?.addEventListener("mousedown", (e) => e.stopPropagation());
-    t0s?.addEventListener("mousedown", (e) => e.stopPropagation());
-    t1s?.addEventListener("mousedown", (e) => e.stopPropagation());
-  });
+    }
 
-  // delete / restore
-  document.querySelectorAll(".jy-clip .clip-x").forEach((btn) => {
-    btn.onclick = (e) => {
-      e.preventDefault();
-      e.stopPropagation();
-      syncPlanFieldsFromDom();
-      const card = btn.closest(".jy-clip");
-      const role = card.dataset.role;
-      const idx = Number(card.dataset.idx);
+    if (btn.classList.contains("clip-x")) {
       if (!planEdit?.[role]?.[idx]) return;
       planEdit[role][idx].removed = !planEdit[role][idx].removed;
-      renderTracks(planEdit);
-    };
-  });
-
-  // nudge buttons (vertical order inside track)
-  document.querySelectorAll(".jy-clip .clip-up").forEach((btn) => {
-    btn.onclick = (e) => {
-      e.preventDefault();
-      e.stopPropagation();
-      syncPlanFieldsFromDom();
-      const card = btn.closest(".jy-clip");
-      const role = card.dataset.role;
-      const idx = Number(card.dataset.idx);
-      if (!planEdit?.[role] || idx <= 0) return;
-      moveClip(role, idx, role, idx - 1);
-    };
-  });
-  document.querySelectorAll(".jy-clip .clip-down").forEach((btn) => {
-    btn.onclick = (e) => {
-      e.preventDefault();
-      e.stopPropagation();
-      syncPlanFieldsFromDom();
-      const card = btn.closest(".jy-clip");
-      const role = card.dataset.role;
-      const idx = Number(card.dataset.idx);
-      if (!planEdit?.[role] || idx >= planEdit[role].length - 1) return;
-      const arr = planEdit[role];
-      const item = arr.splice(idx, 1)[0];
-      arr.splice(idx + 1, 0, item);
-      renderTracks(planEdit);
-    };
-  });
-  document.querySelectorAll(".jy-clip .clip-prev").forEach((btn) => {
-    btn.onclick = (e) => {
-      e.preventDefault();
-      e.stopPropagation();
-      syncPlanFieldsFromDom();
-      const card = btn.closest(".jy-clip");
-      const role = card.dataset.role;
-      const idx = Number(card.dataset.idx);
+      planDirty = true;
+      queueRenderTracks();
+      return;
+    }
+    if (btn.classList.contains("clip-up")) {
+      if (idx > 0) moveClip(role, idx, role, idx - 1);
+      return;
+    }
+    if (btn.classList.contains("clip-down")) {
+      if (planEdit?.[role] && idx < planEdit[role].length - 1) {
+        const arr = planEdit[role];
+        const item = arr.splice(idx, 1)[0];
+        arr.splice(idx + 1, 0, item);
+        planDirty = true;
+        queueRenderTracks();
+      }
+      return;
+    }
+    if (btn.classList.contains("clip-prev")) {
       const i = TRACK_ORDER.indexOf(role);
-      if (i <= 0) return;
-      moveClip(role, idx, TRACK_ORDER[i - 1], planEdit[TRACK_ORDER[i - 1]].length);
-    };
-  });
-  document.querySelectorAll(".jy-clip .clip-next").forEach((btn) => {
-    btn.onclick = (e) => {
-      e.preventDefault();
-      e.stopPropagation();
-      syncPlanFieldsFromDom();
-      const card = btn.closest(".jy-clip");
-      const role = card.dataset.role;
-      const idx = Number(card.dataset.idx);
+      if (i > 0) moveClip(role, idx, TRACK_ORDER[i - 1], planEdit[TRACK_ORDER[i - 1]].length);
+      return;
+    }
+    if (btn.classList.contains("clip-next")) {
       const i = TRACK_ORDER.indexOf(role);
-      if (i < 0 || i >= TRACK_ORDER.length - 1) return;
-      moveClip(role, idx, TRACK_ORDER[i + 1], planEdit[TRACK_ORDER[i + 1]].length);
-    };
+      if (i >= 0 && i < TRACK_ORDER.length - 1) moveClip(role, idx, TRACK_ORDER[i + 1], planEdit[TRACK_ORDER[i + 1]].length);
+    }
   });
 
-  // drag & drop free move (handle area preferred)
-  document.querySelectorAll(".jy-clip[draggable='true']").forEach((card) => {
-    card.addEventListener("dragstart", (e) => {
-      if (e.target.closest("button, textarea, input")) {
-        e.preventDefault();
-        return;
+  // drag start (event delegation)
+  root.addEventListener("dragstart", (e) => {
+    const card = e.target.closest?.(".jy-clip");
+    if (!card || !root.contains(card)) return;
+    if (e.target.closest("button, textarea, input")) {
+      e.preventDefault();
+      return;
+    }
+    // sync only this card fields
+    const role = card.dataset.role;
+    const idx = Number(card.dataset.idx);
+    if (planEdit?.[role]?.[idx]) {
+      const ta = card.querySelector(".clip-text-edit");
+      const t0s = card.querySelector(".clip-t0s");
+      const t1s = card.querySelector(".clip-t1s");
+      if (ta) planEdit[role][idx].text = ta.value;
+      if (t0s) planEdit[role][idx].t0_ms = Math.max(0, Math.round(Number(t0s.value || 0) * 1000));
+      if (t1s) {
+        const v0 = planEdit[role][idx].t0_ms || 0;
+        planEdit[role][idx].t1_ms = Math.max(v0 + 300, Math.round(Number(t1s.value || 0) * 1000));
       }
-      syncPlanFieldsFromDom();
-      card.classList.add("dragging");
-      e.dataTransfer.effectAllowed = "move";
-      e.dataTransfer.setData(
-        "text/plain",
-        JSON.stringify({ role: card.dataset.role, idx: Number(card.dataset.idx) })
-      );
-    });
-    card.addEventListener("dragend", () => {
-      card.classList.remove("dragging");
-      document.querySelectorAll(".jy-track-body").forEach((t) => t.classList.remove("drag-over"));
-      document.querySelectorAll(".jy-clip").forEach((c) => c.classList.remove("drag-over-left", "drag-over-right"));
-    });
+    }
+    card.classList.add("dragging");
+    e.dataTransfer.effectAllowed = "move";
+    e.dataTransfer.setData("text/plain", JSON.stringify({ role: card.dataset.role, idx: Number(card.dataset.idx) }));
   });
 
-  document.querySelectorAll(".jy-track-body").forEach((track) => {
-    track.addEventListener("dragover", (e) => {
-      e.preventDefault();
-      e.dataTransfer.dropEffect = "move";
-      track.classList.add("drag-over");
-      const overClip = e.target.closest(".jy-clip");
-      document.querySelectorAll(".jy-clip").forEach((c) => c.classList.remove("drag-over-left", "drag-over-right"));
-      if (overClip && track.contains(overClip)) {
-        const rect = overClip.getBoundingClientRect();
-        const mid = rect.top + rect.height / 2;
-        overClip.classList.add(e.clientY < mid ? "drag-over-left" : "drag-over-right");
-      }
-    });
-    track.addEventListener("dragleave", (e) => {
-      if (!track.contains(e.relatedTarget)) track.classList.remove("drag-over");
-    });
-    track.addEventListener("drop", (e) => {
-      e.preventDefault();
-      track.classList.remove("drag-over");
-      let payload = null;
-      try {
-        payload = JSON.parse(e.dataTransfer.getData("text/plain") || "{}");
-      } catch (_) {
-        return;
-      }
+  root.addEventListener("dragend", (e) => {
+    const card = e.target.closest?.(".jy-clip");
+    card?.classList.remove("dragging");
+    root.querySelectorAll(".jy-track-body").forEach((t) => t.classList.remove("drag-over"));
+    root.querySelectorAll(".jy-clip").forEach((c) => c.classList.remove("drag-over-left", "drag-over-right"));
+  });
 
-      const trackId = track.id; // golden-track / trust-track / cta-track
-      const toRole = trackId.replace("-track", "");
-      if (!TRACK_ORDER.includes(toRole)) return;
+  root.addEventListener("dragover", (e) => {
+    const track = e.target.closest?.(".jy-track-body");
+    if (!track) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = "move";
+    track.classList.add("drag-over");
+    const overClip = e.target.closest(".jy-clip");
+    root.querySelectorAll(".jy-clip").forEach((c) => c.classList.remove("drag-over-left", "drag-over-right"));
+    if (overClip && track.contains(overClip)) {
+      const rect = overClip.getBoundingClientRect();
+      const mid = rect.top + rect.height / 2;
+      overClip.classList.add(e.clientY < mid ? "drag-over-left" : "drag-over-right");
+    }
+  });
 
-      // ensure plan model exists
-      if (!planEdit) {
-        planEdit = { golden: [], trust: [], cta: [] };
-        planOriginal = clonePlan(planEdit);
-        setPlanToolsEnabled(true);
+  root.addEventListener("drop", (e) => {
+    const track = e.target.closest?.(".jy-track-body");
+    if (!track) return;
+    e.preventDefault();
+    track.classList.remove("drag-over");
+    let payload = null;
+    try {
+      payload = JSON.parse(e.dataTransfer.getData("text/plain") || "{}");
+    } catch (_) {
+      return;
+    }
+    const toRole = track.id.replace("-track", "");
+    if (!TRACK_ORDER.includes(toRole)) return;
+    if (!planEdit) {
+      planEdit = { golden: [], trust: [], cta: [] };
+      planOriginal = clonePlan(planEdit);
+      setPlanToolsEnabled(true);
+    }
+    if (!planEdit[toRole]) planEdit[toRole] = [];
+
+    let toIdx = planEdit[toRole].length;
+    const overClip = e.target.closest(".jy-clip");
+    if (overClip && track.contains(overClip) && overClip.dataset.role === toRole) {
+      const overIdx = Number(overClip.dataset.idx);
+      const rect = overClip.getBoundingClientRect();
+      const mid = rect.top + rect.height / 2;
+      toIdx = e.clientY < mid ? overIdx : overIdx + 1;
+    }
+
+    if (payload.source === "asr") {
+      const aidx = Number(payload.idx);
+      const item = asrCards[aidx];
+      if (!item) return;
+      const leftCard = document.querySelector(`.asr-card[data-idx="${aidx}"]`);
+      let text = item.text;
+      let t0 = Number(item.t0_ms || 0);
+      let t1 = Number(item.t1_ms || 0);
+      if (leftCard) {
+        const ta = leftCard.querySelector(".clip-text-edit");
+        const t0s = leftCard.querySelector(".clip-t0s");
+        const t1s = leftCard.querySelector(".clip-t1s");
+        if (ta) text = ta.value;
+        if (t0s) t0 = Math.max(0, Math.round(Number(t0s.value || 0) * 1000));
+        if (t1s) t1 = Math.max(t0 + 300, Math.round(Number(t1s.value || 0) * 1000));
       }
-      if (!planEdit[toRole]) planEdit[toRole] = [];
+      const slot = {
+        clip_id: `asr_${aidx}_${Date.now().toString(36)}`,
+        role: roleLabel(toRole),
+        text: String(text || "").trim(),
+        t0_ms: t0,
+        t1_ms: t1,
+        score: 20,
+        removed: false,
+      };
+      if (!slot.text) return;
+      planEdit[toRole].splice(Math.max(0, toIdx), 0, slot);
+      planDirty = true;
+      queueRenderTracks();
+      return;
+    }
 
-      let toIdx = planEdit[toRole].length;
-      const overClip = e.target.closest(".jy-clip");
-      if (overClip && track.contains(overClip) && overClip.dataset.role === toRole) {
-        const overIdx = Number(overClip.dataset.idx);
-        const rect = overClip.getBoundingClientRect();
-        const mid = rect.top + rect.height / 2;
-        toIdx = e.clientY < mid ? overIdx : overIdx + 1;
-      }
-
-      // from left ASR cards
-      if (payload.source === "asr") {
-        const aidx = Number(payload.idx);
-        const item = asrCards[aidx];
-        if (!item) return;
-        // pull latest edited values from left card if present
-        const leftCard = document.querySelector(`.asr-card[data-idx="${aidx}"]`);
-        let text = item.text;
-        let t0 = Number(item.t0_ms || 0);
-        let t1 = Number(item.t1_ms || 0);
-        if (leftCard) {
-          const ta = leftCard.querySelector(".clip-text-edit");
-          const t0s = leftCard.querySelector(".clip-t0s");
-          const t1s = leftCard.querySelector(".clip-t1s");
-          if (ta) text = ta.value;
-          if (t0s) t0 = Math.max(0, Math.round(Number(t0s.value || 0) * 1000));
-          if (t1s) t1 = Math.max(t0 + 300, Math.round(Number(t1s.value || 0) * 1000));
-        }
-        const slot = {
-          clip_id: `asr_${aidx}_${Date.now().toString(36)}`,
-          role: roleLabel(toRole),
-          text: String(text || "").trim(),
-          t0_ms: t0,
-          t1_ms: t1,
-          score: 20,
-          removed: false,
-        };
-        if (!slot.text) return;
-        planEdit[toRole].splice(Math.max(0, toIdx), 0, slot);
-        renderTracks(planEdit);
-        return;
-      }
-
-      // from plan track reorder/move
-      const fromRole = payload.role;
-      const fromIdx = Number(payload.idx);
-      if (!planEdit?.[fromRole]?.[fromIdx]) return;
-      if (fromRole === toRole && fromIdx < toIdx) toIdx -= 1;
-      moveClip(fromRole, fromIdx, toRole, Math.max(0, toIdx));
-    });
+    const fromRole = payload.role;
+    const fromIdx = Number(payload.idx);
+    if (!planEdit?.[fromRole]?.[fromIdx]) return;
+    if (fromRole === toRole && fromIdx < toIdx) toIdx -= 1;
+    moveClip(fromRole, fromIdx, toRole, Math.max(0, toIdx));
   });
 }
 
@@ -466,12 +485,14 @@ async function applyPlanEdit() {
     });
     const data = await res.json().catch(() => ({}));
     if (!res.ok) throw new Error(data.detail || "应用失败");
-    // reset local edit baseline after server accepts
+    // accept server result and clear dirty lock
+    planDirty = false;
     planEdit = null;
     planOriginal = null;
     renderJob(data);
     await loadJobs();
     pollJob(currentJobId);
+    loadHealth();
   } catch (e) {
     alert(String(e.message || e));
     $("plan-apply").disabled = false;
@@ -521,7 +542,6 @@ function addAsrToTrack(trackKey, indices) {
         if (ta) text = ta.value;
         if (t0s) t0 = Math.max(0, Math.round(Number(t0s.value || 0) * 1000));
         if (t1s) t1 = Math.max(t0 + 300, Math.round(Number(t1s.value || 0) * 1000));
-        // keep left edits
         item.text = text;
         item.t0_ms = t0;
         item.t1_ms = t1;
@@ -539,8 +559,12 @@ function addAsrToTrack(trackKey, indices) {
       planEdit[trackKey].push(slot);
     });
   selectedAsr.clear();
-  renderTracks(planEdit);
-  renderAsrCards();
+  // clear checks without full left re-render
+  document.querySelectorAll(".asr-card .asr-check").forEach((ck) => {
+    ck.checked = false;
+  });
+  planDirty = true;
+  queueRenderTracks();
 }
 
 function renderAsrCards() {
@@ -553,6 +577,22 @@ function renderAsrCards() {
   }
   setAsrToolsEnabled(true);
   $("asr-count").textContent = `${asrCards.length} 句`;
+
+  // preserve left panel scroll + focus
+  const scrollTop = box.scrollTop;
+  const ae = document.activeElement;
+  let focusIdx = null;
+  let focusCls = null;
+  let caret = null;
+  if (ae && ae.closest && ae.closest(".asr-card")) {
+    const c = ae.closest(".asr-card");
+    focusIdx = c.dataset.idx;
+    focusCls = ae.className;
+    try {
+      caret = { s: ae.selectionStart, e: ae.selectionEnd };
+    } catch (_) {}
+  }
+
   box.innerHTML = asrCards
     .map((u, idx) => {
       const a = (Number(u.t0_ms || 0) / 1000).toFixed(1);
@@ -580,69 +620,108 @@ function renderAsrCards() {
     })
     .join("");
 
-  // bind left cards
-  box.querySelectorAll(".asr-card").forEach((card) => {
+  ensureAsrEventsBound();
+  box.scrollTop = scrollTop;
+  if (focusIdx != null) {
+    const card = box.querySelector(`.asr-card[data-idx="${focusIdx}"]`);
+    const el =
+      (focusCls && card?.querySelector(`.${String(focusCls).split(" ").filter(Boolean).join(".")}`)) ||
+      card?.querySelector(".clip-text-edit");
+    if (el) {
+      el.focus({ preventScroll: true });
+      if (caret && typeof el.setSelectionRange === "function") {
+        try {
+          el.setSelectionRange(caret.s ?? el.value.length, caret.e ?? el.value.length);
+        } catch (_) {}
+      }
+    }
+  }
+}
+
+function ensureAsrEventsBound() {
+  if (asrEventsBound) return;
+  asrEventsBound = true;
+  const box = $("transcript-list");
+  if (!box) return;
+
+  // typing: only update model, no re-render
+  box.addEventListener("input", (e) => {
+    const t = e.target;
+    if (!(t instanceof HTMLElement)) return;
+    const card = t.closest(".asr-card");
+    if (!card) return;
     const idx = Number(card.dataset.idx);
+    if (!asrCards[idx]) return;
+    if (t.classList.contains("clip-text-edit")) asrCards[idx].text = t.value;
+    if (t.classList.contains("clip-t0s")) asrCards[idx].t0_ms = Math.max(0, Math.round(Number(t.value || 0) * 1000));
+    if (t.classList.contains("clip-t1s")) {
+      const t0 = asrCards[idx].t0_ms || 0;
+      asrCards[idx].t1_ms = Math.max(t0 + 300, Math.round(Number(t.value || 0) * 1000));
+    }
+  });
+
+  box.addEventListener("change", (e) => {
+    const t = e.target;
+    if (!(t instanceof HTMLElement)) return;
+    const card = t.closest(".asr-card");
+    if (!card) return;
+    const idx = Number(card.dataset.idx);
+    if (t.classList.contains("asr-check")) {
+      if (t.checked) selectedAsr.add(idx);
+      else selectedAsr.delete(idx);
+    }
+  });
+
+  box.addEventListener("click", (e) => {
+    const btn = e.target.closest("button");
+    if (!btn) return;
+    const card = btn.closest(".asr-card");
+    if (!card) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const idx = Number(card.dataset.idx);
+    // flush current values
     const ta = card.querySelector(".clip-text-edit");
     const t0s = card.querySelector(".clip-t0s");
     const t1s = card.querySelector(".clip-t1s");
-    const ck = card.querySelector(".asr-check");
-    const push = () => {
-      if (!asrCards[idx]) return;
+    if (asrCards[idx]) {
       if (ta) asrCards[idx].text = ta.value;
       if (t0s) asrCards[idx].t0_ms = Math.max(0, Math.round(Number(t0s.value || 0) * 1000));
       if (t1s) {
         const t0 = asrCards[idx].t0_ms || 0;
-        const t1 = Math.max(t0 + 300, Math.round(Number(t1s.value || 0) * 1000));
-        asrCards[idx].t1_ms = t1;
+        asrCards[idx].t1_ms = Math.max(t0 + 300, Math.round(Number(t1s.value || 0) * 1000));
       }
-    };
-    ta?.addEventListener("input", push);
-    t0s?.addEventListener("change", push);
-    t1s?.addEventListener("change", push);
-    ta?.addEventListener("mousedown", (e) => e.stopPropagation());
-    t0s?.addEventListener("mousedown", (e) => e.stopPropagation());
-    t1s?.addEventListener("mousedown", (e) => e.stopPropagation());
-    ck?.addEventListener("change", () => {
-      if (ck.checked) selectedAsr.add(idx);
-      else selectedAsr.delete(idx);
-    });
-    card.querySelector(".asr-add-golden")?.addEventListener("click", (e) => {
-      e.preventDefault();
-      e.stopPropagation();
-      push();
-      addAsrToTrack("golden", [idx]);
-    });
-    card.querySelector(".asr-add-trust")?.addEventListener("click", (e) => {
-      e.preventDefault();
-      e.stopPropagation();
-      push();
-      addAsrToTrack("trust", [idx]);
-    });
-    card.querySelector(".asr-add-cta")?.addEventListener("click", (e) => {
-      e.preventDefault();
-      e.stopPropagation();
-      push();
-      addAsrToTrack("cta", [idx]);
-    });
-    card.querySelector(".asr-add-one")?.addEventListener("click", (e) => {
-      e.preventDefault();
-      e.stopPropagation();
-      push();
-      addAsrToTrack("golden", [idx]);
-    });
+    }
+    if (btn.classList.contains("asr-add-golden") || btn.classList.contains("asr-add-one")) addAsrToTrack("golden", [idx]);
+    else if (btn.classList.contains("asr-add-trust")) addAsrToTrack("trust", [idx]);
+    else if (btn.classList.contains("asr-add-cta")) addAsrToTrack("cta", [idx]);
+  });
 
-    card.addEventListener("dragstart", (e) => {
-      if (e.target.closest("button, textarea, input")) {
-        e.preventDefault();
-        return;
+  box.addEventListener("dragstart", (e) => {
+    const card = e.target.closest?.(".asr-card");
+    if (!card) return;
+    if (e.target.closest("button, textarea, input")) {
+      e.preventDefault();
+      return;
+    }
+    const idx = Number(card.dataset.idx);
+    const ta = card.querySelector(".clip-text-edit");
+    const t0s = card.querySelector(".clip-t0s");
+    const t1s = card.querySelector(".clip-t1s");
+    if (asrCards[idx]) {
+      if (ta) asrCards[idx].text = ta.value;
+      if (t0s) asrCards[idx].t0_ms = Math.max(0, Math.round(Number(t0s.value || 0) * 1000));
+      if (t1s) {
+        const t0 = asrCards[idx].t0_ms || 0;
+        asrCards[idx].t1_ms = Math.max(t0 + 300, Math.round(Number(t1s.value || 0) * 1000));
       }
-      push();
-      card.classList.add("dragging");
-      e.dataTransfer.effectAllowed = "copyMove";
-      e.dataTransfer.setData("text/plain", JSON.stringify({ source: "asr", idx }));
-    });
-    card.addEventListener("dragend", () => card.classList.remove("dragging"));
+    }
+    card.classList.add("dragging");
+    e.dataTransfer.effectAllowed = "copyMove";
+    e.dataTransfer.setData("text/plain", JSON.stringify({ source: "asr", idx }));
+  });
+  box.addEventListener("dragend", (e) => {
+    e.target.closest?.(".asr-card")?.classList.remove("dragging");
   });
 }
 
@@ -695,6 +774,7 @@ function renderJob(data) {
   if (jobChanged) {
     planEdit = null;
     planOriginal = null;
+    planDirty = false;
     setPlanToolsEnabled(false);
   }
   $("current-job-title").textContent = data.video_source || data.job_id;
@@ -722,31 +802,36 @@ function renderJob(data) {
     }
   }
 
-  // video
+  // video: don't thrash src while user edits / same file
   const video = $("preview");
   const files = data.files || {};
   if (files.final) {
-    video.src = `/api/jobs/${encodeURIComponent(data.job_id)}/files/final.mp4?t=${Date.now()}`;
+    const url = `/api/jobs/${encodeURIComponent(data.job_id)}/files/final.mp4`;
+    if (!video.src.includes(url) || (!processing && !planDirty)) {
+      // only refresh final when not mid-edit, or first load
+      if (!planDirty || jobChanged || !video.src) {
+        video.src = `${url}?t=${Date.now()}`;
+      }
+    }
     $("export-btn").disabled = false;
     $("export-btn").onclick = () => {
       window.open(`/api/jobs/${encodeURIComponent(data.job_id)}/files/final.mp4`, "_blank");
     };
-  } else {
+  } else if (jobChanged) {
     video.removeAttribute("src");
     $("export-btn").disabled = true;
   }
 
-  // tracks + review
-  // Keep local plan edits while user is adjusting; only reset on job switch
-  // or when server returns a finished plan and we have no local edits yet.
+  // tracks: never clobber while user is editing (planDirty)
   if (jobChanged) {
     planEdit = null;
     planOriginal = null;
+    planDirty = false;
     renderTracks(data.plan || {});
-  } else if (planEdit) {
-    renderTracks(planEdit);
-  } else {
-    renderTracks(data.plan || {});
+    loadTranscript(data.job_id);
+  } else if (!planDirty) {
+    if (!planEdit) renderTracks(data.plan || {});
+    // don't reload transcript cards while typing
   }
   // review text panel removed from UI; status shown in player bar / progress
 
@@ -778,7 +863,10 @@ function renderJob(data) {
   const openTr = $("open-tr-inline");
   if (openTr) openTr.onclick = () => openTranscriptDrawer();
 
-  loadTranscript(data.job_id);
+  // only load left transcript when switching jobs (or empty)
+  if (jobChanged || !asrCards.length) {
+    loadTranscript(data.job_id);
+  }
   highlightJob(data.job_id);
 }
 
@@ -805,9 +893,33 @@ function pollJob(jobId) {
   if (pollTimer) clearInterval(pollTimer);
   pollTimer = setInterval(async () => {
     try {
+      // while user is editing, only lightly refresh jobs list / progress text, don't rebuild editors
       const res = await fetch(`/api/jobs/${encodeURIComponent(jobId)}`);
       if (!res.ok) return;
       const data = await res.json();
+      if (planDirty && data.job_id === currentJobId) {
+        // soft progress update only
+        const st = data.status || "";
+        $("current-job-status").textContent = `${STATUS_LABEL[st] || st}${
+          data.final_duration_s ? ` · ${data.final_duration_s}s` : ""
+        }`;
+        const processing = ["queued", "processing", "starting", "claimed"].includes(st);
+        const pb = $("progress-block");
+        if (processing) {
+          pb.hidden = false;
+          const pct = Number(data.progress || 15);
+          $("progress-bar").style.width = `${pct}%`;
+          $("progress-text").textContent = `${pct}%`;
+          $("stage-text").textContent = stageLabel(data.stage) + (data.stage_detail ? ` · ${data.stage_detail}` : "");
+        }
+        if (!processing) {
+          // finished while editing: allow one full refresh after user applies, not now
+          loadJobs();
+          clearInterval(pollTimer);
+          pollTimer = null;
+        }
+        return;
+      }
       renderJob(data);
       loadJobs();
       if (!["queued", "processing", "starting", "claimed"].includes(data.status)) {
@@ -815,7 +927,7 @@ function pollJob(jobId) {
         pollTimer = null;
       }
     } catch (_) {}
-  }, 2000);
+  }, 2500);
 }
 
 async function loadJobs() {

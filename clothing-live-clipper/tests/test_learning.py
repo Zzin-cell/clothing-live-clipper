@@ -1,4 +1,9 @@
-from clipper.learning import learned_text_score, load_preferences, record_plan_feedback
+from clipper.learning import (
+    clear_learning,
+    learned_text_score,
+    load_preferences,
+    record_plan_feedback,
+)
 
 
 def test_record_feedback_boosts_kept_hook_and_penalizes_dropped(tmp_path, monkeypatch):
@@ -32,3 +37,8 @@ def test_record_feedback_boosts_kept_hook_and_penalizes_dropped(tmp_path, monkey
     assert learned_text_score("收腰版型梨形闭眼入", for_hook=True) > 0
     # dropped live phrase should be penalized
     assert learned_text_score("家人们扣1点关注", for_hook=True) < 0
+
+    # clear learning resets scores
+    st = clear_learning(keep_events_backup=False)
+    assert st["events"] == 0
+    assert abs(learned_text_score("独家凉感面料显瘦不透", for_hook=True)) < 0.01

@@ -319,6 +319,19 @@ body {
   display: flex; align-items: center; gap: 8px; margin: -2px 0 10px;
   flex-wrap: wrap;
 }
+.learn-switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: #fff;
+  font-size: 12px;
+  color: var(--muted);
+  user-select: none;
+}
+.learn-switch input { margin: 0; }
 .jy-tracks {
   flex: 1 1 auto;
   min-height: 0;

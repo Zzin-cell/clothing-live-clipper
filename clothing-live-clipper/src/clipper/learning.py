@@ -285,3 +285,33 @@ def learning_status() -> dict[str, Any]:
         "recent_cases": (prefs.get("recent_cases") or [])[:5],
         "store": str(PREF_PATH),
     }
+
+
+def clear_learning(*, keep_events_backup: bool = True) -> dict[str, Any]:
+    """
+    Wipe learned preferences (and optionally rotate events log).
+    Used when user wants a clean learning slate.
+    """
+    _ensure_dir()
+    if keep_events_backup and EVENTS_PATH.exists():
+        ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+        bak = LEARN_DIR / f"events.backup.{ts}.jsonl"
+        try:
+            EVENTS_PATH.replace(bak)
+        except Exception:
+            # best-effort
+            try:
+                EVENTS_PATH.write_text("", encoding="utf-8")
+            except Exception:
+                pass
+    elif EVENTS_PATH.exists():
+        try:
+            EVENTS_PATH.write_text("", encoding="utf-8")
+        except Exception:
+            pass
+
+    prefs = _default_prefs()
+    prefs["updated_at"] = _utc_now()
+    prefs["cleared_at"] = _utc_now()
+    save_preferences(prefs)
+    return learning_status()

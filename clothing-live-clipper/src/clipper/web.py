@@ -13,7 +13,7 @@ from fastapi.staticfiles import StaticFiles
 
 from clipper.config import Settings, apply_config_update, asr_status, public_config
 from clipper.job_worker import start_job_async
-from clipper.learning import learning_status, record_plan_feedback
+from clipper.learning import clear_learning, learning_status, record_plan_feedback
 from clipper.media import which_ffmpeg
 from clipper.pipeline import run_pipeline
 from clipper.system_status import build_status, run_probe
@@ -65,6 +65,8 @@ class PlanEditBody(BaseModel):
     trust: list[dict] = Field(default_factory=list)
     cta: list[dict] = Field(default_factory=list)
     reclip: bool = True
+    # Plan D: user chooses whether this reverse-cut should train global ranking
+    learn: bool = False
 
 
 def _utc_now() -> str:
@@ -186,6 +188,15 @@ def create_app() -> FastAPI:
     @app.get("/api/learning/status")
     def api_learning_status() -> dict[str, Any]:
         return learning_status()
+
+    @app.post("/api/learning/clear")
+    def api_learning_clear() -> dict[str, Any]:
+        """Delete previous learned preferences (fresh start)."""
+        try:
+            st = clear_learning(keep_events_backup=True)
+            return {"ok": True, "learning": st}
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"clear learning failed: {e}") from e
 
     @app.get("/api/system/config")
     def system_config_get() -> dict[str, Any]:
@@ -590,22 +601,29 @@ def create_app() -> FastAPI:
             json.dumps(plan, ensure_ascii=False, indent=2), encoding="utf-8"
         )
 
-        # Plan D: learn from human reverse-edit
-        try:
-            prefs = record_plan_feedback(
-                job_id=job_id,
-                before_plan=before_plan if isinstance(before_plan, dict) else None,
-                after_plan=plan,
-                source="plan_edit",
-            )
-            plan.setdefault("warnings", []).append(
-                f"learning_events={((prefs.get('stats') or {}).get('events') or 0)}"
-            )
+        # Plan D: optional learn from human reverse-edit (user toggle)
+        learn_flag = bool(getattr(body, "learn", False))
+        if learn_flag:
+            try:
+                prefs = record_plan_feedback(
+                    job_id=job_id,
+                    before_plan=before_plan if isinstance(before_plan, dict) else None,
+                    after_plan=plan,
+                    source="plan_edit",
+                )
+                plan.setdefault("warnings", []).append(
+                    f"learning_events={((prefs.get('stats') or {}).get('events') or 0)}"
+                )
+                (d / "plan.json").write_text(
+                    json.dumps(plan, ensure_ascii=False, indent=2), encoding="utf-8"
+                )
+            except Exception as e:
+                plan.setdefault("warnings", []).append(f"learning_skip:{e}")
+        else:
+            plan.setdefault("warnings", []).append("learning_skipped_by_user")
             (d / "plan.json").write_text(
                 json.dumps(plan, ensure_ascii=False, indent=2), encoding="utf-8"
             )
-        except Exception as e:
-            plan.setdefault("warnings", []).append(f"learning_skip:{e}")
 
         # Derive transcript lines from remaining slots for reclip pipeline compatibility
         lines = []
@@ -630,7 +648,7 @@ def create_app() -> FastAPI:
         meta["selected_clips"] = len(golden) + len(trust) + len(cta)
         meta["duration_s"] = total_ms / 1000.0
         meta["warnings"] = plan["warnings"]
-        meta["learning"] = True
+        meta["learning"] = bool(learn_flag)
         _write_meta(d, meta)
 
         if body.reclip:

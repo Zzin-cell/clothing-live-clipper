@@ -572,6 +572,11 @@ function ensurePlanEventsBound() {
   });
 }
 
+function isLearnEnabled() {
+  const el = $("plan-learn");
+  return !!(el && el.checked);
+}
+
 async function applyPlanEdit() {
   if (!currentJobId || !planEdit) return;
   syncPlanFieldsFromDom();
@@ -587,8 +592,10 @@ async function applyPlanEdit() {
         score: Number(s.score || 0),
       }))
       .filter((s) => s.text);
+  const learn = isLearnEnabled();
   const payload = {
     reclip: true,
+    learn,
     golden: clean(planEdit.golden),
     trust: clean(planEdit.trust),
     cta: clean(planEdit.cta),
@@ -597,7 +604,9 @@ async function applyPlanEdit() {
     alert("请至少保留一个片段，并填写口播词");
     return;
   }
-  $("plan-edit-hint").textContent = "正在按修改后的口播与结构反向剪视频…";
+  $("plan-edit-hint").textContent = learn
+    ? "正在重剪，并写入学习…"
+    : "正在重剪（本次不学习）…";
   $("plan-apply").disabled = true;
   try {
     const res = await fetch(`/api/jobs/${encodeURIComponent(currentJobId)}/plan`, {
@@ -621,6 +630,24 @@ async function applyPlanEdit() {
   }
 }
 
+async function clearLearningData() {
+  if (!confirm("确定清空之前的学习数据？此操作会重置全局口味偏好（可重新学）。")) return;
+  try {
+    const res = await fetch("/api/learning/clear", { method: "POST" });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.detail || "清空失败");
+    if ($("plan-learn")) $("plan-learn").checked = false;
+    try {
+      localStorage.setItem("clipper_learn_on_reclip", "0");
+    } catch (_) {}
+    await loadHealth();
+    if ($("plan-edit-hint")) $("plan-edit-hint").textContent = "学习数据已清空";
+    alert("已清空学习数据");
+  } catch (e) {
+    alert(String(e.message || e));
+  }
+}
+
 function setupPlanTools() {
   $("plan-reset")?.addEventListener("click", () => {
     if (!planOriginal) return;
@@ -630,6 +657,26 @@ function setupPlanTools() {
   });
   $("plan-balance")?.addEventListener("click", () => balancePlanDurations());
   $("plan-apply")?.addEventListener("click", applyPlanEdit);
+  $("learn-clear")?.addEventListener("click", clearLearningData);
+  // remember user preference for learn toggle
+  const learnEl = $("plan-learn");
+  if (learnEl) {
+    try {
+      learnEl.checked = localStorage.getItem("clipper_learn_on_reclip") === "1";
+    } catch (_) {
+      learnEl.checked = false;
+    }
+    learnEl.addEventListener("change", () => {
+      try {
+        localStorage.setItem("clipper_learn_on_reclip", learnEl.checked ? "1" : "0");
+      } catch (_) {}
+      if ($("learn-hint")) {
+        $("learn-hint").textContent = learnEl.checked
+          ? "已开启：下次点「保存口播并重剪」会学习这次修改。"
+          : "已关闭：重剪只出片，不写入学习。需要时再勾选「学习这次重剪」。";
+      }
+    });
+  }
 }
 
 function setAsrToolsEnabled(on) {

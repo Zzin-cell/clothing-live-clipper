@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>小面 · CapCut</title>
-  <link rel="stylesheet" href="/static/styles.css?v=jy24" />
+  <link rel="stylesheet" href="/static/styles.css?v=jy25" />
 </head>
 <body>
   <div class="jy-app">
@@ -111,6 +111,11 @@
           <div class="jy-track-tools">
             <button type="button" class="jy-btn tiny" id="plan-reset" disabled>还原结构</button>
             <button type="button" class="jy-btn tiny" id="plan-balance" disabled>均分时长</button>
+            <label class="jy-switch learn-switch" title="勾选后，这次重剪会写入全局学习">
+              <input type="checkbox" id="plan-learn" />
+              <span>学习这次重剪</span>
+            </label>
+            <button type="button" class="jy-btn tiny" id="learn-clear">清空学习</button>
             <button type="button" class="jy-btn tiny primary" id="plan-apply" disabled>保存口播并重剪</button>
             <span class="muted" id="plan-edit-hint"></span>
           </div>
@@ -196,6 +201,6 @@
     </div>
   </aside>
 
-  <script src="/static/app.js?v=jy24"></script>
+  <script src="/static/app.js?v=jy25"></script>
 </body>
 </html>

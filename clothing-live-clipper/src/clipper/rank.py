@@ -167,8 +167,10 @@ def score_clip(clip: Clip) -> Clip:
     try:
         learned = learned_text_score(text, for_hook=False)
         if abs(learned) > 0.01:
-            raw += learned
-            breakdown["learned"] = learned
+            # amplify so it can override weak keyword ties
+            learned_adj = learned * 1.8
+            raw += learned_adj
+            breakdown["learned"] = learned_adj
     except Exception:
         pass
 
@@ -402,7 +404,8 @@ def _hook_strength(c: Clip) -> float:
 
     # Plan D: human feedback memory (what you kept/dropped/hooked)
     try:
-        s += learned_text_score(text, for_hook=True)
+        # stronger on hook path: this decides front 20s order
+        s += learned_text_score(text, for_hook=True) * 2.2
     except Exception:
         pass
 

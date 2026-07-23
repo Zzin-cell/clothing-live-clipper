@@ -270,6 +270,7 @@ def record_plan_feedback(
 def learned_text_score(text: str, *, for_hook: bool = False) -> float:
     """
     Convert learned preferences into a score delta for a transcript line.
+    Strengthened so human/bootstrap feedback can actually move ranking.
     """
     prefs = load_preferences()
     keep_boost = prefs.get("keep_boost") or {}
@@ -279,14 +280,24 @@ def learned_text_score(text: str, *, for_hook: bool = False) -> float:
     if not toks:
         return 0.0
     score = 0.0
+    hit = 0
     for t in toks:
-        score += 0.55 * float(keep_boost.get(t, 0.0))
-        score -= 0.70 * float(drop_penalty.get(t, 0.0))
+        kb = float(keep_boost.get(t, 0.0))
+        dp = float(drop_penalty.get(t, 0.0))
+        hb = float(hook_boost.get(t, 0.0))
+        if abs(kb) + abs(dp) + abs(hb) < 1e-6:
+            continue
+        hit += 1
+        # stronger coefficients (previously too weak to notice)
+        score += 1.6 * kb
+        score -= 2.2 * dp
         if for_hook:
-            score += 0.90 * float(hook_boost.get(t, 0.0))
-    # normalize a bit by token count
-    score = score / max(3.0, len(toks) ** 0.5)
-    return max(-40.0, min(50.0, score))
+            score += 2.8 * hb
+    if hit == 0:
+        return 0.0
+    # milder normalization so rare strong tokens still matter
+    score = score / max(1.6, hit ** 0.35)
+    return max(-80.0, min(120.0, score))
 
 
 def learning_status() -> dict[str, Any]:
@@ -308,6 +319,57 @@ def learning_status() -> dict[str, Any]:
         "recent_cases": (prefs.get("recent_cases") or [])[:5],
         "store": str(PREF_PATH),
     }
+
+
+def seed_negative_live_phrases(phrases: list[str] | None = None) -> dict[str, Any]:
+    """
+    Inject common livestream-feel negatives so learning has contrast.
+    Without negatives, bootstrap-from-good-examples only mildly reweights positives.
+    """
+    prefs = load_preferences()
+    drop_penalty: dict[str, float] = dict(prefs.get("drop_penalty") or {})
+    hook_boost: dict[str, float] = dict(prefs.get("hook_boost") or {})
+    defaults = phrases or [
+        "家人们",
+        "老铁们",
+        "宝宝们",
+        "扣1",
+        "扣一",
+        "点关注",
+        "双击",
+        "直播间",
+        "公屏",
+        "弹幕",
+        "福袋",
+        "上链接",
+        "小黄车",
+        "欢迎进来",
+        "过一下",
+        "过一遍",
+        "听得到吗",
+        "在不在",
+        "来了吗",
+        "尺码",
+        "建议穿",
+        "M码",
+        "L码",
+        "券后",
+        "只要",
+        "包邮",
+        "加购",
+        "下单",
+    ]
+    for p in defaults:
+        for t in _tokens(p) or [p]:
+            _bump(drop_penalty, t, 6.0)
+            _bump(hook_boost, t, -4.0)
+    prefs["drop_penalty"] = drop_penalty
+    prefs["hook_boost"] = hook_boost
+    stats = dict(prefs.get("stats") or {})
+    stats["seed_negatives"] = int(stats.get("seed_negatives") or 0) + 1
+    prefs["stats"] = stats
+    save_preferences(prefs)
+    return prefs
 
 
 def clear_learning(*, keep_events_backup: bool = True) -> dict[str, Any]:

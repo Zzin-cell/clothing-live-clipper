@@ -374,17 +374,27 @@ def render_from_plan_only(job_dir: Path) -> None:
             raise RuntimeError("未找到 plan.json")
         plan = json.loads(plan_path.read_text(encoding="utf-8"))
         segs = []
+        seen: set[tuple[int, int]] = set()
         for key in ("golden", "trust", "cta"):
             for s in plan.get(key) or []:
+                if not isinstance(s, dict):
+                    continue
+                if s.get("removed") is True:
+                    continue
                 t0 = int(s.get("t0_ms") or 0)
                 t1 = int(s.get("t1_ms") or 0)
-                if t1 > t0:
-                    segs.append((t0, t1))
+                if t1 <= t0:
+                    continue
+                w = (t0, t1)
+                if w in seen:
+                    continue
+                seen.add(w)
+                segs.append(w)
         if not segs:
             raise RuntimeError("plan 无有效片段")
 
         speed = float(meta.get("playback_speed") or os.environ.get("CLIPPER_PLAYBACK_SPEED") or 1.3)
-        _set_progress(job_dir, "render", 75, "按调整后的结构渲染")
+        _set_progress(job_dir, "render", 75, f"按调整后的结构渲染（{len(segs)}段）")
         from clipper.media import probe_duration_ms, render_plan
 
         # clean old render artifacts so browser/file size always changes
@@ -396,11 +406,30 @@ def render_from_plan_only(job_dir: Path) -> None:
             except OSError:
                 pass
         if parts_dir.exists():
-            for old in parts_dir.glob("*.mp4"):
+            for old in parts_dir.glob("*"):
                 try:
-                    old.unlink()
+                    if old.is_file():
+                        old.unlink()
                 except OSError:
                     pass
+        # also clear joined temp if any
+        for extra in ("_joined_1x.mp4", "final.retime.mp4"):
+            p = job_dir / extra
+            if p.exists():
+                try:
+                    p.unlink()
+                except OSError:
+                    pass
+
+        # write exact segment list used for this render (debug / verify deletes)
+        (job_dir / "render_segments.json").write_text(
+            json.dumps(
+                [{"t0_ms": a, "t1_ms": b, "dur_s": round((b - a) / 1000, 3)} for a, b in segs],
+                ensure_ascii=False,
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
 
         render_plan(
             video,

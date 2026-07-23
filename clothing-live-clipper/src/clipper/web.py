@@ -560,6 +560,7 @@ def create_app() -> FastAPI:
                     continue
                 if s.get("removed") is True:
                     continue
+                # allow empty text: reverse cut is time-based; text is annotation
                 text = str(s.get("text") or "").strip()
                 t0 = int(s.get("t0_ms") or 0)
                 t1 = int(s.get("t1_ms") or 0)
@@ -583,6 +584,19 @@ def create_app() -> FastAPI:
         if not (golden or trust or cta):
             raise HTTPException(status_code=400, detail="成片结构不能为空，请至少保留一个片段")
 
+        # de-dup identical time windows (prevent deleted-but-duplicated ranges)
+        seen_win: set[tuple[int, int]] = set()
+        def dedup(slots: list[dict]) -> list[dict]:
+            out = []
+            for s in slots:
+                w = (int(s["t0_ms"]), int(s["t1_ms"]))
+                if w in seen_win:
+                    continue
+                seen_win.add(w)
+                out.append(s)
+            return out
+
+        golden, trust, cta = dedup(golden), dedup(trust), dedup(cta)
         total_ms = sum((s["t1_ms"] - s["t0_ms"]) for s in golden + trust + cta)
         plan = {
             "target_duration_s": _read_json(meta_path).get("target_seconds", 60),
@@ -592,7 +606,10 @@ def create_app() -> FastAPI:
             "total_duration_ms": total_ms,
             "golden20_passed": bool(golden),
             "golden_weight_ratio": 0.0,
-            "warnings": ["manual_plan_edit"],
+            "warnings": [
+                "manual_plan_edit",
+                f"manual_segments={len(golden)+len(trust)+len(cta)}",
+            ],
         }
         (d / "plan.json").write_text(
             json.dumps(plan, ensure_ascii=False, indent=2), encoding="utf-8"

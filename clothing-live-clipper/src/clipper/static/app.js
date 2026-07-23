@@ -391,8 +391,13 @@ function ensurePlanEventsBound() {
 
     if (btn.classList.contains("clip-x")) {
       if (!planEdit?.[role]?.[idx]) return;
-      planEdit[role][idx].removed = !planEdit[role][idx].removed;
+      // hard delete from plan so reverse reclip cannot include it
+      const removedItem = planEdit[role].splice(idx, 1)[0];
       planDirty = true;
+      if ($("plan-edit-hint")) {
+        const t = (removedItem?.text || "").slice(0, 18);
+        $("plan-edit-hint").textContent = `已删除片段：${t}${t.length >= 18 ? "…" : ""}（需点重剪才生效）`;
+      }
       queueRenderTracks();
       return;
     }
@@ -580,18 +585,23 @@ function isLearnEnabled() {
 async function applyPlanEdit() {
   if (!currentJobId || !planEdit) return;
   syncPlanFieldsFromDom();
+  // also drop empty-text or zero-length slots
   const clean = (arr) =>
     (arr || [])
-      .filter((s) => !s.removed)
-      .map((s) => ({
-        clip_id: s.clip_id,
-        role: s.role,
-        text: String(s.text || "").trim(),
-        t0_ms: Math.max(0, Number(s.t0_ms || 0)),
-        t1_ms: Math.max(Number(s.t0_ms || 0) + 300, Number(s.t1_ms || 0)),
-        score: Number(s.score || 0),
-      }))
-      .filter((s) => s.text);
+      .filter((s) => s && !s.removed)
+      .map((s) => {
+        const t0 = Math.max(0, Number(s.t0_ms || 0));
+        let t1 = Math.max(t0 + 300, Number(s.t1_ms || 0));
+        return {
+          clip_id: s.clip_id,
+          role: s.role,
+          text: String(s.text || "").trim(),
+          t0_ms: t0,
+          t1_ms: t1,
+          score: Number(s.score || 0),
+        };
+      })
+      .filter((s) => s.t1_ms > s.t0_ms);
   const learn = isLearnEnabled();
   const payload = {
     reclip: true,
@@ -600,13 +610,15 @@ async function applyPlanEdit() {
     trust: clean(planEdit.trust),
     cta: clean(planEdit.cta),
   };
+  // hard safety: never send removed cards
+  const allTexts = [...payload.golden, ...payload.trust, ...payload.cta].map((s) => s.text);
   if (!payload.golden.length && !payload.trust.length && !payload.cta.length) {
-    alert("请至少保留一个片段，并填写口播词");
+    alert("请至少保留一个片段");
     return;
   }
   $("plan-edit-hint").textContent = learn
-    ? "正在按时间轴重剪成片，并写入学习…"
-    : "正在按时间轴重剪成片（改词不会改原声音）…";
+    ? `正在按 ${allTexts.length} 段时间轴重剪（并学习）…`
+    : `正在按 ${allTexts.length} 段时间轴重剪…`;
   $("plan-apply").disabled = true;
   try {
     const res = await fetch(`/api/jobs/${encodeURIComponent(currentJobId)}/plan`, {
@@ -623,6 +635,9 @@ async function applyPlanEdit() {
     // force preview reload after reclip
     const video = $("preview");
     if (video) {
+      try {
+        video.pause();
+      } catch (_) {}
       video.removeAttribute("src");
       video.load();
     }
@@ -632,7 +647,7 @@ async function applyPlanEdit() {
     loadHealth();
     if ($("plan-edit-hint")) {
       $("plan-edit-hint").textContent =
-        "已提交重剪。若预览仍旧，请等进度到完成后再点历史任务刷新；改词本身不会改变视频声音。";
+        `已提交重剪（${allTexts.length} 段）。请等进度到完成后预览会自动刷新；若仍旧请再点一次历史任务。`;
     }
   } catch (e) {
     alert(String(e.message || e));

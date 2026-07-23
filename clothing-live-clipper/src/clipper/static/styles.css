@@ -432,7 +432,7 @@ body {
   font-family: inherit;
 }
 .jy-clip .clip-time-row {
-  display: flex; gap: 10px; margin-top: 8px; flex-wrap: wrap;
+  display: flex; gap: 10px; margin-top: 8px; flex-wrap: wrap; align-items: center;
 }
 .jy-clip .clip-time-row label {
   display: flex; align-items: center; gap: 6px; font-size: 11px; color: #64748b;
@@ -444,6 +444,18 @@ body {
   border-radius: 8px;
   padding: 4px 6px;
   color: #111827;
+}
+.jy-clip .cut-row button {
+  border: 1px solid #fbbf24;
+  background: #fffbeb;
+  color: #92400e;
+  border-radius: 8px;
+  font-size: 11px;
+  padding: 4px 8px;
+  cursor: pointer;
+}
+.jy-clip .cut-row button:hover {
+  background: #fef3c7;
 }
 .jy-clip .meta { color: #64748b; font-size: 11px; margin-top: 6px; }
 .jy-clip .clip-drag {

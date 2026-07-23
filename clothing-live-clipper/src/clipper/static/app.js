@@ -216,6 +216,114 @@ function swapClips(aRole, aIdx, bRole, bIdx) {
   queueRenderTracks();
 }
 
+function _splitClipByCut(role, idx, cut0ms, cut1ms, textLeft, textRight) {
+  if (!planEdit?.[role]?.[idx]) return false;
+  const s = planEdit[role][idx];
+  const t0 = Math.max(0, Number(s.t0_ms || 0));
+  const t1 = Math.max(t0 + 300, Number(s.t1_ms || 0));
+  let c0 = Math.max(t0, Math.min(t1, Number(cut0ms)));
+  let c1 = Math.max(t0, Math.min(t1, Number(cut1ms)));
+  if (c1 < c0) [c0, c1] = [c1, c0];
+  // ignore tiny cuts
+  if (c1 - c0 < 200) return false;
+  const leftOk = c0 - t0 >= 250;
+  const rightOk = t1 - c1 >= 250;
+  if (!leftOk && !rightOk) return false;
+
+  const base = { ...s, role: roleLabel(role), removed: false };
+  const parts = [];
+  if (leftOk) {
+    parts.push({
+      ...base,
+      clip_id: `${s.clip_id || "c"}_L_${Date.now().toString(36)}`,
+      text: String(textLeft ?? s.text ?? "").trim(),
+      t0_ms: t0,
+      t1_ms: c0,
+    });
+  }
+  if (rightOk) {
+    parts.push({
+      ...base,
+      clip_id: `${s.clip_id || "c"}_R_${Date.now().toString(36)}`,
+      text: String(textRight ?? s.text ?? "").trim(),
+      t0_ms: c1,
+      t1_ms: t1,
+    });
+  }
+  if (!parts.length) return false;
+  planEdit[role].splice(idx, 1, ...parts);
+  planDirty = true;
+  return true;
+}
+
+/** Delete a sub-range inside one clip by text selection ratio (approx without word timestamps). */
+function cutSelectedTextInClip(role, idx, ta) {
+  if (!planEdit?.[role]?.[idx] || !ta) return false;
+  const text = String(ta.value || "");
+  const a = Number(ta.selectionStart ?? 0);
+  const b = Number(ta.selectionEnd ?? 0);
+  if (!(b > a) || !text.length) {
+    alert("请先在口播框里用鼠标选中要删掉的那几个字（例如“199再来一次”）");
+    return false;
+  }
+  const s = planEdit[role][idx];
+  const t0 = Math.max(0, Number(s.t0_ms || 0));
+  const t1 = Math.max(t0 + 300, Number(s.t1_ms || 0));
+  const dur = t1 - t0;
+  const r0 = a / text.length;
+  const r1 = b / text.length;
+  // pad a little so cut catches spoken phrase
+  const pad = Math.min(400, Math.round(dur * 0.04));
+  const cut0 = Math.max(t0, Math.round(t0 + dur * r0) - pad);
+  const cut1 = Math.min(t1, Math.round(t0 + dur * r1) + pad);
+  const leftText = (text.slice(0, a) + text.slice(b)).replace(/\s{2,}/g, " ").trim();
+  // keep left full remaining text on first part if right empty, etc.
+  const textLeft = text.slice(0, a).trim();
+  const textRight = text.slice(b).trim();
+  const ok = _splitClipByCut(role, idx, cut0, cut1, textLeft || leftText, textRight || leftText);
+  if (!ok) {
+    alert("选中范围太短或会裁空整段，请扩大选中或改用「裁掉秒数」");
+    return false;
+  }
+  if ($("plan-edit-hint")) {
+    $("plan-edit-hint").textContent = `已裁掉约 ${((cut1 - cut0) / 1000).toFixed(1)}s（按选中文字估算），请点重剪生效`;
+  }
+  queueRenderTracks();
+  return true;
+}
+
+/** Explicit second-range cut inside one clip: cutFromS/cutToS absolute seconds on source. */
+function cutSecondsInClip(role, idx, fromS, toS) {
+  if (!planEdit?.[role]?.[idx]) return false;
+  const s = planEdit[role][idx];
+  const t0 = Math.max(0, Number(s.t0_ms || 0));
+  const t1 = Math.max(t0 + 300, Number(s.t1_ms || 0));
+  let c0 = Math.round(Number(fromS) * 1000);
+  let c1 = Math.round(Number(toS) * 1000);
+  if (!(c1 > c0)) {
+    alert("结束秒必须大于开始秒");
+    return false;
+  }
+  if (c0 < t0 - 50 || c1 > t1 + 50) {
+    alert(`裁剪范围需在当前片段内：${(t0 / 1000).toFixed(1)}s ~ ${(t1 / 1000).toFixed(1)}s`);
+    return false;
+  }
+  c0 = Math.max(t0, c0);
+  c1 = Math.min(t1, c1);
+  // keep full text on both sides (user can edit); middle spoken part removed
+  const text = String(s.text || "");
+  const ok = _splitClipByCut(role, idx, c0, c1, text, text);
+  if (!ok) {
+    alert("裁剪后没有可用片段（范围过大）");
+    return false;
+  }
+  if ($("plan-edit-hint")) {
+    $("plan-edit-hint").textContent = `已裁掉 ${(c0 / 1000).toFixed(1)}s–${(c1 / 1000).toFixed(1)}s，请点重剪生效`;
+  }
+  queueRenderTracks();
+  return true;
+}
+
 const TRACK_ORDER = ["golden", "trust", "cta"];
 
 function roleLabel(trackKey) {
@@ -306,12 +414,19 @@ function renderTracks(plan) {
             <label>开始(s)<input class="clip-t0s" type="number" step="0.1" min="0" value="${a}" /></label>
             <label>结束(s)<input class="clip-t1s" type="number" step="0.1" min="0" value="${b}" /></label>
           </div>
-          <div class="meta">时长 ${((Number(s.t1_ms || 0) - Number(s.t0_ms || 0)) / 1000).toFixed(1)}s · 拖到其他卡片可替换 · 空白处可排序</div>
+          <div class="clip-time-row cut-row">
+            <label>裁掉从(s)<input class="clip-cut0s" type="number" step="0.1" min="0" value="" placeholder="${a}" /></label>
+            <label>到(s)<input class="clip-cut1s" type="number" step="0.1" min="0" value="" placeholder="${b}" /></label>
+            <button type="button" class="clip-cut-range" title="按秒数裁掉中间一段">裁掉这段</button>
+            <button type="button" class="clip-cut-sel" title="删除口播框中选中文字对应时间">删选中文字段</button>
+          </div>
+          <div class="meta">时长 ${((Number(s.t1_ms || 0) - Number(s.t0_ms || 0)) / 1000).toFixed(1)}s · 想去掉“199再来一次”：选中文字点「删选中文字段」</div>
           <div class="clip-tools">
             <button type="button" class="clip-up" title="同轨上移">↑</button>
             <button type="button" class="clip-down" title="同轨下移">↓</button>
             <button type="button" class="clip-prev" title="移到上一轨">↑轨</button>
             <button type="button" class="clip-next" title="移到下一轨">↓轨</button>
+            <button type="button" class="clip-del-hard" title="删除整个片段">删整段</button>
           </div>
         </div>`;
       })
@@ -389,16 +504,31 @@ function ensurePlanEventsBound() {
       }
     }
 
-    if (btn.classList.contains("clip-x")) {
+    if (btn.classList.contains("clip-x") || btn.classList.contains("clip-del-hard")) {
       if (!planEdit?.[role]?.[idx]) return;
-      // hard delete from plan so reverse reclip cannot include it
+      // hard delete whole clip
       const removedItem = planEdit[role].splice(idx, 1)[0];
       planDirty = true;
       if ($("plan-edit-hint")) {
         const t = (removedItem?.text || "").slice(0, 18);
-        $("plan-edit-hint").textContent = `已删除片段：${t}${t.length >= 18 ? "…" : ""}（需点重剪才生效）`;
+        $("plan-edit-hint").textContent = `已删除整段：${t}${t.length >= 18 ? "…" : ""}（需点重剪才生效）`;
       }
       queueRenderTracks();
+      return;
+    }
+    if (btn.classList.contains("clip-cut-sel")) {
+      const ta = card.querySelector(".clip-text-edit");
+      cutSelectedTextInClip(role, idx, ta);
+      return;
+    }
+    if (btn.classList.contains("clip-cut-range")) {
+      const c0 = card.querySelector(".clip-cut0s");
+      const c1 = card.querySelector(".clip-cut1s");
+      if (!c0?.value || !c1?.value) {
+        alert("请填写「裁掉从(s)」和「到(s)」，例如 45.2 到 47.0");
+        return;
+      }
+      cutSecondsInClip(role, idx, Number(c0.value), Number(c1.value));
       return;
     }
     if (btn.classList.contains("clip-up")) {

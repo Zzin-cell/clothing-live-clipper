@@ -22,6 +22,10 @@ venv/
 clothing-live-clipper/output/*
 !clothing-live-clipper/output/.gitkeep
 
+# Large local ASR models (download separately; > GitHub 100MB limit)
+models/
+**/whisper-*/model.bin
+
 # OS
 .DS_Store
 Thumbs.db

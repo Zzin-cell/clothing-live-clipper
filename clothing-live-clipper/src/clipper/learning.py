@@ -23,7 +23,10 @@ PREF_PATH = LEARN_DIR / "preferences.json"
 EVENTS_PATH = LEARN_DIR / "events.jsonl"
 
 # lightweight Chinese token-ish units (2-grams + keywords)
-_STOP = set("的了呢啊哦嗯吧呀嘛是就很也又还把被在有和与及或")
+_STOP = set(
+    "的了呢啊哦嗯吧呀嘛是就很也又还把被在有和与及或这个那个什么一下一些"
+    "我们你们他们她们它们因为所以但是然后还有就是可以一个"
+)
 
 
 def _utc_now() -> str:
@@ -78,24 +81,44 @@ def save_preferences(prefs: dict[str, Any]) -> None:
     PREF_PATH.write_text(json.dumps(prefs, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
+_FEATURE_SEED = (
+    "面料", "版型", "显瘦", "遮肉", "不透", "柔软", "超软", "软到", "垂感", "弹力",
+    "收腰", "修身", "高腰", "梨形", "闭眼入", "天丝", "醋酸", "雪纺", "纯棉",
+    "蕾丝", "破洞", "拼接", "凉感", "不起球", "可机洗", "抗皱", "显白", "独家",
+    "专利", "限定", "百搭", "通勤", "牛仔", "裙子", "上衣", "外套", "无袖",
+    "遮肚子", "遮胯", "显腿长", "不挑人", "好打理", "高级感",
+)
+
+
 def _tokens(text: str) -> list[str]:
     t = re.sub(r"\s+", "", (text or "").strip().lower())
     if not t:
         return []
     out: list[str] = []
+    # prioritize known clothing feature phrases
+    for w in _FEATURE_SEED:
+        if w in t:
+            out.append(w)
     # keywords / alnum
     for m in re.finditer(r"[a-z0-9]+|[\u4e00-\u9fff]{2,6}", t):
         w = m.group(0)
-        if w in _STOP:
+        if w in _STOP or len(w) < 2:
+            continue
+        # skip ultra-generic fillers
+        if w in {"这个", "那个", "一个", "我们", "你们", "什么", "然后", "因为", "所以", "但是", "宝贝", "姐妹"}:
             continue
         out.append(w)
-    # overlapping bigrams
+    # overlapping bigrams only if they touch feature context
     cjk = re.sub(r"[^\u4e00-\u9fff]", "", t)
-    for i in range(len(cjk) - 1):
-        bg = cjk[i : i + 2]
-        if bg[0] in _STOP and bg[1] in _STOP:
-            continue
-        out.append(bg)
+    has_feat = any(w in t for w in _FEATURE_SEED)
+    if has_feat:
+        for i in range(len(cjk) - 1):
+            bg = cjk[i : i + 2]
+            if bg[0] in _STOP or bg[1] in _STOP:
+                continue
+            if bg in {"这个", "那个", "一个", "我们", "什么", "然后", "因为", "所以"}:
+                continue
+            out.append(bg)
     # uniq preserve order
     seen = set()
     uniq = []

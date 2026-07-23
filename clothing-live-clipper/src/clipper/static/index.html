@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>小面 · CapCut</title>
-  <link rel="stylesheet" href="/static/styles.css?v=jy25" />
+  <link rel="stylesheet" href="/static/styles.css?v=jy26" />
 </head>
 <body>
   <div class="jy-app">
@@ -106,7 +106,7 @@
         <div class="jy-timeline-panel">
           <div class="jy-panel-head">
             <span>成片结构</span>
-            <span class="muted">全展开 · 拖到卡片上可替换 · 反向剪视频</span>
+            <span class="muted">改时间/删段/重排 才会改变成片画面</span>
           </div>
           <div class="jy-track-tools">
             <button type="button" class="jy-btn tiny" id="plan-reset" disabled>还原结构</button>
@@ -116,9 +116,13 @@
               <span>学习这次重剪</span>
             </label>
             <button type="button" class="jy-btn tiny" id="learn-clear">清空学习</button>
-            <button type="button" class="jy-btn tiny primary" id="plan-apply" disabled>保存口播并重剪</button>
+            <button type="button" class="jy-btn tiny primary" id="plan-apply" disabled>保存并重剪成片</button>
             <span class="muted" id="plan-edit-hint"></span>
           </div>
+          <p class="jy-hint" id="plan-note">
+            注意：改卡片里的“口播词”只改文案/学习，不会改原视频声音。
+            想改成片内容请改「开始/结束时间」、删段、替换、重排后点重剪。
+          </p>
           <div class="jy-tracks">
             <div class="jy-track">
               <div class="jy-track-label">黄金</div>
@@ -201,6 +205,6 @@
     </div>
   </aside>
 
-  <script src="/static/app.js?v=jy25"></script>
+  <script src="/static/app.js?v=jy26"></script>
 </body>
 </html>

@@ -267,6 +267,13 @@ def reclip_from_saved_transcript(job_dir: Path) -> None:
             llm_model=base.llm_model,
         )
         _set_progress(job_dir, "render", 80, "渲染成片" if render else "仅生成计划")
+        # clear old final so new render is obvious
+        final_path = job_dir / "final.mp4"
+        if final_path.exists():
+            try:
+                final_path.unlink()
+            except OSError:
+                pass
         result = run_pipeline(
             video=video,
             transcript_path=tr_path,
@@ -291,6 +298,7 @@ def reclip_from_saved_transcript(job_dir: Path) -> None:
                 "has_final": has_final,
                 "output_mp4": has_final,
                 "worker": "local_reclip",
+                "render_token": _utc_now(),
                 "selected_clips": len(result.plan.all_slots()) if result.plan else 0,
                 "golden20_passed": bool(result.plan.golden20_passed) if result.plan else False,
                 "duration_s": (result.plan.total_duration_ms / 1000.0) if result.plan else 0,
@@ -379,17 +387,32 @@ def render_from_plan_only(job_dir: Path) -> None:
         _set_progress(job_dir, "render", 75, "按调整后的结构渲染")
         from clipper.media import probe_duration_ms, render_plan
 
+        # clean old render artifacts so browser/file size always changes
+        final_path = job_dir / "final.mp4"
+        parts_dir = job_dir / "_parts"
+        if final_path.exists():
+            try:
+                final_path.unlink()
+            except OSError:
+                pass
+        if parts_dir.exists():
+            for old in parts_dir.glob("*.mp4"):
+                try:
+                    old.unlink()
+                except OSError:
+                    pass
+
         render_plan(
             video,
             segs,
-            job_dir / "final.mp4",
-            work_dir=job_dir / "_parts",
+            final_path,
+            work_dir=parts_dir,
             smooth=True,
             crossfade_s=0.0,
             edge_fade_s=0.03,
             playback_speed=speed if speed > 0 else 1.3,
         )
-        has_final = (job_dir / "final.mp4").exists()
+        has_final = final_path.exists()
         meta = _read_meta(job_dir)
         meta.update(
             {
@@ -401,13 +424,16 @@ def render_from_plan_only(job_dir: Path) -> None:
                 "output_mp4": has_final,
                 "worker": "manual_plan_render",
                 "error": None if has_final else "渲染未生成 final.mp4",
+                "render_token": _utc_now(),
+                "render_segments": len(segs),
             }
         )
         if has_final:
             try:
                 meta["final_duration_s"] = round(
-                    probe_duration_ms(job_dir / "final.mp4") / 1000.0, 2
+                    probe_duration_ms(final_path) / 1000.0, 2
                 )
+                meta["final_size"] = final_path.stat().st_size
             except Exception:
                 pass
         # refresh review snippet

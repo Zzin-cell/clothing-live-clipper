@@ -605,8 +605,8 @@ async function applyPlanEdit() {
     return;
   }
   $("plan-edit-hint").textContent = learn
-    ? "正在重剪，并写入学习…"
-    : "正在重剪（本次不学习）…";
+    ? "正在按时间轴重剪成片，并写入学习…"
+    : "正在按时间轴重剪成片（改词不会改原声音）…";
   $("plan-apply").disabled = true;
   try {
     const res = await fetch(`/api/jobs/${encodeURIComponent(currentJobId)}/plan`, {
@@ -620,10 +620,20 @@ async function applyPlanEdit() {
     planDirty = false;
     planEdit = null;
     planOriginal = null;
+    // force preview reload after reclip
+    const video = $("preview");
+    if (video) {
+      video.removeAttribute("src");
+      video.load();
+    }
     renderJob(data);
     await loadJobs();
     pollJob(currentJobId);
     loadHealth();
+    if ($("plan-edit-hint")) {
+      $("plan-edit-hint").textContent =
+        "已提交重剪。若预览仍旧，请等进度到完成后再点历史任务刷新；改词本身不会改变视频声音。";
+    }
   } catch (e) {
     alert(String(e.message || e));
     $("plan-apply").disabled = false;
@@ -973,20 +983,36 @@ function renderJob(data) {
     }
   }
 
-  // video: don't thrash src while user edits / same file
+  // video: refresh final when re-render finished; avoid thrash while editing
   const video = $("preview");
   const files = data.files || {};
   if (files.final) {
-    const url = `/api/jobs/${encodeURIComponent(data.job_id)}/files/final.mp4`;
-    if (!video.src.includes(url) || (!processing && !planDirty)) {
-      // only refresh final when not mid-edit, or first load
-      if (!planDirty || jobChanged || !video.src) {
-        video.src = `${url}?t=${Date.now()}`;
+    const token = data.render_token || data.finished_at || data.final_size || Date.now();
+    const url = `/api/jobs/${encodeURIComponent(data.job_id)}/files/final.mp4?v=${encodeURIComponent(token)}`;
+    const shouldRefresh =
+      jobChanged ||
+      !video.src ||
+      (!planDirty && !processing && !video.src.includes(String(token)));
+    if (shouldRefresh) {
+      const wasPaused = video.paused;
+      const t = video.currentTime || 0;
+      video.src = url;
+      // try keep position only if same job mid-play; otherwise start head
+      if (!jobChanged && !wasPaused) {
+        video.addEventListener(
+          "loadedmetadata",
+          () => {
+            try {
+              video.currentTime = Math.min(t, Math.max(0, (video.duration || t) - 0.1));
+            } catch (_) {}
+          },
+          { once: true }
+        );
       }
     }
     $("export-btn").disabled = false;
     $("export-btn").onclick = () => {
-      window.open(`/api/jobs/${encodeURIComponent(data.job_id)}/files/final.mp4`, "_blank");
+      window.open(url, "_blank");
     };
   } else if (jobChanged) {
     video.removeAttribute("src");

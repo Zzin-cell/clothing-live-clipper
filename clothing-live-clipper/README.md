@@ -1,36 +1,126 @@
-# clothing-live-clipper
+# 小面 CapCut · clothing-live-clipper
 
-服装带货直播回放 → **自动口播打轴 + 特点前置 + 约 60 秒成片**。
+> **一句话**：把服装带货直播长视频，自动剪成 **约 60 秒、前 20 秒强卖点、尽量看不出直播感** 的短片。
 
-当前主路径：
+[![Python](https://img.shields.io/badge/Python-3.11+-blue.svg)](#)
+[![FFmpeg](https://img.shields.io/badge/FFmpeg-required-green.svg)](#)
+[![GPU](https://img.shields.io/badge/GPU-CUDA%20optional-76B900.svg)](#)
+[![License](https://img.shields.io/badge/License-see%20repo-lightgrey.svg)](#)
 
-```
-只上传视频 → 本地 faster-whisper 打轴 → 过滤废话/价格 → 逻辑排序 → 1.3x ≈60s → final.mp4
-```
+---
 
-- **默认不依赖 Agent 对话**
-- **默认不依赖云端 Whisper API**
-- Web 页面为剪映风格深色 HTML，上传后自动处理
+## 为什么做这个
 
-## 快速开始（Web）
+直播回放很长，真正能卖货的往往只有：
+
+- 面料 / 版型 / 显瘦 / 不透  
+- 独特卖点与细节证明  
+
+人工剪又慢又累。  
+**小面** 帮你：自动听写 → 去直播废话 → 抓重点 → 排成片 → 还能人工精修并反向重剪。
+
+---
+
+## 核心能力
+
+| 能力 | 说明 |
+|------|------|
+| **只传视频** | 不用先准备口播稿 |
+| **本地 ASR** | faster-whisper，支持 **GPU CUDA** 加速 |
+| **去直播感** | 剔除家人们/扣1/上链接/尺码/价格等 |
+| **前 20 秒吸睛** | 独特特点优先（显瘦、面料、版型…） |
+| **换装后移** | 试穿/搭配不进黄金开头 |
+| **成片约 60s** | 默认 1.3x 播放 |
+| **人工反剪** | 改时间、删小句、拖替换、重排后一键重渲 |
+| **可选学习** | 勾选后把你的改法写进全局排序偏好 |
+
+---
+
+## 30 秒上手
+
+### 1）环境
+
+- Windows 10/11  
+- Python 3.11+  
+- ffmpeg（建议 `%LOCALAPPDATA%\ffmpeg\bin`）  
+- （可选）NVIDIA GPU + CUDA 运行库（听写更快更准）
 
 ```bat
 cd clothing-live-clipper
-set PATH=%LOCALAPPDATA%\ffmpeg\bin;%PATH%
-set PYTHONPATH=src
+pip install -r requirements.txt
+pip install faster-whisper
+:: GPU 推荐再装：
+pip install nvidia-cublas-cu12 nvidia-cudnn-cu12
+```
+
+### 2）启动 Web（小面）
+
+```bat
 start-web.bat
 ```
 
-打开：http://127.0.0.1:8787/
+浏览器打开：**http://127.0.0.1:8787/**
 
-1. 拖入/选择视频（支持 `mp4 / mov / mkv / webm / avi / m4v / ts / mts / m2ts`）  
-2. 点「开始服装切片」  
-3. 页面显示进度：抽音频 → 听写 → 过滤 → 排序 → 渲染  
-4. 完成后可预览/下载 `final.mp4`
+### 3）剪一条
 
-产物目录：`output/web_jobs/{job_id}/`
+1. 拖入直播视频（`mp4/mov/mkv/webm/ts/...`）  
+2. 点 **开始服装切片**  
+3. 等听写 → 过滤 → 排序 → 渲染  
+4. 预览 / 下载 `final.mp4`
 
-## 命令行（无界面）
+---
+
+## 产品标准（全局默认）
+
+1. **看不出直播**  
+   去掉控场话术、欢迎语、公屏互动、挂车话术  
+2. **前 20 秒只放重点**  
+   独特/强卖点优先，不是流水账  
+3. **换装/搭配后移**  
+4. **尺码 / 价格剔除**  
+5. **约 55–65 秒 @ 1.3x**  
+6. **拼接尽量无痕迹**（直接接 + 微消爆音）
+
+---
+
+## 人工精修（反向剪辑）
+
+自动结果不满意时：
+
+| 你想做的事 | 操作 |
+|------------|------|
+| 去掉某一小句（如「199再来一次」） | 口播框 **选中文字** → **删选中文字段** → 重剪 |
+| 精确裁秒 | 填「裁掉从/到」→ **裁掉这段** → 重剪 |
+| 删掉整段模块 | 点 **× / 删整段** → 重剪 |
+| 替换某段 | 左侧口播 **拖到右侧卡片中间** 替换 |
+| 时长不均 | 点 **均分时长** |
+| 学到全局口味 | 勾选 **学习这次重剪** 再保存 |
+
+> ⚠️ **改文字 ≠ 改原片声音**。  
+> 成片是按 **时间轴裁原视频**；只有改时间 / 删小段 / 删整段 / 重排 才会改变成片内容。
+
+---
+
+## 学习系统（Plan D）
+
+可选的人机闭环：
+
+```
+自动切片 → 你改到满意 → 勾选「学习这次重剪」→ 写入偏好
+→ 下次自动排序更像你
+```
+
+- 偏好文件：`output/learning/preferences.json`  
+- 可 **清空学习** 重来  
+- 可用示例成片批量种子学习：
+
+```bat
+python scripts\bootstrap_learning_from_folder.py "D:\学习样本文件夹"
+```
+
+---
+
+## 命令行用法
 
 ```bat
 set PYTHONPATH=src
@@ -38,33 +128,52 @@ set PATH=%LOCALAPPDATA%\ffmpeg\bin;%PATH%
 python scripts\agent_clip_video.py "D:\video.mp4"
 ```
 
-批量桌面目录：
+批量桌面目录（待剪辑 → 已经完成）：
 
 ```bat
 python scripts\batch_desktop_clip.py
 ```
 
-## 环境依赖
+---
 
-- Windows / Python 3.11+
-- ffmpeg（`%LOCALAPPDATA%\ffmpeg\bin` 或 PATH）
-- 本地 whisper 模型：`C:\Users\MR\AppData\grok\models\whisper-tiny`
-- Python 包：`pip install -r requirements.txt`，以及 `faster-whisper`
+## 目录结构（精简）
 
-```bat
-pip install -r requirements.txt
-pip install faster-whisper
+```
+clothing-live-clipper/
+├── start-web.bat                 # 一键启动小面 Web
+├── README.md
+├── docs/
+│   ├── PRODUCT.md                # 产品说明
+│   ├── ARCHITECTURE.md           # 架构与流水线
+│   └── CHANGELOG.md              # 版本变更
+├── src/clipper/                  # 核心引擎 + Web
+│   ├── web.py                    # FastAPI
+│   ├── rank.py                   # 排序/黄金20s
+│   ├── extract.py                # 标签与词表
+│   ├── media.py                  # 裁切/拼接/倍速
+│   ├── learning.py               # 人机学习
+│   ├── job_worker.py             # 后台任务
+│   └── static/                   # 小面前端（白底 UI）
+├── scripts/                      # ASR/批处理/学习种子等
+├── tests/                        # pytest
+└── output/
+    ├── web_jobs/                 # Web 任务产物
+    └── learning/                 # 学习偏好
 ```
 
-## 当前规则（摘要）
+---
 
-- 输入只要视频
-- 前 20 秒特点/卖点优先
-- 不讨论价格
-- 去直播控场词（如「过一下」）与非服装闲聊
-- 逻辑排序优先于硬去重
-- 拼接默认直接接（尽量无剪辑痕迹）
-- 默认 1.3 倍速，成片约 55–65 秒
+## 配置要点（`.env.example`）
+
+| 变量 | 含义 | 建议 |
+|------|------|------|
+| `CLIPPER_ASR_DEVICE` | `cuda` / `cpu` | 有 NVIDIA 用 `cuda` |
+| `CLIPPER_ASR_COMPUTE_TYPE` | `float16` / `int8` | GPU 用 `float16` |
+| `CLIPPER_LOCAL_WHISPER_MODEL` | 本地模型路径 | `.../models/whisper-small` |
+| `CLIPPER_ASR_BEAM_SIZE` | 解码宽度 | GPU 可用 `3` |
+| `CLIPPER_PLAYBACK_SPEED` | 成片倍速 | 默认 `1.3` |
+
+---
 
 ## 测试
 
@@ -73,15 +182,35 @@ set PYTHONPATH=src
 pytest -q
 ```
 
-## 与 Agent Skill 的关系
+---
 
-- 引擎代码可完全独立运行（Web/CLI）
-- `clothing-live-clip` Skill 仍可用于对话触发/说明，但**不是主路径必须项**
+## 里程碑版本
 
-## 目录
+- 标签：`v0.20-xiaomian-capcut-ui`  
+- 分支：`feature/web-video-workstation`  
+- 本整理版本：见 `docs/CHANGELOG.md`
 
-- `src/clipper/` 引擎 + Web
-- `scripts/agent_clip_video.py` 本地一键流水线
-- `scripts/batch_desktop_clip.py` 桌面批量
-- `output/web_jobs/` Web 任务
-- `output/agent_jobs/` CLI 任务
+---
+
+## 路线图（简）
+
+- [x] 本地 ASR + Web 自动流水线  
+- [x] 去直播感 / 去尺码价格 / 特点前 20s  
+- [x] GPU 听写  
+- [x] 人工反剪（删小段/替换/均分）  
+- [x] 可选学习闭环  
+- [ ] LLM 语义理解主卖点（更像人）  
+- [ ] 字级时间戳精准句内裁剪  
+- [ ] 可选 TTS 改词后重配音  
+
+---
+
+## 许可证 / 贡献
+
+欢迎 Issue / PR。  
+提交前请跑通：`pytest -q`。
+
+---
+
+**小面 · capcut**  
+让服装直播回放，一键变成能挂车的短片。

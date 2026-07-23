@@ -1,14 +1,33 @@
-.env
-.venv/
-venv/
+# Python
 __pycache__/
 *.py[cod]
-.pytest_cache/
-.mypy_cache/
-output/*
-!output/.gitkeep
+*.egg-info/
+.venv/
+venv/
+.env
+
+# Outputs & local caches
+output/
 *.mp4
-*.mov
 *.wav
-*.mp3
+*.log
+.git/COMMIT_MSG.tmp
+.git/TAG_MSG.tmp
+.git/COMMIT_MSG.tmp
+
+# Models (large binaries)
+models/
+**/whisper-*/model.bin
+
+# IDE / OS
+.idea/
+.vscode/
 .DS_Store
+Thumbs.db
+
+# Test / temp
+.pytest_cache/
+.coverage
+htmlcov/
+tmp/
+.superpowers/tmp/

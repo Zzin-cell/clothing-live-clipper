@@ -111,6 +111,11 @@ function activeCount(plan) {
 function setPlanToolsEnabled(on) {
   if ($("plan-reset")) $("plan-reset").disabled = !on;
   if ($("plan-apply")) $("plan-apply").disabled = !on;
+  if ($("plan-balance")) $("plan-balance").disabled = !on;
+}
+
+function slotDurMs(s) {
+  return Math.max(0, Number(s.t1_ms || 0) - Number(s.t0_ms || 0));
 }
 
 function updatePlanHint() {
@@ -119,12 +124,96 @@ function updatePlanHint() {
     if (el) el.textContent = "";
     return;
   }
-  const n = activeCount(planEdit);
-  const total = ["golden", "trust", "cta"]
-    .map((k) => (planEdit[k] || []).length)
-    .reduce((a, b) => a + b, 0);
-  const removed = total - n;
-  el.textContent = removed > 0 ? `已删 ${removed} 段 · 保留 ${n} 段` : `共 ${n} 段，可点 × 删除`;
+  const slots = ["golden", "trust", "cta"].flatMap((k) =>
+    (planEdit[k] || []).filter((s) => !s.removed)
+  );
+  const n = slots.length;
+  const durs = slots.map(slotDurMs).filter((d) => d > 0);
+  if (!n) {
+    el.textContent = "暂无片段";
+    return;
+  }
+  const avg = durs.length ? durs.reduce((a, b) => a + b, 0) / durs.length : 0;
+  const min = durs.length ? Math.min(...durs) : 0;
+  const max = durs.length ? Math.max(...durs) : 0;
+  el.textContent = `共 ${n} 段 · 均长 ${(avg / 1000).toFixed(1)}s · 最短 ${(min / 1000).toFixed(1)}s / 最长 ${(
+    max / 1000
+  ).toFixed(1)}s · 拖到卡片上可替换`;
+}
+
+function balancePlanDurations() {
+  if (!planEdit) return;
+  syncPlanFieldsFromDom();
+  const slots = [];
+  ["golden", "trust", "cta"].forEach((k) => {
+    (planEdit[k] || []).forEach((s, idx) => {
+      if (!s.removed) slots.push({ k, idx, s });
+    });
+  });
+  if (slots.length < 2) {
+    updatePlanHint();
+    return;
+  }
+  // target: average of current active durations, clamped for watchability
+  const avg = slots.reduce((a, x) => a + slotDurMs(x.s), 0) / slots.length;
+  const target = Math.max(2500, Math.min(9000, Math.round(avg)));
+  slots.forEach(({ s }) => {
+    const t0 = Math.max(0, Number(s.t0_ms || 0));
+    // keep start, stretch/shrink end around target
+    s.t1_ms = t0 + target;
+  });
+  planDirty = true;
+  queueRenderTracks();
+  if ($("plan-edit-hint")) {
+    $("plan-edit-hint").textContent = `已均分到约 ${(target / 1000).toFixed(1)}s/段（可再微调）`;
+  }
+}
+
+function replaceClipWithAsr(toRole, toIdx, asrIdx) {
+  if (!planEdit?.[toRole]?.[toIdx]) return;
+  const item = asrCards[asrIdx];
+  if (!item) return;
+  const leftCard = document.querySelector(`.asr-card[data-idx="${asrIdx}"]`);
+  let text = item.text;
+  let t0 = Number(item.t0_ms || 0);
+  let t1 = Number(item.t1_ms || 0);
+  if (leftCard) {
+    const ta = leftCard.querySelector(".clip-text-edit");
+    const t0s = leftCard.querySelector(".clip-t0s");
+    const t1s = leftCard.querySelector(".clip-t1s");
+    if (ta) text = ta.value;
+    if (t0s) t0 = Math.max(0, Math.round(Number(t0s.value || 0) * 1000));
+    if (t1s) t1 = Math.max(t0 + 300, Math.round(Number(t1s.value || 0) * 1000));
+  }
+  const old = planEdit[toRole][toIdx];
+  // keep roughly same duration if possible for visual consistency
+  const oldDur = Math.max(1500, slotDurMs(old) || 4000);
+  const newDur = Math.max(1500, t1 - t0);
+  // prefer source asr window, but if wildly different, keep new asr window
+  planEdit[toRole][toIdx] = {
+    ...old,
+    clip_id: `asr_rep_${asrIdx}_${Date.now().toString(36)}`,
+    role: roleLabel(toRole),
+    text: String(text || "").trim() || old.text,
+    t0_ms: t0,
+    t1_ms: t0 + (Math.abs(newDur - oldDur) > oldDur * 0.8 ? newDur : oldDur),
+    score: Number(old.score || 20),
+    removed: false,
+  };
+  planDirty = true;
+  queueRenderTracks();
+}
+
+function swapClips(aRole, aIdx, bRole, bIdx) {
+  if (!planEdit?.[aRole]?.[aIdx] || !planEdit?.[bRole]?.[bIdx]) return;
+  if (aRole === bRole && aIdx === bIdx) return;
+  const a = planEdit[aRole][aIdx];
+  const b = planEdit[bRole][bIdx];
+  // swap content but keep section role labels
+  planEdit[aRole][aIdx] = { ...b, role: roleLabel(aRole) };
+  planEdit[bRole][bIdx] = { ...a, role: roleLabel(bRole) };
+  planDirty = true;
+  queueRenderTracks();
 }
 
 const TRACK_ORDER = ["golden", "trust", "cta"];
@@ -217,7 +306,7 @@ function renderTracks(plan) {
             <label>开始(s)<input class="clip-t0s" type="number" step="0.1" min="0" value="${a}" /></label>
             <label>结束(s)<input class="clip-t1s" type="number" step="0.1" min="0" value="${b}" /></label>
           </div>
-          <div class="meta">可改口播词与时间 · 拖拽排序 · 应用后按此反向剪视频</div>
+          <div class="meta">时长 ${((Number(s.t1_ms || 0) - Number(s.t0_ms || 0)) / 1000).toFixed(1)}s · 拖到其他卡片可替换 · 空白处可排序</div>
           <div class="clip-tools">
             <button type="button" class="clip-up" title="同轨上移">↑</button>
             <button type="button" class="clip-down" title="同轨下移">↓</button>
@@ -373,11 +462,17 @@ function ensurePlanEventsBound() {
     e.dataTransfer.dropEffect = "move";
     track.classList.add("drag-over");
     const overClip = e.target.closest(".jy-clip");
-    root.querySelectorAll(".jy-clip").forEach((c) => c.classList.remove("drag-over-left", "drag-over-right"));
+    root.querySelectorAll(".jy-clip").forEach((c) =>
+      c.classList.remove("drag-over-left", "drag-over-right", "drag-over-replace")
+    );
     if (overClip && track.contains(overClip)) {
+      // hovering body of a card => replace mode; near edges still show insert cue
       const rect = overClip.getBoundingClientRect();
-      const mid = rect.top + rect.height / 2;
-      overClip.classList.add(e.clientY < mid ? "drag-over-left" : "drag-over-right");
+      const y = e.clientY - rect.top;
+      const edge = Math.max(12, rect.height * 0.22);
+      if (y < edge) overClip.classList.add("drag-over-left");
+      else if (y > rect.height - edge) overClip.classList.add("drag-over-right");
+      else overClip.classList.add("drag-over-replace");
     }
   });
 
@@ -401,8 +496,28 @@ function ensurePlanEventsBound() {
     }
     if (!planEdit[toRole]) planEdit[toRole] = [];
 
-    let toIdx = planEdit[toRole].length;
     const overClip = e.target.closest(".jy-clip");
+    // 1) drop ON a card center => replace/swap; near edges => insert
+    if (overClip && track.contains(overClip) && overClip.dataset.role === toRole) {
+      const overIdx = Number(overClip.dataset.idx);
+      const rect = overClip.getBoundingClientRect();
+      const y = e.clientY - rect.top;
+      const edge = Math.max(12, rect.height * 0.22);
+      const nearEdge = y < edge || y > rect.height - edge;
+      if (!nearEdge) {
+        if (payload.source === "asr") {
+          replaceClipWithAsr(toRole, overIdx, Number(payload.idx));
+          return;
+        }
+        if (payload.role != null && payload.idx != null) {
+          swapClips(String(payload.role), Number(payload.idx), toRole, overIdx);
+          return;
+        }
+      }
+    }
+
+    // 2) drop on empty area / card edge => insert/reorder
+    let toIdx = planEdit[toRole].length;
     if (overClip && track.contains(overClip) && overClip.dataset.role === toRole) {
       const overIdx = Number(overClip.dataset.idx);
       const rect = overClip.getBoundingClientRect();
@@ -425,6 +540,13 @@ function ensurePlanEventsBound() {
         if (ta) text = ta.value;
         if (t0s) t0 = Math.max(0, Math.round(Number(t0s.value || 0) * 1000));
         if (t1s) t1 = Math.max(t0 + 300, Math.round(Number(t1s.value || 0) * 1000));
+      }
+      // if track already has clips, make new clip duration near average
+      const act = (planEdit[toRole] || []).filter((s) => !s.removed);
+      if (act.length) {
+        const avg = act.reduce((a, s) => a + slotDurMs(s), 0) / act.length;
+        const target = Math.max(2500, Math.min(9000, Math.round(avg)));
+        t1 = t0 + target;
       }
       const slot = {
         clip_id: `asr_${aidx}_${Date.now().toString(36)}`,
@@ -503,8 +625,10 @@ function setupPlanTools() {
   $("plan-reset")?.addEventListener("click", () => {
     if (!planOriginal) return;
     planEdit = clonePlan(planOriginal);
-    renderTracks(planEdit);
+    planDirty = true;
+    queueRenderTracks();
   });
+  $("plan-balance")?.addEventListener("click", () => balancePlanDurations());
   $("plan-apply")?.addEventListener("click", applyPlanEdit);
 }
 

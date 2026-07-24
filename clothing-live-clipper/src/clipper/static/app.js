@@ -73,12 +73,13 @@ async function loadHealth() {
     if (lr.ok) {
       const L = await lr.json();
       const n = Number(L.events || 0);
+      const top = (L.top_hook || []).slice(0, 5).map((x) => x[0]).join(" / ");
       if ($("learn-stat")) $("learn-stat").textContent = n > 0 ? `已学 ${n} 次` : "人机闭环";
       if ($("learn-hint")) {
         $("learn-hint").textContent =
           n > 0
-            ? `已学习 ${n} 次人工反剪（保留 ${L.kept_slots || 0} / 丢弃 ${L.dropped_slots || 0}）。继续改结构会更像你。`
-            : "你每次「保存口播并重剪」都会被记住，后续自动更像你的口味。";
+            ? `学习已生效：${n} 次（保留 ${L.kept_slots || 0} / 丢弃 ${L.dropped_slots || 0}）。偏好示例：${top || "—"}。请重新上传视频验证（旧任务不会自动重排）。`
+            : "学习为空。勾选「学习这次重剪」保存后才会影响下次自动切片。";
       }
     }
   } catch (_) {}

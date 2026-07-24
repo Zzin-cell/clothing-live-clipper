@@ -198,6 +198,17 @@ def merge_nearby(items: list[dict], *, max_gap_ms: int = 1200, max_span_ms: int 
     return out
 
 
+def _learned_keep_score(text: str) -> float:
+    """Optional human-learning score (0 if learning unavailable)."""
+    try:
+        # scripts run with src on path in worker
+        from clipper.learning import learned_text_score  # type: ignore
+
+        return float(learned_text_score(text, for_hook=True))
+    except Exception:
+        return 0.0
+
+
 def filter_for_duration(
     raw: list[dict[str, Any]],
     *,
@@ -205,16 +216,29 @@ def filter_for_duration(
     min_ms: int = 72_000,
     max_ms: int = 85_000,
 ) -> list[dict[str, Any]]:
-    """Keep clothing-only lines; fill toward duration without non-garment talk."""
-    labeled: list[tuple[str, dict]] = []
+    """Keep clothing-only lines; fill toward duration without non-garment talk.
+
+    Learning-aware: among candidate clothing lines, prefer those matching
+    human/bootstrap preferences so front-loaded ranking has better material.
+    """
+    labeled: list[tuple[str, dict, float]] = []
     for u in raw:
         text = (u.get("text") or "").strip()
         if not text:
             continue
-        labeled.append((classify(text), dict(u)))
+        g = classify(text)
+        learn = _learned_keep_score(text)
+        # hard drop still wins for price/size/live, but learning can demote medium
+        if g == "drop":
+            # allow rescue only for garment lines with very strong learned hook score
+            if is_garment_line(text) and learn >= 40 and not _has_any(text, PRICE + SIZE_WORDS):
+                labeled.append(("medium", dict(u), learn))
+            continue
+        labeled.append((g, dict(u), learn))
 
-    strong = [u for g, u in labeled if g == "strong"]
-    medium = [u for g, u in labeled if g == "medium"]
+    strong = [u for g, u, _ in labeled if g == "strong"]
+    medium = [u for g, u, _ in labeled if g == "medium"]
+    learn_map = {id(u): sc for g, u, sc in labeled}
 
     strong_m = merge_nearby(strong)
     medium_m = merge_nearby(medium)
@@ -222,12 +246,27 @@ def filter_for_duration(
     def total(xs: list[dict]) -> int:
         return sum(_dur(u) for u in xs)
 
-    chosen: list[dict] = list(strong_m)
-    medium_sorted = sorted(medium_m, key=_dur, reverse=True)
+    def sort_key(u: dict) -> tuple:
+        # prefer high learned score, then longer clips
+        text = str(u.get("text") or "")
+        return (_learned_keep_score(text), _dur(u))
+
+    # seed with high-learning strong lines first
+    strong_sorted = sorted(strong_m, key=sort_key, reverse=True)
+    chosen: list[dict] = []
+    for u in strong_sorted:
+        chosen.append(u)
+        if total(chosen) >= min_ms:
+            break
+
+    medium_sorted = sorted(medium_m, key=sort_key, reverse=True)
     for u in medium_sorted:
         if total(chosen) >= min_ms:
             break
         if all(u.get("t0_ms") != c.get("t0_ms") for c in chosen):
+            # skip medium with strong negative learning
+            if _learned_keep_score(str(u.get("text") or "")) <= -20:
+                continue
             chosen.append(u)
 
     if total(chosen) < min_ms:
@@ -235,21 +274,37 @@ def filter_for_duration(
             if total(chosen) >= max_ms:
                 break
             if all(u.get("t0_ms") != c.get("t0_ms") for c in chosen):
+                if _learned_keep_score(str(u.get("text") or "")) <= -30:
+                    continue
                 chosen.append(u)
 
     if total(chosen) < min_ms:
-        for u in sorted(medium + strong, key=_dur, reverse=True):
+        pool = sorted(medium + strong, key=sort_key, reverse=True)
+        for u in pool:
             if total(chosen) >= min_ms:
                 break
             if all(abs(int(u.get("t0_ms", 0)) - int(c.get("t0_ms", 0))) > 200 for c in chosen):
                 chosen.append(dict(u))
 
+    # prefer keeping high-learning order for later rank, but merge nearby for continuity
     chosen.sort(key=lambda u: int(u.get("t0_ms", 0)))
     chosen = merge_nearby(chosen, max_gap_ms=1500, max_span_ms=15000)
 
+    # if too long, drop lowest learning / shortest first
     while total(chosen) > max_ms and len(chosen) > 3:
-        chosen = chosen[:-1]
+        worst_i = min(
+            range(len(chosen)),
+            key=lambda i: (_learned_keep_score(str(chosen[i].get("text") or "")), _dur(chosen[i])),
+        )
+        # don't drop if it would empty strong content entirely
+        chosen.pop(worst_i)
 
     # final safety: drop any non-garment that slipped in
     chosen = [u for u in chosen if is_garment_line(str(u.get("text") or ""))]
+    # demote leftover negative-learned lines if alternatives exist
+    chosen = [
+        u
+        for u in chosen
+        if _learned_keep_score(str(u.get("text") or "")) > -35 or len(chosen) <= 4
+    ]
     return chosen

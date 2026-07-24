@@ -125,7 +125,7 @@ def process_job_dir(job_dir: Path) -> None:
         _write_meta(job_dir, meta)
         _set_progress(job_dir, "asr_done", 40, f"听写完成 {len(raw)} 句 · {meta['asr_seconds']}s")
 
-        _set_progress(job_dir, "filter", 45, "过滤无效/非服装内容")
+        _set_progress(job_dir, "filter", 45, "过滤无效/非服装内容（含学习偏好）")
         # source length for 1.3x → ~60s final
         sp = speed if speed > 0 else 1.0
         kept = filter_for_duration(
@@ -137,7 +137,43 @@ def process_job_dir(job_dir: Path) -> None:
         tr_path = job_dir / "transcript_for_clipper.json"
         tr_path.write_text(json.dumps(kept, ensure_ascii=False, indent=2), encoding="utf-8")
 
-        _set_progress(job_dir, "clipper", 65, "卖点排序与时间轴")
+        # attach learning diagnostics for UI/debug
+        try:
+            from clipper.learning import learned_text_score, learning_status
+
+            learn_rows = []
+            for u in kept[:30]:
+                t = str(u.get("text") or "")
+                learn_rows.append(
+                    {
+                        "text": t[:80],
+                        "learn_hook": round(learned_text_score(t, for_hook=True), 2),
+                        "learn_all": round(learned_text_score(t, for_hook=False), 2),
+                    }
+                )
+            learn_rows.sort(key=lambda x: x["learn_hook"], reverse=True)
+            (job_dir / "learning_debug.json").write_text(
+                json.dumps(
+                    {
+                        "status": learning_status(),
+                        "kept_top": learn_rows[:12],
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                ),
+                encoding="utf-8",
+            )
+            meta = _read_meta(job_dir)
+            meta["learning_events"] = (learning_status().get("events") or 0)
+            meta["learning_applied"] = True
+            _write_meta(job_dir, meta)
+        except Exception as e:
+            meta = _read_meta(job_dir)
+            meta["learning_applied"] = False
+            meta["learning_error"] = str(e)
+            _write_meta(job_dir, meta)
+
+        _set_progress(job_dir, "clipper", 65, "卖点排序与时间轴（学习加权）")
         settings = Settings.from_env()
         # rebuild settings with target + speed
         settings = Settings(
@@ -155,6 +191,8 @@ def process_job_dir(job_dir: Path) -> None:
             demote_outfit_change_from_golden=settings.demote_outfit_change_from_golden,
             exclude_price_from_cut=settings.exclude_price_from_cut,
             clothing_only=settings.clothing_only,
+            de_live_room_feel=getattr(settings, "de_live_room_feel", True),
+            unique_features_first=getattr(settings, "unique_features_first", True),
             llm_api_key=settings.llm_api_key,
             llm_base_url=settings.llm_base_url,
             llm_model=settings.llm_model,

@@ -87,35 +87,109 @@ _FEATURE_SEED = (
     "蕾丝", "破洞", "拼接", "凉感", "不起球", "可机洗", "抗皱", "显白", "独家",
     "专利", "限定", "百搭", "通勤", "牛仔", "裙子", "上衣", "外套", "无袖",
     "遮肚子", "遮胯", "显腿长", "不挑人", "好打理", "高级感", "凉快", "透气",
-    "不闷", "不起球", "不缩水", "不掉色",
+    "不闷", "不缩水", "不掉色", "遮盖", "贴肤", "冰冰的", "罗马布", "针织",
 )
 
 _GENERIC_SKIP = {
     "这个", "那个", "一个", "我们", "你们", "什么", "然后", "因为", "所以", "但是",
     "宝贝", "姐妹", "其实", "而且", "非常", "可以", "还是", "就是", "一下", "一些",
     "不会", "感觉", "更加", "如果", "真的", "那种", "这样", "那样", "有点", "比较",
-    "的话", "都是", "不是", "没有", "给你", "这种",
+    "的话", "都是", "不是", "没有", "给你", "这种", "大家", "起来", "是的", "对啊",
 }
+
+# clause splitters: treat each short spoken clause as a learning unit
+_CLAUSE_SPLIT = re.compile(r"[，,。！？!?；;、\n]+")
+
+
+def _norm_clause(s: str) -> str:
+    t = re.sub(r"\s+", "", (s or "").strip().lower())
+    t = re.sub(r"[“”\"'‘’\[\]\(\)（）【】]", "", t)
+    return t
+
+
+def split_clauses(text: str) -> list[str]:
+    """
+    Split ASR/plan text into small spoken clauses (小句).
+    Example:
+      "面料很软，显瘦还不透，夏天也好穿"
+      -> ["面料很软", "显瘦还不透", "夏天也好穿"]
+    """
+    raw = (text or "").strip()
+    if not raw:
+        return []
+    parts = [p.strip() for p in _CLAUSE_SPLIT.split(raw) if p and p.strip()]
+    if not parts:
+        parts = [raw]
+
+    out: list[str] = []
+    for p in parts:
+        n = _norm_clause(p)
+        if not n:
+            continue
+        # drop pure filler mono loops
+        if re.fullmatch(r"(对|嗯|啊|哦|呃|额|哈|呀)+", n):
+            continue
+        if re.fullmatch(r"[xy]+", n):
+            continue
+        # keep meaningful clause length
+        if len(n) < 3:
+            continue
+        if len(n) > 36:
+            # further hard-split long clause by secondary pauses if any remain
+            sub = [x.strip() for x in re.split(r"[/|·•]+", n) if x.strip()]
+            if len(sub) > 1:
+                for s in sub:
+                    sn = _norm_clause(s)
+                    if 3 <= len(sn) <= 36:
+                        out.append(sn)
+                continue
+            # window long text into overlapping chunks (~16 chars)
+            win = 16
+            for i in range(0, len(n), win - 4):
+                chunk = n[i : i + win]
+                if len(chunk) >= 3:
+                    out.append(chunk)
+                if i + win >= len(n):
+                    break
+            continue
+        out.append(n)
+
+    # uniq preserve order
+    seen = set()
+    uniq = []
+    for c in out:
+        if c in seen:
+            continue
+        seen.add(c)
+        uniq.append(c)
+    return uniq[:24]
 
 
 def _tokens(text: str) -> list[str]:
     """
-    Phrase/word-level tokens only (NO single-char learning — too noisy).
-    - known feature phrases
-    - 2~6 char CJK chunks / alnum
-    - bigrams in feature context
+    Learning units = 小句 (clauses) first, plus feature phrases.
+    No single-char tokens.
     """
-    t = re.sub(r"\s+", "", (text or "").strip().lower())
+    t = _norm_clause(text)
     if not t:
         return []
+
     out: list[str] = []
 
-    # 1) known feature phrases first (highest value)
+    # 1) small clauses (primary)
+    for c in split_clauses(text):
+        out.append(c)
+        # also keep clause head/tail short anchors (still >=3)
+        if len(c) >= 8:
+            out.append(c[:6])
+            out.append(c[-6:])
+
+    # 2) known feature phrases
     for w in _FEATURE_SEED:
         if w in t:
             out.append(w)
 
-    # 2) alnum / multi-char CJK chunks (min length 2 — no single char)
+    # 3) light multi-char keywords (2~6), but skip generics
     for m in re.finditer(r"[a-z0-9]{2,}|[\u4e00-\u9fff]{2,6}", t):
         w = m.group(0)
         if w in _STOP or w in _GENERIC_SKIP:
@@ -124,19 +198,6 @@ def _tokens(text: str) -> list[str]:
             continue
         out.append(w)
 
-    # 3) bigrams only when line has clothing feature context
-    cjk = re.sub(r"[^\u4e00-\u9fff]", "", t)
-    has_feat = any(w in t for w in _FEATURE_SEED)
-    if has_feat:
-        for i in range(len(cjk) - 1):
-            bg = cjk[i : i + 2]
-            if bg in _GENERIC_SKIP:
-                continue
-            if bg[0] in _STOP or bg[1] in _STOP:
-                continue
-            out.append(bg)
-
-    # uniq preserve order
     seen = set()
     uniq: list[str] = []
     for w in out:
@@ -144,7 +205,9 @@ def _tokens(text: str) -> list[str]:
             continue
         seen.add(w)
         uniq.append(w)
-    return uniq[:48]
+    # prefer longer clause keys first for scoring
+    uniq.sort(key=lambda x: (-len(x), x))
+    return uniq[:56]
 
 
 def _bump(bucket: dict[str, float], key: str, delta: float, lo: float = -50.0, hi: float = 80.0) -> None:
@@ -200,35 +263,44 @@ def record_plan_feedback(
     drop_penalty: dict[str, float] = dict(prefs.get("drop_penalty") or {})
     hook_boost: dict[str, float] = dict(prefs.get("hook_boost") or {})
 
-    # kept / added = positive
+    # kept / added = positive (learn by 小句 first)
     for k in kept_keys | added_keys:
         s = after_map[k]
+        clauses = split_clauses(s.get("text") or "")
         toks = _tokens(s.get("text") or "")
+        is_hook = (s.get("_section") == "hook") or (s.get("role") in {"hook", "golden"})
+        for c in clauses:
+            pos = 1.8 if k in added_keys else 1.2
+            _bump(keep_boost, c, pos)
+            if is_hook:
+                _bump(hook_boost, c, 2.4 if k in added_keys else 1.6)
         for t in toks:
-            if len(t) < 2:
+            if len(t) < 2 or t in clauses:
                 continue
-            pos = 1.2 if k in added_keys else 0.8
-            _bump(keep_boost, t, pos)
-            # if human put into golden, strong hook preference
-            if (s.get("_section") == "hook") or (s.get("role") in {"hook", "golden"}):
-                _bump(hook_boost, t, 1.8 if k in added_keys else 1.2)
+            # weaker keyword-level residual
+            _bump(keep_boost, t, 0.35)
+            if is_hook and t in _FEATURE_SEED:
+                _bump(hook_boost, t, 0.6)
 
-    # dropped from baseline = negative
+    # dropped from baseline = negative (by 小句)
     for k in dropped_keys:
         s = before_map[k]
-        for t in _tokens(s.get("text") or ""):
-            if len(t) < 2:
+        clauses = split_clauses(s.get("text") or "")
+        is_hook = (s.get("_section") == "hook") or (s.get("role") in {"hook", "golden"})
+        for c in clauses:
+            # don't hard-penalize pure feature clauses
+            if any(f in c for f in _FEATURE_SEED) and len(c) <= 8:
                 continue
-            # NEVER punish core feature phrases just because they appeared in a dropped long line
-            if t in _FEATURE_SEED:
+            _bump(drop_penalty, c, 1.8)
+            if is_hook:
+                _bump(hook_boost, c, -1.4)
+        for t in _tokens(s.get("text") or ""):
+            if len(t) < 2 or t in clauses or t in _FEATURE_SEED:
                 continue
             if t in _GENERIC_SKIP:
-                _bump(drop_penalty, t, 0.6)
+                _bump(drop_penalty, t, 0.4)
                 continue
-            _bump(drop_penalty, t, 1.5)
-            # if it was golden and user removed, reduce hook preference
-            if (s.get("_section") == "hook") or (s.get("role") in {"hook", "golden"}):
-                _bump(hook_boost, t, -1.2)
+            _bump(drop_penalty, t, 0.7)
 
     stats = dict(prefs.get("stats") or {})
     stats["events"] = int(stats.get("events") or 0) + 1
@@ -298,7 +370,7 @@ def record_plan_feedback(
 def learned_text_score(text: str, *, for_hook: bool = False) -> float:
     """
     Convert learned preferences into a score delta for a transcript line.
-    Supports phrase + bigram + single-char hits.
+    Primary match unit = 小句 (clause). Longer exact clause hits weigh more.
     """
     prefs = load_preferences()
     keep_boost = prefs.get("keep_boost") or {}
@@ -307,25 +379,55 @@ def learned_text_score(text: str, *, for_hook: bool = False) -> float:
     toks = _tokens(text)
     if not toks:
         return 0.0
+
+    # exact clause-level match first (best precision)
+    clauses = split_clauses(text)
     score = 0.0
     hit = 0
+    for c in clauses:
+        kb = float(keep_boost.get(c, 0.0))
+        dp = float(drop_penalty.get(c, 0.0))
+        hb = float(hook_boost.get(c, 0.0))
+        if abs(kb) + abs(dp) + abs(hb) < 1e-6:
+            # soft match: clause contains a learned clause / reverse
+            for k, v in list(keep_boost.items())[:200]:
+                if len(k) >= 4 and (k in c or c in k):
+                    kb += 0.45 * float(v)
+            for k, v in list(drop_penalty.items())[:200]:
+                if len(k) >= 4 and (k in c or c in k):
+                    dp += 0.45 * float(v)
+            for k, v in list(hook_boost.items())[:200]:
+                if len(k) >= 4 and (k in c or c in k):
+                    hb += 0.45 * float(v)
+        if abs(kb) + abs(dp) + abs(hb) < 1e-6:
+            continue
+        hit += 1
+        # clause length weight: full small-sentence matches dominate
+        lw = min(2.2, max(1.0, len(c) / 8.0))
+        score += 2.0 * kb * lw
+        score -= 2.4 * dp * lw
+        if for_hook:
+            score += 3.0 * hb * lw
+
+    # secondary feature/keyword hits (weaker than clause)
     for t in toks:
+        if t in clauses or len(t) < 2:
+            continue
         kb = float(keep_boost.get(t, 0.0))
         dp = float(drop_penalty.get(t, 0.0))
         hb = float(hook_boost.get(t, 0.0))
         if abs(kb) + abs(dp) + abs(hb) < 1e-6:
             continue
         hit += 1
-        if len(t) < 2:
-            continue
-        score += 1.6 * kb
-        score -= 2.2 * dp
+        w = 0.55 if len(t) <= 4 else 0.8
+        score += 1.2 * kb * w
+        score -= 1.5 * dp * w
         if for_hook:
-            score += 2.6 * hb
+            score += 1.8 * hb * w
+
     if hit == 0:
         return 0.0
-    # milder normalization so rare strong tokens still matter
-    score = score / max(1.5, hit ** 0.32)
+    score = score / max(1.3, hit ** 0.28)
     return max(-80.0, min(120.0, score))
 
 

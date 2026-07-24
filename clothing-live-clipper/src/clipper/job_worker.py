@@ -476,7 +476,7 @@ def render_from_plan_only(job_dir: Path) -> None:
             work_dir=parts_dir,
             smooth=True,
             crossfade_s=0.0,
-            edge_fade_s=0.03,
+            edge_fade_s=0.10,
             playback_speed=speed if speed > 0 else 1.4,
         )
         has_final = final_path.exists()

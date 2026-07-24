@@ -143,21 +143,22 @@ def cut_segment(
     ss = max(0.0, t0_ms / 1000.0)
     dur = max(0.12, (t1_ms - t0_ms) / 1000.0)
 
-    # Micro-fade only (not a visible dissolve)
-    fade = min(max(0.02, edge_fade_s), max(0.02, dur / 8.0))
+    # Soft natural edge (avoid abrupt stop). Still short enough not to look like a transition.
+    # Prefer ~80–140ms; clamp by clip duration.
+    fade = min(max(0.06, edge_fade_s), max(0.05, min(0.16, dur / 5.5)))
     fade_out_st = max(0.0, dur - fade)
 
     w = (target_w or 1080) - ((target_w or 1080) % 2)
     h = (target_h or 1920) - ((target_h or 1920) % 2)
 
-    # Fast path: avoid scale/pad when possible; micro audio fade only
-    # Video filter kept light for speed
+    # Light video fade + audio ease-in/out so modules don't hard-stop
     vf = (
         f"scale={w}:{h}:force_original_aspect_ratio=decrease,"
         f"pad={w}:{h}:(ow-iw)/2:(oh-ih)/2:black,"
-        f"fps={fps}"
+        f"fps={fps},"
+        f"fade=t=in:st=0:d={fade:.3f},"
+        f"fade=t=out:st={fade_out_st:.3f}:d={fade:.3f}"
     )
-    # skip video fade for speed (was cosmetic); keep tiny audio de-click
     af = (
         f"afade=t=in:st=0:d={fade:.3f},"
         f"afade=t=out:st={fade_out_st:.3f}:d={fade:.3f},"
@@ -368,16 +369,16 @@ def render_plan(
     *,
     smooth: bool = True,
     crossfade_s: float = 0.0,
-    edge_fade_s: float = 0.03,
+    edge_fade_s: float = 0.10,
     playback_speed: float = 1.0,
 ) -> Path:
     """
-    Invisible-edit render:
-    - direct seamless joins (no xfade dissolve)
-    - micro edge fades only to avoid audio clicks
-    - optional global playback speed (default 1.3) after join
+    Natural-module render:
+    - soft edge ease (short) so clips don't hard-stop
+    - tiny handles around segment bounds
+    - optional global playback speed after join
     """
-    del crossfade_s  # never visual dissolve
+    del crossfade_s  # no long dissolve
     video = Path(video)
     out_mp4 = Path(out_mp4)
     if work_dir is None:
@@ -392,14 +393,15 @@ def render_plan(
     work_dir.mkdir(parents=True, exist_ok=True)
 
     tw, th = _probe_stream_size(video)
-    # prepare segment specs
+    # prepare segment specs with slightly larger handles for natural ends
     specs: list[tuple[int, int, int, Path]] = []
     for i, (t0, t1) in enumerate(segments):
-        if t1 - t0 < 200:
-            t1 = t0 + 200
+        if t1 - t0 < 280:
+            t1 = t0 + 280
         if smooth:
-            t0 = max(0, t0 - 30)
-            t1 = t1 + 30
+            # more breathing room at boundaries (was 30ms → 120ms)
+            t0 = max(0, t0 - 120)
+            t1 = t1 + 140
         part = work_dir / f"part_{i:03d}.mp4"
         specs.append((i, t0, t1, part))
 
@@ -411,7 +413,7 @@ def render_plan(
             t1,
             part,
             reencode=True,
-            edge_fade_s=edge_fade_s if smooth else 0.0,
+            edge_fade_s=edge_fade_s if smooth else 0.04,
             target_w=tw,
             target_h=th,
             fps=30,

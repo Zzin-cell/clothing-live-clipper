@@ -201,24 +201,38 @@ def _dur(u: dict) -> int:
 
 
 def merge_nearby(items: list[dict], *, max_gap_ms: int = 1200, max_span_ms: int = 12000) -> list[dict]:
+    """
+    Merge nearby crumbs into natural modules.
+    Prefer merging when previous text looks unfinished (no sentence end),
+    avoid creating one mega-block.
+    """
     if not items:
         return []
     items = sorted(items, key=lambda u: int(u.get("t0_ms", 0)))
     out: list[dict] = []
     cur = dict(items[0])
-    texts = [cur.get("text", "")]
+    texts = [str(cur.get("text") or "")]
     for u in items[1:]:
         gap = int(u.get("t0_ms", 0)) - int(cur.get("t1_ms", 0))
         span = int(u.get("t1_ms", 0)) - int(cur.get("t0_ms", 0))
-        if gap <= max_gap_ms and span <= max_span_ms:
+        prev = (texts[-1] if texts else "").strip()
+        unfinished = bool(prev) and not prev.endswith(("。", "！", "？", "!", "?", "…"))
+        # merge short crumbs / unfinished speech more eagerly; completed sentences less so
+        gap_lim = max_gap_ms + (350 if unfinished else 0)
+        if gap <= gap_lim and span <= max_span_ms and (unfinished or _dur(cur) < 3200 or _dur(u) < 2800):
             cur["t1_ms"] = int(u.get("t1_ms", cur["t1_ms"]))
             texts.append(u.get("text") or "")
         else:
             cur["text"] = "，".join(t for t in texts if t)
+            # natural tail pad for completed clauses
+            if str(cur.get("text") or "").endswith(("。", "！", "？", "!", "?", "…")):
+                cur["t1_ms"] = int(cur.get("t1_ms") or 0) + 160
             out.append(cur)
             cur = dict(u)
-            texts = [cur.get("text", "")]
+            texts = [str(cur.get("text") or "")]
     cur["text"] = "，".join(t for t in texts if t)
+    if str(cur.get("text") or "").endswith(("。", "！", "？", "!", "?", "…")):
+        cur["t1_ms"] = int(cur.get("t1_ms") or 0) + 160
     out.append(cur)
     for i, u in enumerate(out):
         u["utt_id"] = f"m{i:04d}"

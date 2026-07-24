@@ -472,12 +472,45 @@ def _primary_stage(c: Clip) -> int:
     return 3
 
 
+def _naturalize_bounds(c: Clip) -> tuple[int, int]:
+    """
+    Soften hard ASR cut points so modules don't end mid-breath.
+    - Prefer slightly longer tails for natural sentence close
+    - Avoid ultra-short fragments
+    """
+    t0 = max(0, int(c.t0_ms or 0))
+    t1 = max(t0 + 280, int(c.t1_ms or 0))
+    dur = t1 - t0
+    text = (c.text or "").strip()
+
+    # open a little earlier if clip is not already long
+    if dur < 12000:
+        t0 = max(0, t0 - 80)
+    # prefer closing after a short breath, especially if text ends with punctuation
+    if text.endswith(("。", "！", "？", "!", "?", "…")):
+        t1 = t1 + 220
+    elif text.endswith(("，", ",", "、")):
+        # incomplete clause: give a bit less tail, still not hard-stop
+        t1 = t1 + 120
+    else:
+        t1 = t1 + 180
+
+    # keep reasonable module lengths
+    if t1 - t0 < 900:
+        t1 = t0 + 900
+    if t1 - t0 > 18000:
+        # too long modules feel abrupt when forced to end later; leave to splitter
+        pass
+    return t0, t1
+
+
 def _to_slot(c: Clip, role: str) -> PlanSlot:
+    t0, t1 = _naturalize_bounds(c)
     return PlanSlot(
         clip_id=c.clip_id,
         role=role,
-        t0_ms=c.t0_ms,
-        t1_ms=c.t1_ms,
+        t0_ms=t0,
+        t1_ms=t1,
         text=c.text,
         score=c.score,
     )
@@ -840,17 +873,27 @@ def build_timeline_plan(
         )
         selected.pop(drop_i)
 
-    story = [
-        PlanSlot(
-            clip_id=c.clip_id,
-            role="story",
-            t0_ms=c.t0_ms,
-            t1_ms=c.t1_ms,
-            text=c.text,
-            score=c.score,
-        )
-        for c in selected
-    ]
+    story = [_to_slot(c, "story") for c in selected]
+    # merge adjacent tiny modules that are almost continuous (avoid choppy hard stops)
+    merged: list[PlanSlot] = []
+    for s in story:
+        if not merged:
+            merged.append(s)
+            continue
+        prev = merged[-1]
+        gap = s.t0_ms - prev.t1_ms
+        prev_dur = prev.t1_ms - prev.t0_ms
+        cur_dur = s.t1_ms - s.t0_ms
+        # merge only very close + short fragments into one natural module
+        if 0 <= gap <= 450 and (prev_dur < 2600 or cur_dur < 2600) and (prev_dur + cur_dur + gap) <= 9000:
+            prev.t1_ms = max(prev.t1_ms, s.t1_ms)
+            if s.text and s.text not in (prev.text or ""):
+                joiner = "" if (prev.text or "").endswith(("，", "。", "！", "？", ",", ".")) else "，"
+                prev.text = f"{prev.text}{joiner}{s.text}"
+            prev.score = max(prev.score, s.score)
+            continue
+        merged.append(s)
+    story = merged
 
     total = sum(s.t1_ms - s.t0_ms for s in story)
     if total < min_plan and story:

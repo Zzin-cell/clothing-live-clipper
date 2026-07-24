@@ -95,7 +95,7 @@ def run_pipeline(
             meta["render_error"] = "empty plan"
         else:
             segs = [(s.t0_ms, s.t1_ms) for s in plan.all_slots()]
-            speed = getattr(settings, "playback_speed", 1.3) or 1.0
+            speed = getattr(settings, "playback_speed", 1.4) or 1.0
             output_mp4 = str(
                 render_plan(
                     video,
@@ -103,8 +103,8 @@ def run_pipeline(
                     out_dir / "final.mp4",
                     work_dir=out_dir / "_parts",
                     smooth=True,
-                    crossfade_s=0.0,  # invisible hard join
-                    edge_fade_s=0.03,  # micro de-click only
+                    crossfade_s=0.0,
+                    edge_fade_s=0.10,  # soft natural module edges
                     playback_speed=float(speed),
                 )
             )

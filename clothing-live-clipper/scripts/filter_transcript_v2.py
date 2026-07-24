@@ -286,25 +286,74 @@ def filter_for_duration(
             if all(abs(int(u.get("t0_ms", 0)) - int(c.get("t0_ms", 0))) > 200 for c in chosen):
                 chosen.append(dict(u))
 
-    # prefer keeping high-learning order for later rank, but merge nearby for continuity
+    # DO NOT glue many lines into one mega-clip (that collapses UI to 1 segment).
+    # Only merge very close crumbs for ASR continuity.
     chosen.sort(key=lambda u: int(u.get("t0_ms", 0)))
-    chosen = merge_nearby(chosen, max_gap_ms=1500, max_span_ms=15000)
+    chosen = merge_nearby(chosen, max_gap_ms=450, max_span_ms=7000)
+
+    # split overlong merged lines so ranking can place multi sections
+    split_out: list[dict] = []
+    for u in chosen:
+        text = str(u.get("text") or "")
+        d = _dur(u)
+        if d <= 10000 or "，" not in text:
+            split_out.append(u)
+            continue
+        # split by Chinese comma into ~equal time slices
+        parts = [p.strip() for p in re.split(r"[，,。！？!?]", text) if p.strip()]
+        if len(parts) <= 1:
+            split_out.append(u)
+            continue
+        t0 = int(u.get("t0_ms") or 0)
+        t1 = int(u.get("t1_ms") or (t0 + d))
+        step = max(1200, d // len(parts))
+        cur = t0
+        for i, p in enumerate(parts):
+            nxt = t1 if i == len(parts) - 1 else min(t1, cur + step)
+            if nxt <= cur:
+                nxt = cur + 800
+            split_out.append(
+                {
+                    "utt_id": f"{u.get('utt_id', 'm')}_s{i}",
+                    "text": p,
+                    "t0_ms": cur,
+                    "t1_ms": nxt,
+                }
+            )
+            cur = nxt
+    chosen = split_out
 
     # if too long, drop lowest learning / shortest first
-    while total(chosen) > max_ms and len(chosen) > 3:
+    while total(chosen) > max_ms and len(chosen) > 4:
         worst_i = min(
             range(len(chosen)),
             key=lambda i: (_learned_keep_score(str(chosen[i].get("text") or "")), _dur(chosen[i])),
         )
-        # don't drop if it would empty strong content entirely
         chosen.pop(worst_i)
 
     # final safety: drop any non-garment that slipped in
     chosen = [u for u in chosen if is_garment_line(str(u.get("text") or ""))]
+    # keep enough segments for structure (golden/trust/cta)
+    if len(chosen) < 3:
+        # rescue more medium lines from labeled even if duration already ok
+        extra = sorted(medium + strong, key=lambda u: (_learned_keep_score(str(u.get("text") or "")), _dur(u)), reverse=True)
+        for u in extra:
+            if len(chosen) >= 6:
+                break
+            if any(abs(int(u.get("t0_ms", 0)) - int(c.get("t0_ms", 0))) <= 300 for c in chosen):
+                continue
+            if not is_garment_line(str(u.get("text") or "")):
+                continue
+            if _learned_keep_score(str(u.get("text") or "")) <= -40:
+                continue
+            chosen.append(dict(u))
+        chosen.sort(key=lambda u: int(u.get("t0_ms", 0)))
+
     # demote leftover negative-learned lines if alternatives exist
-    chosen = [
-        u
-        for u in chosen
-        if _learned_keep_score(str(u.get("text") or "")) > -35 or len(chosen) <= 4
-    ]
+    if len(chosen) > 4:
+        chosen = [
+            u
+            for u in chosen
+            if _learned_keep_score(str(u.get("text") or "")) > -40
+        ] or chosen
     return chosen

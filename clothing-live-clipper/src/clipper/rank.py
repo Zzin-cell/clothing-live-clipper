@@ -695,28 +695,62 @@ def build_timeline_plan(
             break
         if c.clip_id in used:
             continue
-        if _hook_strength(c) < 20 and golden:
-            # only pad with weaker features if golden still short
-            if seed_used >= int(seed_budget * 0.55):
+        # cap single mega-clip from dominating whole golden
+        take = c
+        if c.duration_ms > int(golden_ms * 0.72) and len(feature_pool) > 1:
+            # still allow, but leave room for more clips if possible
+            pass
+        if _hook_strength(c) < 8 and golden:
+            if seed_used >= int(seed_budget * 0.45):
                 break
+        # soft-split overlong clip texts into multiple slots for structure
+        if c.duration_ms >= 14000 and ("，" in (c.text or "") or "," in (c.text or "")):
+            parts = [p.strip() for p in re.split(r"[，,。！？!?]", c.text or "") if p.strip()]
+            if len(parts) >= 2:
+                step = max(1800, c.duration_ms // min(4, len(parts)))
+                cur = c.t0_ms
+                made = 0
+                for i, ptxt in enumerate(parts[:4]):
+                    if seed_used >= seed_budget or made >= 3:
+                        break
+                    nxt = c.t1_ms if i == min(3, len(parts) - 1) else min(c.t1_ms, cur + step)
+                    if nxt - cur < 1200:
+                        break
+                    golden.append(
+                        PlanSlot(
+                            clip_id=f"{c.clip_id}_g{i}",
+                            role="hook",
+                            t0_ms=cur,
+                            t1_ms=nxt,
+                            text=ptxt,
+                            score=c.score,
+                        )
+                    )
+                    seed_used += nxt - cur
+                    made += 1
+                    cur = nxt
+                used.add(c.clip_id)
+                if len(golden) >= 6:
+                    break
+                continue
         golden.append(_to_slot(c, "hook"))
         used.add(c.clip_id)
-        seed_used += c.duration_ms
+        seed_used += min(c.duration_ms, seed_budget - seed_used + 1000)
         if len(golden) >= 6:
             break
 
     # if still short, only allow more FIT/FABRIC/SELLING — never outfit/change
     remain_g = max(0, golden_ms - sum(s.t1_ms - s.t0_ms for s in golden))
-    if remain_g > 400:
+    if remain_g > 400 or len(golden) < 2:
         more_pool = [
             c
             for c in scored
             if (not demote_outfit or not _is_outfit_or_change(c))
-            and (not features_only or _is_true_feature(c))
+            and (not features_only or _is_true_feature(c) or c.score > 0)
         ]
         more = _pick_logical(
             more_pool,
-            remain_g,
+            max(remain_g, 6000),
             used,
             role="hook",
             prefer_types={ClaimType.SELLING_POINT, ClaimType.FIT, ClaimType.FABRIC},
@@ -798,9 +832,11 @@ def build_timeline_plan(
 
     # --- Trust: expand fabric → detail → outfit; stronger time chain ---
     # Trust body: outfit / change-clothes / try-on go HERE (after features)
+    # Ensure multi-section structure even when material is sparse.
+    trust_budget = max(trust_ms, 12000 if len(scored) >= 3 else trust_ms)
     trust = _pick_logical(
         scored,
-        trust_ms,
+        trust_budget,
         used,
         role="trust",
         prefer_types={
@@ -818,6 +854,20 @@ def build_timeline_plan(
         feature_first=False,
         time_chain=True,
     )
+    # fallback: if still empty, take any unused non-price clips
+    if not trust:
+        leftovers = [
+            c
+            for c in scored
+            if c.clip_id not in used
+            and c.score > 0
+            and ClaimType.PRICE not in c.claim_types
+            and not any(p in (c.text or "") for p in _PRICE_TEXT)
+        ]
+        leftovers = sorted(leftovers, key=lambda c: c.score, reverse=True)
+        for c in leftovers[:4]:
+            trust.append(_to_slot(c, "trust"))
+            used.add(c.clip_id)
     trust = _reorder_section_logical(trust, by_id, "trust")
     # push pure outfit/change toward end of trust
     trust = sorted(

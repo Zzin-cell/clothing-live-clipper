@@ -63,8 +63,29 @@ CORE_WORDS = (
 
 
 def extract_wav(video: Path, wav: Path) -> None:
+    """
+    Extract mono 16k wav with optional denoise + loudness normalize for better ASR.
+    Env:
+      CLIPPER_ASR_DENOISE=1/0   (default 1)
+    """
     wav.parent.mkdir(parents=True, exist_ok=True)
-    # -vn + mono 16k is enough for whisper; threads help demux
+    denoise = (os.environ.get("CLIPPER_ASR_DENOISE") or "1").strip().lower() not in {
+        "0",
+        "false",
+        "off",
+        "no",
+    }
+    # highpass/lowpass + light denoise + loudnorm improves Chinese live ASR a lot
+    if denoise:
+        af = (
+            "highpass=f=80,"
+            "lowpass=f=8000,"
+            "afftdn=nf=-25,"
+            "loudnorm=I=-16:TP=-1.5:LRA=11,"
+            "aresample=16000"
+        )
+    else:
+        af = "aresample=16000"
     cmd = [
         "ffmpeg",
         "-y",
@@ -77,13 +98,39 @@ def extract_wav(video: Path, wav: Path) -> None:
         "1",
         "-ar",
         "16000",
+        "-af",
+        af,
         "-c:a",
         "pcm_s16le",
         str(wav),
     ]
     p = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace")
     if p.returncode != 0 or not wav.exists() or wav.stat().st_size < 100:
-        raise RuntimeError(f"ffmpeg extract failed: {(p.stderr or '')[-800:]}")
+        # fallback: plain extract without filters
+        cmd2 = [
+            "ffmpeg",
+            "-y",
+            "-threads",
+            "2",
+            "-i",
+            str(video),
+            "-vn",
+            "-ac",
+            "1",
+            "-ar",
+            "16000",
+            "-c:a",
+            "pcm_s16le",
+            str(wav),
+        ]
+        p2 = subprocess.run(cmd2, capture_output=True, text=True, encoding="utf-8", errors="replace")
+        if p2.returncode != 0 or not wav.exists() or wav.stat().st_size < 100:
+            raise RuntimeError(
+                f"ffmpeg extract failed: {(p.stderr or p2.stderr or '')[-800:]}"
+            )
+        print("[asr] denoise extract failed, used plain wav", flush=True)
+    else:
+        print(f"[asr] wav ready denoise={int(denoise)} path={wav}", flush=True)
 
 
 _WHISPER_MODEL = None
@@ -140,11 +187,11 @@ def _cuda_available() -> bool:
 
 def resolve_local_model() -> str:
     """
-    Prefer better models when GPU is available.
+    Prefer higher-accuracy models.
     Order:
       env CLIPPER_LOCAL_WHISPER_MODEL
-      GPU: small → base → tiny
-      CPU fast: tiny → base → small
+      GPU/high: medium → small → base → tiny
+      CPU fast: tiny → base → small → medium
     """
     env = (os.environ.get("CLIPPER_LOCAL_WHISPER_MODEL") or "").strip()
     known = {
@@ -165,33 +212,32 @@ def resolve_local_model() -> str:
         return env
 
     models_root = Path(r"C:\Users\MR\AppData\grok\models")
-    quality = (os.environ.get("CLIPPER_ASR_QUALITY") or "").strip().lower()
+    quality = (os.environ.get("CLIPPER_ASR_QUALITY") or "high").strip().lower()
     use_gpu = _cuda_available()
+    pointer = Path(__file__).resolve().parent / "local_whisper_model_path.txt"
 
-    # GPU: prefer accuracy (small) because GPU makes it fast enough
-    if use_gpu or quality in {"high", "hq", "quality", "accurate", "gpu"}:
-        for name in ("whisper-small", "whisper-base", "whisper-tiny"):
+    # GPU / high quality: medium first
+    if use_gpu or quality in {"high", "hq", "quality", "accurate", "gpu", "medium"}:
+        for name in ("whisper-medium", "whisper-small", "whisper-base", "whisper-tiny"):
             d = models_root / name
             if (d / "model.bin").exists():
                 return str(d)
-        pointer = Path(__file__).resolve().parent / "local_whisper_model_path.txt"
         if pointer.exists():
             p = pointer.read_text(encoding="utf-8").strip()
             if p and Path(p).exists() and (Path(p) / "model.bin").exists():
                 return p
-        return (os.environ.get("CLIPPER_WHISPER_HUB_MODEL") or "small").strip() or "small"
+        return (os.environ.get("CLIPPER_WHISPER_HUB_MODEL") or "medium").strip() or "medium"
 
     # CPU: prefer speed
-    for name in ("whisper-tiny", "whisper-base", "whisper-small"):
+    for name in ("whisper-tiny", "whisper-base", "whisper-small", "whisper-medium"):
         d = models_root / name
         if (d / "model.bin").exists():
             return str(d)
-    pointer = Path(__file__).resolve().parent / "local_whisper_model_path.txt"
     if pointer.exists():
         p = pointer.read_text(encoding="utf-8").strip()
         if p and Path(p).exists() and (Path(p) / "model.bin").exists():
             return p
-    return "tiny"
+    return "small"
 
 
 def _get_whisper_model(model_size: str):
@@ -253,9 +299,15 @@ def asr_local(wav: Path) -> list[dict]:
     model_size = resolve_local_model()
     model = _get_whisper_model(model_size)
 
-    # GPU: can afford higher accuracy; CPU: greedy for speed
+    # GPU medium: beam=5 for accuracy; CPU: greedy for speed
     use_cuda = _cuda_available()
-    default_beam = "3" if use_cuda else "1"
+    model_l = str(model_size).lower()
+    if use_cuda and ("medium" in model_l or "large" in model_l):
+        default_beam = "5"
+    elif use_cuda:
+        default_beam = "5"
+    else:
+        default_beam = "1"
     beam = int(os.environ.get("CLIPPER_ASR_BEAM_SIZE") or default_beam)
     best_of = int(os.environ.get("CLIPPER_ASR_BEST_OF") or default_beam)
 

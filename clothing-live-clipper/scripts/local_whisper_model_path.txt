@@ -1,1 +1,1 @@
-C:\Users\MR\AppData\grok\models\whisper-small
+C:\Users\MR\AppData\grok\models\whisper-medium

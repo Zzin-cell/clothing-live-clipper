@@ -95,18 +95,22 @@ function clonePlan(plan) {
     score: Number(s.score || 0),
     removed: !!s.removed,
   });
+  // flatten legacy 3-section plans into one logical sequence
+  const flat = [
+    ...(plan.golden || []).map((s) => copySlot(s, "story")),
+    ...(plan.trust || []).map((s) => copySlot(s, "story")),
+    ...(plan.cta || []).map((s) => copySlot(s, "story")),
+  ];
   return {
-    golden: (plan.golden || []).map((s) => copySlot(s, "hook")),
-    trust: (plan.trust || []).map((s) => copySlot(s, "trust")),
-    cta: (plan.cta || []).map((s) => copySlot(s, "cta")),
+    golden: flat,
+    trust: [],
+    cta: [],
   };
 }
 
 function activeCount(plan) {
   if (!plan) return 0;
-  return ["golden", "trust", "cta"]
-    .map((k) => (plan[k] || []).filter((s) => !s.removed).length)
-    .reduce((a, b) => a + b, 0);
+  return (plan.golden || []).filter((s) => !s.removed).length;
 }
 
 function setPlanToolsEnabled(on) {
@@ -125,9 +129,7 @@ function updatePlanHint() {
     if (el) el.textContent = "";
     return;
   }
-  const slots = ["golden", "trust", "cta"].flatMap((k) =>
-    (planEdit[k] || []).filter((s) => !s.removed)
-  );
+  const slots = (planEdit.golden || []).filter((s) => !s.removed);
   const n = slots.length;
   const durs = slots.map(slotDurMs).filter((d) => d > 0);
   if (!n) {
@@ -137,19 +139,17 @@ function updatePlanHint() {
   const avg = durs.length ? durs.reduce((a, b) => a + b, 0) / durs.length : 0;
   const min = durs.length ? Math.min(...durs) : 0;
   const max = durs.length ? Math.max(...durs) : 0;
-  el.textContent = `共 ${n} 段 · 均长 ${(avg / 1000).toFixed(1)}s · 最短 ${(min / 1000).toFixed(1)}s / 最长 ${(
+  el.textContent = `逻辑成片 ${n} 段 · 均长 ${(avg / 1000).toFixed(1)}s · 最短 ${(min / 1000).toFixed(1)}s / 最长 ${(
     max / 1000
-  ).toFixed(1)}s · 拖到卡片上可替换`;
+  ).toFixed(1)}s`;
 }
 
 function balancePlanDurations() {
   if (!planEdit) return;
   syncPlanFieldsFromDom();
   const slots = [];
-  ["golden", "trust", "cta"].forEach((k) => {
-    (planEdit[k] || []).forEach((s, idx) => {
-      if (!s.removed) slots.push({ k, idx, s });
-    });
+  (planEdit.golden || []).forEach((s, idx) => {
+    if (!s.removed) slots.push({ k: "golden", idx, s });
   });
   if (slots.length < 2) {
     updatePlanHint();
@@ -325,10 +325,11 @@ function cutSecondsInClip(role, idx, fromS, toS) {
   return true;
 }
 
-const TRACK_ORDER = ["golden", "trust", "cta"];
+// Single logical track (compat keys kept for plan.json schema)
+const TRACK_ORDER = ["golden"];
 
 function roleLabel(trackKey) {
-  return trackKey === "golden" ? "hook" : trackKey;
+  return "story";
 }
 
 function moveClip(fromRole, fromIdx, toRole, toIdx) {
@@ -407,7 +408,7 @@ function renderTracks(plan) {
         return `<div class="jy-clip expanded ${role} ${removed ? "removed" : ""}" draggable="true" data-role="${key}" data-idx="${idx}" data-id="${escapeHtml(s.clip_id || "")}">
           <div class="clip-top">
             <span class="clip-drag" title="拖动调整位置" draggable="false">⠿</span>
-            <span class="clip-badge">${key === "golden" ? "黄金" : key === "trust" ? "信任" : "收尾"} #${idx + 1}</span>
+            <span class="clip-badge">逻辑 #${idx + 1}</span>
             <button type="button" class="clip-x" title="${removed ? "恢复" : "删除"}">${removed ? "+" : "×"}</button>
           </div>
           <textarea class="clip-text-edit" rows="4" placeholder="编辑这段口播词…">${escapeHtml(s.text || "")}</textarea>
@@ -434,9 +435,10 @@ function renderTracks(plan) {
       .join("");
   };
 
-  $("golden-track").innerHTML = mk(src.golden, "hook", "golden");
-  $("trust-track").innerHTML = mk(src.trust, "trust", "trust");
-  $("cta-track").innerHTML = mk(src.cta, "cta", "cta");
+  // single logical sequence in golden
+  if ($("golden-track")) $("golden-track").innerHTML = mk(src.golden, "story", "golden");
+  if ($("trust-track")) $("trust-track").innerHTML = "";
+  if ($("cta-track")) $("cta-track").innerHTML = "";
   ensurePlanEventsBound();
   updatePlanHint();
 
@@ -738,8 +740,8 @@ async function applyPlanEdit() {
     reclip: true,
     learn,
     golden: clean(planEdit.golden),
-    trust: clean(planEdit.trust),
-    cta: clean(planEdit.cta),
+    trust: [],
+    cta: [],
   };
   // hard safety: never send removed cards
   const allTexts = [...payload.golden, ...payload.trust, ...payload.cta].map((s) => s.text);

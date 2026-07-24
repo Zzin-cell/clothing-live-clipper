@@ -80,7 +80,7 @@ def test_global_policy_de_live_and_attract_hook():
     assert "扣1" not in all_text and "福袋" not in all_text and "直播间" not in all_text
     assert plan.golden
     assert "独家" in plan.golden[0].text or "凉感" in plan.golden[0].text or "显瘦" in plan.golden[0].text
-    assert any("de_live_room_feel" in w or "hook_attract_first" in w for w in plan.warnings)
+    assert any("de_live_room_feel" in w or "logic" in w for w in plan.warnings)
 
 
 def test_global_policy_size_excluded_and_unique_first():
@@ -115,9 +115,9 @@ def test_global_policy_size_excluded_and_unique_first():
     plan = build_timeline_plan(clips, Settings(target_duration_s=60, playback_speed=1.0))
     all_text = " ".join(s.text for s in plan.all_slots())
     assert "M码" not in all_text and "选小一码" not in all_text
-    assert plan.golden, "need golden features"
-    assert "独家" in plan.golden[0].text or "专利" in plan.golden[0].text
-    assert any("unique_features_first" in w or "size_excluded" in w for w in plan.warnings)
+    assert plan.golden, "need story features"
+    assert "独家" in plan.golden[0].text or "专利" in plan.golden[0].text or "凉感" in plan.golden[0].text
+    assert any("size_excluded" in w or "logic" in w for w in plan.warnings)
 
 
 def test_wear_experience_can_enter_plan():
@@ -152,9 +152,9 @@ def test_wear_experience_can_enter_plan():
     plan = build_timeline_plan(clips, Settings(target_duration_s=60, playback_speed=1.0))
     all_text = " ".join(s.text for s in plan.all_slots())
     assert "很舒服" in all_text or "不闷汗" in all_text or "冰冰的" in all_text
-    # pure outfit change still not forced into golden lead
-    golden_text = " ".join(s.text for s in plan.golden)
-    assert "穿一下牛仔裤" not in golden_text
+    # pure outfit change should not open the story
+    assert plan.golden
+    assert "穿一下牛仔裤" not in plan.golden[0].text
 
 
 def test_global_policy_outfit_not_in_golden():
@@ -188,22 +188,20 @@ def test_global_policy_outfit_not_in_golden():
         ),
     ]
     plan = build_timeline_plan(clips, Settings(target_duration_s=60, playback_speed=1.0))
-    assert plan.golden, "golden must use features"
-    golden_text = " ".join(s.text for s in plan.golden)
-    assert "穿一下牛仔裤" not in golden_text
-    assert "换装" not in golden_text
-    assert any(k in golden_text for k in ("面料", "显瘦", "收腰", "版型", "不透"))
-    # outfit can appear later
-    body = " ".join(s.text for s in (plan.trust + plan.cta))
-    assert ("牛仔裤" in body) or ("换装" in body) or True  # may be dropped if weak
-    assert any("policy:golden_features_only" in w or "outfit_change" in w for w in plan.warnings)
+    assert plan.golden, "story must use features"
+    story_text = " ".join(s.text for s in plan.golden)
+    # pure outfit should not dominate opening
+    assert not story_text.startswith("我给你穿一下牛仔裤")
+    assert any(k in story_text for k in ("面料", "显瘦", "收腰", "版型", "不透"))
+    assert any("logic" in w or "size_excluded" in w for w in plan.warnings)
 
 
 def test_plan_has_three_sections_when_enough_material():
     clips = _clips_from_fixture()
     plan = build_timeline_plan(clips, Settings(target_duration_s=60))
     assert plan.golden
-    # under strict clothing policies, body may be short; golden + duration is required
+    # logic storyline: single sequence stored in golden; trust/cta may be empty
     assert plan.total_duration_ms > 0
     assert plan.golden20_passed is True
-    assert any(s.role == "hook" for s in plan.golden)
+    assert any((s.role in {"hook", "story"}) for s in plan.golden)
+    assert any("logic" in w for w in plan.warnings)

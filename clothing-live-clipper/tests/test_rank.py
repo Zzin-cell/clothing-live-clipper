@@ -120,6 +120,43 @@ def test_global_policy_size_excluded_and_unique_first():
     assert any("unique_features_first" in w or "size_excluded" in w for w in plan.warnings)
 
 
+def test_wear_experience_can_enter_plan():
+    from clipper.models import ClaimType, Clip
+
+    clips = [
+        Clip(
+            clip_id="f1",
+            text="这件面料超级软还不透显瘦",
+            t0_ms=0,
+            t1_ms=4000,
+            claim_types=[ClaimType.FABRIC, ClaimType.SELLING_POINT],
+            score=40,
+        ),
+        Clip(
+            clip_id="w1",
+            text="贴肤的时候冰冰的很舒服不闷汗",
+            t0_ms=5000,
+            t1_ms=9000,
+            claim_types=[ClaimType.SELLING_POINT, ClaimType.FABRIC],
+            score=36,
+        ),
+        Clip(
+            clip_id="o1",
+            text="我给你穿一下牛仔裤再换装搭配看看",
+            t0_ms=10000,
+            t1_ms=13000,
+            claim_types=[ClaimType.OUTFIT],
+            score=20,
+        ),
+    ]
+    plan = build_timeline_plan(clips, Settings(target_duration_s=60, playback_speed=1.0))
+    all_text = " ".join(s.text for s in plan.all_slots())
+    assert "很舒服" in all_text or "不闷汗" in all_text or "冰冰的" in all_text
+    # pure outfit change still not forced into golden lead
+    golden_text = " ".join(s.text for s in plan.golden)
+    assert "穿一下牛仔裤" not in golden_text
+
+
 def test_global_policy_outfit_not_in_golden():
     """GLOBAL: try-on / outfit change must not lead first 20s."""
     from clipper.models import ClaimType, Clip

@@ -289,6 +289,9 @@ _HOOK_FEATURE_WORDS = (
     "闭眼入", "垂感", "弹力", "不起球", "透气", "显白", "收腰", "修身",
     "面料", "布料", "材质", "天丝", "醋酸", "凉感", "雪纺", "纯棉",
     "版型", "高腰", "梨形", "显腿长", "不挑人", "好打理", "可机洗",
+    # wear experience
+    "舒服", "舒适", "贴肤", "亲肤", "冰冰的", "凉凉的", "不闷", "不闷汗",
+    "凉快", "轻盈", "松弛", "好穿", "穿着舒服", "上身舒服",
 )
 
 # Outfit / change-look / try-on → keep for later body, NOT golden 20s
@@ -299,41 +302,64 @@ _OUTFIT_CHANGE_WORDS = (
     "小破洞", "你的衣服里", "衣服人",
 )
 
+# Wear experience phrases — ALLOW in final cut (often trust, sometimes golden)
+_WEAR_EXPERIENCE_WORDS = (
+    "舒服", "舒适", "贴肤", "亲肤", "冰冰的", "凉凉的", "不闷", "不闷汗",
+    "透气", "凉快", "轻盈", "松弛", "好穿", "穿着舒服", "上身舒服",
+    "一整个夏天", "一整天", "不勒肉", "不磨", "软软的", "遮盖", "体感",
+    "上身感", "手感", "质感",
+)
+
+
+def _is_wear_experience(c: Clip) -> bool:
+    text = c.text or ""
+    return any(w in text for w in _WEAR_EXPERIENCE_WORDS)
+
 
 def _is_outfit_or_change(c: Clip) -> bool:
-    """Outfit / try-on / change-clothes talk should not lead the first 20s."""
+    """Outfit / try-on / change-clothes talk should not lead the first 20s.
+
+    Wear-experience talk (舒服/贴肤/不闷) is NOT treated as pure outfit ban —
+    it can stay in final cut (usually trust section).
+    """
     text = c.text or ""
     types = set(c.claim_types)
+    wear = _is_wear_experience(c)
+
     if ClaimType.OUTFIT in types or ClaimType.SCENE in types:
-        # still allow if it is mainly a strong fabric/selling feature line
+        # still allow if mainly feature / wear experience
         if ClaimType.SELLING_POINT in types or ClaimType.FABRIC in types or ClaimType.FIT in types:
-            # e.g. 面料软 + 搭配 → feature first if has strong feature words
-            if any(w in text for w in _HOOK_FEATURE_WORDS):
+            if any(w in text for w in _HOOK_FEATURE_WORDS) or wear:
                 return False
+        if wear:
+            return False
         return True
     if any(w in text for w in _OUTFIT_CHANGE_WORDS):
-        # pure try-on / change / match without clear product feature
-        if not any(w in text for w in _HOOK_FEATURE_WORDS):
-            return True
-        # "穿一下牛仔裤" style → outfit
-        if re.search(r"(穿一下|打一下|试穿|换装|换上).{0,8}(牛仔|裤子|裙子|外套|上衣)", text):
-            return True
-        if "搭配" in text or "搭个" in text or "配个" in text:
-            # matching talk after features
-            if not any(w in text for w in ("显瘦", "遮肉", "不透", "面料", "版型", "柔软", "软到")):
+        # pure try-on / change / match without clear product feature or wear feel
+        if any(w in text for w in _HOOK_FEATURE_WORDS) or wear:
+            # "穿一下牛仔裤" style without feature → still outfit
+            if re.search(r"(穿一下|打一下|试穿|换装|换上).{0,8}(牛仔|裤子|裙子|外套|上衣)", text) and not wear:
                 return True
+            if ("搭配" in text or "搭个" in text or "配个" in text) and not any(
+                w in text for w in ("显瘦", "遮肉", "不透", "面料", "版型", "柔软", "软到", "舒服", "透气", "凉快")
+            ):
+                return True
+            return False
+        return True
     return False
 
 
 def _is_true_feature(c: Clip) -> bool:
-    """True clothing features for golden 20s."""
-    if _is_outfit_or_change(c):
+    """True clothing features for golden 20s (includes wear experience)."""
+    if _is_outfit_or_change(c) and not _is_wear_experience(c):
         return False
     types = set(c.claim_types)
     text = c.text or ""
     if types & {ClaimType.SELLING_POINT, ClaimType.FIT, ClaimType.FABRIC}:
         return True
     if any(w in text for w in _HOOK_FEATURE_WORDS):
+        return True
+    if _is_wear_experience(c):
         return True
     # detail alone is weaker; allow only with feature word
     if ClaimType.DETAIL in types and any(w in text for w in ("蕾丝", "雷丝", "拼接", "面料", "不透")):
@@ -393,6 +419,11 @@ def _hook_strength(c: Clip) -> float:
         s += 22.0
     if any(w in text for w in ("独家", "专利", "限定", "首创", "凉感", "不起球", "可机洗", "抗皱")):
         s += 26.0
+    # wear experience can support golden when paired with product talk
+    if _is_wear_experience(c):
+        s += 14.0
+        if any(w in text for w in ("面料", "版型", "显瘦", "不透", "软", "透气", "凉")):
+            s += 10.0
 
     # demote vague praise / demo filler
     if "好看" in text and hits == 0 and ClaimType.SELLING_POINT not in types:
@@ -847,13 +878,28 @@ def build_timeline_plan(
             ClaimType.FIT,
             ClaimType.SELLING_POINT,
         },
-        prefer_stages={2, 3, 4, 1},  # fabric/detail first, outfit later in body
+        prefer_stages={2, 3, 4, 1},  # fabric/detail/wear first, outfit later in body
         dedupe_threshold=0.68,
         logic_over_dedupe=True,
         chronological_bias=0.65,
         feature_first=False,
         time_chain=True,
     )
+    # boost wear-experience leftovers into trust if missing
+    if len(trust) < 2:
+        wear_left = [
+            c
+            for c in scored
+            if c.clip_id not in used
+            and _is_wear_experience(c)
+            and c.score > 0
+            and ClaimType.PRICE not in c.claim_types
+            and not any(p in (c.text or "") for p in _PRICE_TEXT)
+        ]
+        wear_left = sorted(wear_left, key=lambda c: c.score, reverse=True)
+        for c in wear_left[:3]:
+            trust.append(_to_slot(c, "trust"))
+            used.add(c.clip_id)
     # fallback: if still empty, take any unused non-price clips
     if not trust:
         leftovers = [

@@ -109,15 +109,23 @@ def main() -> int:
                 )
                 n_pair += 1
 
+    # strip any legacy single-char weights if present
+    pref_path = ROOT / "output" / "learning" / "preferences.json"
+    if pref_path.exists():
+        prefs = json.loads(pref_path.read_text(encoding="utf-8"))
+        for key in ("keep_boost", "drop_penalty", "hook_boost"):
+            m = prefs.get(key) or {}
+            prefs[key] = {k: v for k, v in m.items() if isinstance(k, str) and len(k) >= 2}
+        pref_path.write_text(json.dumps(prefs, ensure_ascii=False, indent=2), encoding="utf-8")
+
     st = learning_status()
     print("rebuilt pos_dirs", n_pos, "pair_dirs", n_pair)
     print("events", st.get("events"), "kept", st.get("kept_slots"), "dropped", st.get("dropped_slots"))
     print("top_hook", st.get("top_hook")[:20])
     print("top_drop", st.get("top_drop")[:20])
-    # show some single-char weights
-    prefs = json.loads((ROOT / "output" / "learning" / "preferences.json").read_text(encoding="utf-8"))
-    chars = {k: v for k, v in (prefs.get("hook_boost") or {}).items() if len(k) == 1}
-    print("single_char_hook", sorted(chars.items(), key=lambda x: x[1], reverse=True)[:20])
+    prefs = json.loads(pref_path.read_text(encoding="utf-8"))
+    singles = [k for k in (prefs.get("hook_boost") or {}) if len(k) == 1]
+    print("single_char_left", len(singles))
     return 0
 
 

@@ -90,28 +90,20 @@ _FEATURE_SEED = (
     "不闷", "不起球", "不缩水", "不掉色",
 )
 
-# high-signal single Chinese chars for clothing selling speech
-_FEATURE_CHARS = set(
-    "瘦透软弹垂薄厚凉热透气闷皱白黑粉蓝绿灰杏米咖"
-    "裙裤袖腰胯肚腿肩领扣袋缝线料布丝棉麻牛仔版型"
-)
-
-_LIVE_CHARS = set("家扣粉弹幕袋券码价车链")  # weak alone; used with context
-
 _GENERIC_SKIP = {
     "这个", "那个", "一个", "我们", "你们", "什么", "然后", "因为", "所以", "但是",
     "宝贝", "姐妹", "其实", "而且", "非常", "可以", "还是", "就是", "一下", "一些",
     "不会", "感觉", "更加", "如果", "真的", "那种", "这样", "那样", "有点", "比较",
+    "的话", "都是", "不是", "没有", "给你", "这种",
 }
 
 
 def _tokens(text: str) -> list[str]:
     """
-    Multi-granularity tokens for learning:
-    - feature phrases
-    - 2~6 char chunks
-    - bigrams
-    - SINGLE high-signal chars (显/瘦/透/软/裙/料…)
+    Phrase/word-level tokens only (NO single-char learning — too noisy).
+    - known feature phrases
+    - 2~6 char CJK chunks / alnum
+    - bigrams in feature context
     """
     t = re.sub(r"\s+", "", (text or "").strip().lower())
     if not t:
@@ -123,48 +115,36 @@ def _tokens(text: str) -> list[str]:
         if w in t:
             out.append(w)
 
-    # 2) alnum / multi-char CJK chunks
-    for m in re.finditer(r"[a-z0-9]+|[\u4e00-\u9fff]{2,6}", t):
+    # 2) alnum / multi-char CJK chunks (min length 2 — no single char)
+    for m in re.finditer(r"[a-z0-9]{2,}|[\u4e00-\u9fff]{2,6}", t):
         w = m.group(0)
         if w in _STOP or w in _GENERIC_SKIP:
             continue
+        if len(w) < 2:
+            continue
         out.append(w)
 
-    # 3) all CJK bigrams (not only feature context) for finer memory
+    # 3) bigrams only when line has clothing feature context
     cjk = re.sub(r"[^\u4e00-\u9fff]", "", t)
-    for i in range(len(cjk) - 1):
-        bg = cjk[i : i + 2]
-        if bg in _GENERIC_SKIP:
-            continue
-        if bg[0] in _STOP and bg[1] in _STOP:
-            continue
-        out.append(bg)
+    has_feat = any(w in t for w in _FEATURE_SEED)
+    if has_feat:
+        for i in range(len(cjk) - 1):
+            bg = cjk[i : i + 2]
+            if bg in _GENERIC_SKIP:
+                continue
+            if bg[0] in _STOP or bg[1] in _STOP:
+                continue
+            out.append(bg)
 
-    # 4) single-char learning (user requested "具体到单个字")
-    for ch in cjk:
-        if ch in _STOP:
-            continue
-        if ch in _FEATURE_CHARS:
-            out.append(ch)
-        # digits often map to price (negative when with 块/块钱 handled elsewhere)
-        # keep single digits only if surrounding looks like size/price later via phrases
-
-    # 5) keep short english fabric codes etc already from alnum
-
-    # uniq preserve order, prefer longer tokens earlier for scoring diversity
+    # uniq preserve order
     seen = set()
     uniq: list[str] = []
     for w in out:
-        if not w or w in seen:
+        if not w or len(w) < 2 or w in seen:
             continue
         seen.add(w)
         uniq.append(w)
-    # hard cap but keep chars: first phrases/bigrams then chars
-    if len(uniq) > 64:
-        chars = [w for w in uniq if len(w) == 1]
-        multi = [w for w in uniq if len(w) > 1]
-        uniq = multi[:48] + chars[:16]
-    return uniq
+    return uniq[:48]
 
 
 def _bump(bucket: dict[str, float], key: str, delta: float, lo: float = -50.0, hi: float = 80.0) -> None:
@@ -225,23 +205,24 @@ def record_plan_feedback(
         s = after_map[k]
         toks = _tokens(s.get("text") or "")
         for t in toks:
-            # feature single chars get stronger keep
-            pos = 1.5 if (len(t) == 1 and t in _FEATURE_CHARS) else (1.2 if k in added_keys else 0.8)
+            if len(t) < 2:
+                continue
+            pos = 1.2 if k in added_keys else 0.8
             _bump(keep_boost, t, pos)
             # if human put into golden, strong hook preference
             if (s.get("_section") == "hook") or (s.get("role") in {"hook", "golden"}):
-                hook_pos = 2.2 if (len(t) == 1 and t in _FEATURE_CHARS) else (1.8 if k in added_keys else 1.2)
-                _bump(hook_boost, t, hook_pos)
+                _bump(hook_boost, t, 1.8 if k in added_keys else 1.2)
 
     # dropped from baseline = negative
     for k in dropped_keys:
         s = before_map[k]
         for t in _tokens(s.get("text") or ""):
-            # NEVER punish core feature chars/phrases just because they appeared in a dropped long line
-            if t in _FEATURE_SEED or (len(t) == 1 and t in _FEATURE_CHARS):
+            if len(t) < 2:
+                continue
+            # NEVER punish core feature phrases just because they appeared in a dropped long line
+            if t in _FEATURE_SEED:
                 continue
             if t in _GENERIC_SKIP:
-                # generic words: mild penalty only
                 _bump(drop_penalty, t, 0.6)
                 continue
             _bump(drop_penalty, t, 1.5)
@@ -335,17 +316,17 @@ def learned_text_score(text: str, *, for_hook: bool = False) -> float:
         if abs(kb) + abs(dp) + abs(hb) < 1e-6:
             continue
         hit += 1
-        # single-char weights slightly softer to avoid overreacting
-        scale = 0.65 if len(t) == 1 else 1.0
-        score += 1.8 * kb * scale
-        score -= 2.4 * dp * scale
+        if len(t) < 2:
+            continue
+        score += 1.6 * kb
+        score -= 2.2 * dp
         if for_hook:
-            score += 3.0 * hb * scale
+            score += 2.6 * hb
     if hit == 0:
         return 0.0
     # milder normalization so rare strong tokens still matter
-    score = score / max(1.4, hit ** 0.30)
-    return max(-100.0, min(150.0, score))
+    score = score / max(1.5, hit ** 0.32)
+    return max(-80.0, min(120.0, score))
 
 
 def learning_status() -> dict[str, Any]:

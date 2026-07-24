@@ -118,6 +118,22 @@ def classify(text: str) -> str:
     t = text.strip()
     if not t or len(t) < 2:
         return "drop"
+    # ASR hallucination spam
+    try:
+        from asr_enhance import is_garbage_asr_text  # type: ignore
+    except Exception:
+        try:
+            from scripts.asr_enhance import is_garbage_asr_text  # type: ignore
+        except Exception:
+            is_garbage_asr_text = None  # type: ignore
+    if is_garbage_asr_text and is_garbage_asr_text(t):
+        return "drop"
+    # local quick checks too
+    core = re.sub(r"[\s,，、。.!！?？]+", "", t)
+    if core and len(set(core)) <= 2 and len(core) >= 8:
+        return "drop"
+    if core.count("对") >= 8 and core.count("对") / max(1, len(core)) >= 0.5:
+        return "drop"
 
     strong = _has_any(t, STRONG)
     medium = _has_any(t, MEDIUM)

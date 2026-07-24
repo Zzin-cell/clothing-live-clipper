@@ -46,17 +46,99 @@ CLOTHING_CORRECTIONS: list[tuple[str, str]] = [
 ]
 
 
+_GARBAGE_TOKENS = (
+    "对", "嗯", "啊", "哦", "呃", "额", "呀", "哈", "嘿", "喂", "哎",
+    "xy", "xx", "yy", "zzz", "hhh", "mmm", "um", "uh", "ah",
+)
+
+
+def _collapse_repeated_token_runs(text: str) -> str:
+    """Collapse '对,对,对,对' / 'xy,xy,xy' style hallucination loops."""
+    t = text
+    # same token repeated with optional punctuation/space between
+    # e.g. 对,对,对  or xy,xy,xy or 对对对对
+    t = re.sub(
+        r"([A-Za-z\u4e00-\u9fff]{1,4})(?:[\s,，、。.!！?？]*\1){2,}",
+        r"\1",
+        t,
+    )
+    # pure CJK single-char spam without separators: 对对对对对
+    t = re.sub(r"([\u4e00-\u9fff])\1{2,}", r"\1", t)
+    # latin spam: xxxxxx / yyyyy
+    t = re.sub(r"([A-Za-z])\1{3,}", r"\1", t)
+    return t
+
+
+def is_garbage_asr_text(text: str) -> bool:
+    """
+    Detect whisper hallucination / looped filler that looks like:
+      对,对,对,对...   xy,xy,xy...   嗯嗯嗯...
+    """
+    t = (text or "").strip()
+    if not t:
+        return True
+    # strip punctuation/spaces for density checks
+    core = re.sub(r"[\s,，、。.!！?？;；:：\-_/\\]+", "", t)
+    if not core:
+        return True
+    # too short non-clothing crumbs
+    if len(core) <= 1:
+        return True
+
+    # unique char ratio extremely low => spam
+    uniq = set(core.lower())
+    if len(core) >= 8 and len(uniq) <= 2:
+        return True
+    if len(core) >= 12 and len(uniq) <= 3:
+        return True
+
+    # mostly garbage tokens
+    # split into tokens by punctuation
+    parts = [p for p in re.split(r"[\s,，、。.!！?？;；]+", t) if p]
+    if parts:
+        garbage_n = 0
+        for p in parts:
+            pl = p.lower()
+            if pl in _GARBAGE_TOKENS or re.fullmatch(r"(对|嗯|啊|哦|呃|额|哈|呀)+", p):
+                garbage_n += 1
+            elif re.fullmatch(r"[xy]{1,4}", pl):
+                garbage_n += 1
+        if len(parts) >= 3 and garbage_n / len(parts) >= 0.7:
+            return True
+
+    # if after collapse almost nothing remains
+    collapsed = _collapse_repeated_token_runs(t)
+    collapsed_core = re.sub(r"[\s,，、。.!！?？;；:：\-_/\\]+", "", collapsed)
+    if len(core) >= 10 and len(collapsed_core) <= 2:
+        return True
+
+    # "对" density
+    if core.count("对") >= 8 and core.count("对") / max(1, len(core)) >= 0.5:
+        return True
+    # pure filler mono-token after collapse (嗯/啊...) with almost no content
+    if re.fullmatch(r"(嗯|啊|哦|呃|额|哈|呀|嘿|喂|哎)+", collapsed_core or core):
+        return True
+    # xy density
+    if re.fullmatch(r"[xyXY,，、\s]+", t) and len(core) >= 4:
+        return True
+
+    return False
+
+
 def apply_text_corrections(text: str) -> str:
     t = (text or "").strip()
     if not t:
         return t
+    # first kill loop spam then lexicon fixes
+    t = _collapse_repeated_token_runs(t)
     for bad, good in CLOTHING_CORRECTIONS:
         if bad in t:
             t = t.replace(bad, good)
     # collapse repeated punctuation / spaces
     t = re.sub(r"\s+", " ", t)
     t = re.sub(r"([，。！？、])\1+", r"\1", t)
-    return t.strip()
+    t = re.sub(r"(，){2,}", "，", t)
+    return t.strip("，,。.!！?？ \t")
 
 
 def merge_close_segments(
@@ -102,11 +184,17 @@ def merge_close_segments(
 def enhance_asr_segments(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Post-process raw ASR for better clothing livestream usability."""
     fixed = []
+    dropped = 0
     for i, u in enumerate(items or []):
         if not isinstance(u, dict):
             continue
-        text = apply_text_corrections(str(u.get("text") or ""))
-        if not text:
+        raw_text = str(u.get("text") or "")
+        if is_garbage_asr_text(raw_text):
+            dropped += 1
+            continue
+        text = apply_text_corrections(raw_text)
+        if not text or is_garbage_asr_text(text):
+            dropped += 1
             continue
         t0 = max(0, int(u.get("t0_ms") or 0))
         t1 = max(t0 + 200, int(u.get("t1_ms") or (t0 + 1000)))
@@ -118,4 +206,36 @@ def enhance_asr_segments(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 "t1_ms": t1,
             }
         )
-    return merge_close_segments(fixed)
+    # if everything got dropped, keep original non-empty to avoid empty pipeline
+    if not fixed and items:
+        for i, u in enumerate(items or []):
+            if not isinstance(u, dict):
+                continue
+            text = apply_text_corrections(str(u.get("text") or ""))
+            if not text:
+                continue
+            t0 = max(0, int(u.get("t0_ms") or 0))
+            t1 = max(t0 + 200, int(u.get("t1_ms") or (t0 + 1000)))
+            fixed.append(
+                {
+                    "utt_id": str(u.get("utt_id") or f"w{i:04d}"),
+                    "text": text,
+                    "t0_ms": t0,
+                    "t1_ms": t1,
+                    "asr_garbage_fallback": True,
+                }
+            )
+            break
+    merged = merge_close_segments(fixed)
+    # final pass: drop any still-spam after merge
+    cleaned = []
+    for u in merged:
+        if is_garbage_asr_text(str(u.get("text") or "")):
+            dropped += 1
+            continue
+        cleaned.append(u)
+    if dropped:
+        # stash metric on first item for optional debug
+        if cleaned:
+            cleaned[0]["_asr_dropped_garbage"] = dropped
+    return cleaned or merged

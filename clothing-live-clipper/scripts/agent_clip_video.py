@@ -283,16 +283,27 @@ def asr_local(wav: Path) -> list[dict]:
         beam_size=max(1, beam),
         best_of=max(1, best_of),
         patience=0.8 if use_cuda else 0.5,
-        temperature=0.0,
-        compression_ratio_threshold=2.5,
-        log_prob_threshold=-1.0,
-        no_speech_threshold=0.6 if use_cuda else 0.65,
-        condition_on_previous_text=bool(use_cuda),
+        # prevent endless "对对对/xyxy" loops on noisy live audio
+        temperature=[0.0, 0.2, 0.4] if use_cuda else 0.0,
+        compression_ratio_threshold=2.2,
+        log_prob_threshold=-0.8,
+        no_speech_threshold=0.55 if use_cuda else 0.65,
+        condition_on_previous_text=False,  # critical: stop hallucination carry-over
         initial_prompt=CLOTHING_INITIAL_PROMPT,
         without_timestamps=False,
         word_timestamps=False,
+        repetition_penalty=1.15,
+        no_repeat_ngram_size=3,
     )
-    segments, info = model.transcribe(str(wav), **kwargs)
+    try:
+        segments, info = model.transcribe(str(wav), **kwargs)
+    except TypeError:
+        # older faster-whisper may not support repetition_penalty args
+        kwargs.pop("repetition_penalty", None)
+        kwargs.pop("no_repeat_ngram_size", None)
+        if isinstance(kwargs.get("temperature"), list):
+            kwargs["temperature"] = 0.0
+        segments, info = model.transcribe(str(wav), **kwargs)
     out: list[dict] = []
     for i, seg in enumerate(segments):
         text = (seg.text or "").strip()

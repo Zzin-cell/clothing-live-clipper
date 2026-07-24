@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>小面 · CapCut</title>
-  <link rel="stylesheet" href="/static/styles.css?v=jy33" />
+  <link rel="stylesheet" href="/static/styles.css?v=jy34" />
 </head>
 <body>
   <div class="jy-app">
@@ -124,20 +124,14 @@
             想删小句：选中文字 →「删选中文字段」→「保存并重剪成片」。
           </p>
           <div class="jy-tracks">
-            <div class="jy-track">
+            <div class="jy-track jy-track-logic">
               <div class="jy-track-label">逻辑</div>
               <div class="jy-track-body" id="golden-track"></div>
             </div>
-            <!-- keep hidden containers for JS compatibility -->
-            <div class="jy-track" hidden>
-              <div class="jy-track-label">信任</div>
-              <div class="jy-track-body" id="trust-track"></div>
-            </div>
-            <div class="jy-track" hidden>
-              <div class="jy-track-label">收尾</div>
-              <div class="jy-track-body" id="cta-track"></div>
-            </div>
           </div>
+          <!-- legacy ids for JS null-safe fallback (not displayed) -->
+          <div id="trust-track" hidden></div>
+          <div id="cta-track" hidden></div>
         </div>
       </section>
 
@@ -207,6 +201,6 @@
     </div>
   </aside>
 
-  <script src="/static/app.js?v=jy33"></script>
+  <script src="/static/app.js?v=jy34"></script>
 </body>
 </html>

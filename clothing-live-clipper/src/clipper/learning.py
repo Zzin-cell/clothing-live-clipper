@@ -117,6 +117,9 @@ def split_clauses(text: str) -> list[str]:
     raw = (text or "").strip()
     if not raw:
         return []
+    # strip known ASR prompt contamination
+    raw = raw.replace("不要把衣服讲成食物或故事", "")
+    raw = raw.replace("这是服装带货直播口播", "")
     parts = [p.strip() for p in _CLAUSE_SPLIT.split(raw) if p and p.strip()]
     if not parts:
         parts = [raw]
@@ -131,6 +134,9 @@ def split_clauses(text: str) -> list[str]:
             continue
         if re.fullmatch(r"[xy]+", n):
             continue
+        # drop stutter loops like 衣服的衣服的衣服的
+        if re.search(r"(.{2,6})\1{2,}", n):
+            continue
         # keep meaningful clause length
         if len(n) < 3:
             continue
@@ -140,14 +146,14 @@ def split_clauses(text: str) -> list[str]:
             if len(sub) > 1:
                 for s in sub:
                     sn = _norm_clause(s)
-                    if 3 <= len(sn) <= 36:
+                    if 3 <= len(sn) <= 36 and not re.search(r"(.{2,6})\1{2,}", sn):
                         out.append(sn)
                 continue
             # window long text into overlapping chunks (~16 chars)
             win = 16
             for i in range(0, len(n), win - 4):
                 chunk = n[i : i + win]
-                if len(chunk) >= 3:
+                if len(chunk) >= 3 and not re.search(r"(.{2,6})\1{2,}", chunk):
                     out.append(chunk)
                 if i + win >= len(n):
                     break

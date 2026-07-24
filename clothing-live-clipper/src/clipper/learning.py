@@ -225,15 +225,25 @@ def record_plan_feedback(
         s = after_map[k]
         toks = _tokens(s.get("text") or "")
         for t in toks:
-            _bump(keep_boost, t, 1.2 if k in added_keys else 0.8)
+            # feature single chars get stronger keep
+            pos = 1.5 if (len(t) == 1 and t in _FEATURE_CHARS) else (1.2 if k in added_keys else 0.8)
+            _bump(keep_boost, t, pos)
             # if human put into golden, strong hook preference
             if (s.get("_section") == "hook") or (s.get("role") in {"hook", "golden"}):
-                _bump(hook_boost, t, 1.8 if k in added_keys else 1.2)
+                hook_pos = 2.2 if (len(t) == 1 and t in _FEATURE_CHARS) else (1.8 if k in added_keys else 1.2)
+                _bump(hook_boost, t, hook_pos)
 
     # dropped from baseline = negative
     for k in dropped_keys:
         s = before_map[k]
         for t in _tokens(s.get("text") or ""):
+            # NEVER punish core feature chars/phrases just because they appeared in a dropped long line
+            if t in _FEATURE_SEED or (len(t) == 1 and t in _FEATURE_CHARS):
+                continue
+            if t in _GENERIC_SKIP:
+                # generic words: mild penalty only
+                _bump(drop_penalty, t, 0.6)
+                continue
             _bump(drop_penalty, t, 1.5)
             # if it was golden and user removed, reduce hook preference
             if (s.get("_section") == "hook") or (s.get("role") in {"hook", "golden"}):

@@ -86,48 +86,85 @@ _FEATURE_SEED = (
     "收腰", "修身", "高腰", "梨形", "闭眼入", "天丝", "醋酸", "雪纺", "纯棉",
     "蕾丝", "破洞", "拼接", "凉感", "不起球", "可机洗", "抗皱", "显白", "独家",
     "专利", "限定", "百搭", "通勤", "牛仔", "裙子", "上衣", "外套", "无袖",
-    "遮肚子", "遮胯", "显腿长", "不挑人", "好打理", "高级感",
+    "遮肚子", "遮胯", "显腿长", "不挑人", "好打理", "高级感", "凉快", "透气",
+    "不闷", "不起球", "不缩水", "不掉色",
 )
+
+# high-signal single Chinese chars for clothing selling speech
+_FEATURE_CHARS = set(
+    "瘦透软弹垂薄厚凉热透气闷皱白黑粉蓝绿灰杏米咖"
+    "裙裤袖腰胯肚腿肩领扣袋缝线料布丝棉麻牛仔版型"
+)
+
+_LIVE_CHARS = set("家扣粉弹幕袋券码价车链")  # weak alone; used with context
+
+_GENERIC_SKIP = {
+    "这个", "那个", "一个", "我们", "你们", "什么", "然后", "因为", "所以", "但是",
+    "宝贝", "姐妹", "其实", "而且", "非常", "可以", "还是", "就是", "一下", "一些",
+    "不会", "感觉", "更加", "如果", "真的", "那种", "这样", "那样", "有点", "比较",
+}
 
 
 def _tokens(text: str) -> list[str]:
+    """
+    Multi-granularity tokens for learning:
+    - feature phrases
+    - 2~6 char chunks
+    - bigrams
+    - SINGLE high-signal chars (显/瘦/透/软/裙/料…)
+    """
     t = re.sub(r"\s+", "", (text or "").strip().lower())
     if not t:
         return []
     out: list[str] = []
-    # prioritize known clothing feature phrases
+
+    # 1) known feature phrases first (highest value)
     for w in _FEATURE_SEED:
         if w in t:
             out.append(w)
-    # keywords / alnum
+
+    # 2) alnum / multi-char CJK chunks
     for m in re.finditer(r"[a-z0-9]+|[\u4e00-\u9fff]{2,6}", t):
         w = m.group(0)
-        if w in _STOP or len(w) < 2:
-            continue
-        # skip ultra-generic fillers
-        if w in {"这个", "那个", "一个", "我们", "你们", "什么", "然后", "因为", "所以", "但是", "宝贝", "姐妹"}:
+        if w in _STOP or w in _GENERIC_SKIP:
             continue
         out.append(w)
-    # overlapping bigrams only if they touch feature context
+
+    # 3) all CJK bigrams (not only feature context) for finer memory
     cjk = re.sub(r"[^\u4e00-\u9fff]", "", t)
-    has_feat = any(w in t for w in _FEATURE_SEED)
-    if has_feat:
-        for i in range(len(cjk) - 1):
-            bg = cjk[i : i + 2]
-            if bg[0] in _STOP or bg[1] in _STOP:
-                continue
-            if bg in {"这个", "那个", "一个", "我们", "什么", "然后", "因为", "所以"}:
-                continue
-            out.append(bg)
-    # uniq preserve order
+    for i in range(len(cjk) - 1):
+        bg = cjk[i : i + 2]
+        if bg in _GENERIC_SKIP:
+            continue
+        if bg[0] in _STOP and bg[1] in _STOP:
+            continue
+        out.append(bg)
+
+    # 4) single-char learning (user requested "具体到单个字")
+    for ch in cjk:
+        if ch in _STOP:
+            continue
+        if ch in _FEATURE_CHARS:
+            out.append(ch)
+        # digits often map to price (negative when with 块/块钱 handled elsewhere)
+        # keep single digits only if surrounding looks like size/price later via phrases
+
+    # 5) keep short english fabric codes etc already from alnum
+
+    # uniq preserve order, prefer longer tokens earlier for scoring diversity
     seen = set()
-    uniq = []
+    uniq: list[str] = []
     for w in out:
-        if w in seen:
+        if not w or w in seen:
             continue
         seen.add(w)
         uniq.append(w)
-    return uniq[:40]
+    # hard cap but keep chars: first phrases/bigrams then chars
+    if len(uniq) > 64:
+        chars = [w for w in uniq if len(w) == 1]
+        multi = [w for w in uniq if len(w) > 1]
+        uniq = multi[:48] + chars[:16]
+    return uniq
 
 
 def _bump(bucket: dict[str, float], key: str, delta: float, lo: float = -50.0, hi: float = 80.0) -> None:
@@ -270,7 +307,7 @@ def record_plan_feedback(
 def learned_text_score(text: str, *, for_hook: bool = False) -> float:
     """
     Convert learned preferences into a score delta for a transcript line.
-    Strengthened so human/bootstrap feedback can actually move ranking.
+    Supports phrase + bigram + single-char hits.
     """
     prefs = load_preferences()
     keep_boost = prefs.get("keep_boost") or {}
@@ -288,16 +325,17 @@ def learned_text_score(text: str, *, for_hook: bool = False) -> float:
         if abs(kb) + abs(dp) + abs(hb) < 1e-6:
             continue
         hit += 1
-        # stronger coefficients (previously too weak to notice)
-        score += 1.6 * kb
-        score -= 2.2 * dp
+        # single-char weights slightly softer to avoid overreacting
+        scale = 0.65 if len(t) == 1 else 1.0
+        score += 1.8 * kb * scale
+        score -= 2.4 * dp * scale
         if for_hook:
-            score += 2.8 * hb
+            score += 3.0 * hb * scale
     if hit == 0:
         return 0.0
     # milder normalization so rare strong tokens still matter
-    score = score / max(1.6, hit ** 0.35)
-    return max(-80.0, min(120.0, score))
+    score = score / max(1.4, hit ** 0.30)
+    return max(-100.0, min(150.0, score))
 
 
 def learning_status() -> dict[str, Any]:

@@ -332,8 +332,8 @@ def filter_transcript(raw: list[dict]) -> list[dict]:
     # local import avoids circular issues when used as library
     from filter_transcript_v2 import filter_for_duration
 
-    # Default 1.3x playback → keep ~78s source speech for ~60s final
-    return filter_for_duration(raw, target_ms=78_000, min_ms=72_000, max_ms=85_000)
+    # Default 1.4x playback → keep ~84s source speech for ~60s final
+    return filter_for_duration(raw, target_ms=84_000, min_ms=76_000, max_ms=92_000)
 
 
 def run_clipper(video: Path, transcript: Path, out_dir: Path, seconds: int, render: bool) -> None:

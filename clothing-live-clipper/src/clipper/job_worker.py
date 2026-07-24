@@ -86,7 +86,7 @@ def process_job_dir(job_dir: Path) -> None:
 
         target = int(meta.get("target_seconds") or 60)
         render = bool(meta.get("render_requested", True))
-        speed = float(meta.get("playback_speed") or os.environ.get("CLIPPER_PLAYBACK_SPEED") or 1.3)
+        speed = float(meta.get("playback_speed") or os.environ.get("CLIPPER_PLAYBACK_SPEED") or 1.4)
 
         meta["status"] = "processing"
         meta["worker"] = "local_auto"
@@ -126,13 +126,13 @@ def process_job_dir(job_dir: Path) -> None:
         _set_progress(job_dir, "asr_done", 40, f"听写完成 {len(raw)} 句 · {meta['asr_seconds']}s")
 
         _set_progress(job_dir, "filter", 45, "过滤无效/非服装内容（含学习偏好）")
-        # source length for 1.3x → ~60s final
-        sp = speed if speed > 0 else 1.0
+        # source length for 1.4x → ~60s final
+        sp = speed if speed > 0 else 1.4
         kept = filter_for_duration(
             raw,
-            target_ms=int(78_000 * sp / 1.3),
-            min_ms=int(72_000 * sp / 1.3),
-            max_ms=int(85_000 * sp / 1.3),
+            target_ms=int(84_000 * sp / 1.4),
+            min_ms=int(76_000 * sp / 1.4),
+            max_ms=int(92_000 * sp / 1.4),
         )
         tr_path = job_dir / "transcript_for_clipper.json"
         tr_path.write_text(json.dumps(kept, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -279,7 +279,7 @@ def reclip_from_saved_transcript(job_dir: Path) -> None:
 
         target = int(meta.get("target_seconds") or 60)
         render = bool(meta.get("render_requested", True))
-        speed = float(meta.get("playback_speed") or os.environ.get("CLIPPER_PLAYBACK_SPEED") or 1.3)
+        speed = float(meta.get("playback_speed") or os.environ.get("CLIPPER_PLAYBACK_SPEED") or 1.4)
 
         _set_progress(job_dir, "reclip", 55, "按口播稿重新切片")
         from clipper.config import Settings
@@ -294,7 +294,7 @@ def reclip_from_saved_transcript(job_dir: Path) -> None:
             max_clip_ms=base.max_clip_ms,
             min_plan_ms=base.min_plan_ms,
             max_plan_ms=base.max_plan_ms,
-            playback_speed=speed if speed > 0 else 1.3,
+            playback_speed=speed if speed > 0 else 1.4,
             golden_weight_ratio=base.golden_weight_ratio,
             golden_features_only=base.golden_features_only,
             demote_outfit_change_from_golden=base.demote_outfit_change_from_golden,
@@ -431,7 +431,7 @@ def render_from_plan_only(job_dir: Path) -> None:
         if not segs:
             raise RuntimeError("plan 无有效片段")
 
-        speed = float(meta.get("playback_speed") or os.environ.get("CLIPPER_PLAYBACK_SPEED") or 1.3)
+        speed = float(meta.get("playback_speed") or os.environ.get("CLIPPER_PLAYBACK_SPEED") or 1.4)
         _set_progress(job_dir, "render", 75, f"按调整后的结构渲染（{len(segs)}段）")
         from clipper.media import probe_duration_ms, render_plan
 
@@ -477,7 +477,7 @@ def render_from_plan_only(job_dir: Path) -> None:
             smooth=True,
             crossfade_s=0.0,
             edge_fade_s=0.03,
-            playback_speed=speed if speed > 0 else 1.3,
+            playback_speed=speed if speed > 0 else 1.4,
         )
         has_final = final_path.exists()
         meta = _read_meta(job_dir)

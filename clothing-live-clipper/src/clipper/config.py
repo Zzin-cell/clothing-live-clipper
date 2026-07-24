@@ -122,8 +122,8 @@ class Settings:
     min_plan_ms: int = 55_000
     max_plan_ms: int = 65_000
     # Playback speed of final cut. Plan selects longer source so final ≈ target after speed.
-    # e.g. speed=1.3 → select ~78s source for ~60s output.
-    playback_speed: float = 1.3
+    # e.g. speed=1.4 → select ~84s source for ~60s output.
+    playback_speed: float = 1.4
     golden_weight_ratio: float = 0.60
     # ---- GLOBAL product policy (all jobs: Web / CLI / reclip) ----
     # Goal: short video should NOT feel like a livestream room.
@@ -157,13 +157,13 @@ class Settings:
 
     @classmethod
     def from_env(cls) -> "Settings":
-        speed_raw = _get("CLIPPER_PLAYBACK_SPEED") or "1.3"
+        speed_raw = _get("CLIPPER_PLAYBACK_SPEED") or "1.4"
         try:
             speed = float(speed_raw)
         except ValueError:
-            speed = 1.3
+            speed = 1.4
         if speed < 0.8 or speed > 2.5:
-            speed = 1.3
+            speed = 1.4
         def _flag(name: str, default: bool = True) -> bool:
             raw = (_get(name) or ("true" if default else "false")).strip().lower()
             return raw in {"1", "true", "yes", "on"}

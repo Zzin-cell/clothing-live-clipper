@@ -821,7 +821,8 @@ def build_timeline_plan(
                 else:
                     chrono = -4.0
             try:
-                learn = learned_text_score(c.text or "", for_hook=(total < aim * 0.35))
+                # amplify learning so reclip preferences visibly affect new uploads
+                learn = learned_text_score(c.text or "", for_hook=(total < aim * 0.40)) * 1.8
             except Exception:
                 learn = 0.0
             progress = total / max(1, aim)

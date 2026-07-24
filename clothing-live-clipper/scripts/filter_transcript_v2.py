@@ -245,7 +245,8 @@ def _learned_keep_score(text: str) -> float:
         # scripts run with src on path in worker
         from clipper.learning import learned_text_score  # type: ignore
 
-        return float(learned_text_score(text, for_hook=True))
+        # stronger so learned reclip choices affect which lines survive filtering
+        return float(learned_text_score(text, for_hook=True)) * 1.6
     except Exception:
         return 0.0
 

@@ -375,51 +375,93 @@ def record_plan_feedback(
     return prefs
 
 
+def _soft_bucket_hit(text_norm: str, bucket: dict[str, float], *, topn: int = 260) -> float:
+    """
+    Fuzzy match learned 小句 against new ASR text.
+    Exact/containment first; then feature-overlap for transfer across videos.
+    """
+    if not text_norm or not bucket:
+        return 0.0
+    score = 0.0
+    # exact
+    if text_norm in bucket:
+        score += float(bucket[text_norm]) * 1.0
+    # sort once by abs weight
+    items = sorted(bucket.items(), key=lambda kv: abs(float(kv[1])), reverse=True)[:topn]
+    for k, v in items:
+        if not isinstance(k, str) or len(k) < 3:
+            continue
+        vv = float(v)
+        if k == text_norm:
+            continue
+        # full containment either way
+        if k in text_norm:
+            score += vv * (0.85 if len(k) >= 6 else 0.55)
+            continue
+        if len(text_norm) >= 4 and text_norm in k:
+            score += vv * 0.40
+            continue
+        # partial: share 2+ feature seeds or a long common chunk
+        if len(k) >= 6:
+            shared = 0
+            for f in _FEATURE_SEED:
+                if f in k and f in text_norm:
+                    shared += 1
+            if shared >= 2:
+                score += vv * (0.22 * min(3, shared))
+            elif shared == 1 and any(len(f) >= 2 and f in k and f in text_norm for f in _FEATURE_SEED):
+                score += vv * 0.12
+    return score
+
+
 def learned_text_score(text: str, *, for_hook: bool = False) -> float:
     """
     Convert learned preferences into a score delta for a transcript line.
-    Primary match unit = 小句 (clause). Longer exact clause hits weigh more.
+    Primary unit = 小句; soft-match so NEW videos (different wording) still benefit.
     """
     prefs = load_preferences()
     keep_boost = prefs.get("keep_boost") or {}
     drop_penalty = prefs.get("drop_penalty") or {}
     hook_boost = prefs.get("hook_boost") or {}
-    toks = _tokens(text)
-    if not toks:
+    if not (keep_boost or drop_penalty or hook_boost):
         return 0.0
 
-    # exact clause-level match first (best precision)
-    clauses = split_clauses(text)
+    tnorm = _norm_clause(text)
+    if not tnorm:
+        return 0.0
+
+    clauses = split_clauses(text) or ([tnorm] if len(tnorm) >= 3 else [])
     score = 0.0
     hit = 0
+
+    # whole-line soft score (important for transfer to new videos)
+    whole_keep = _soft_bucket_hit(tnorm, keep_boost)
+    whole_drop = _soft_bucket_hit(tnorm, drop_penalty)
+    whole_hook = _soft_bucket_hit(tnorm, hook_boost)
+    if abs(whole_keep) + abs(whole_drop) + abs(whole_hook) > 1e-6:
+        hit += 1
+        score += 2.4 * whole_keep
+        score -= 2.8 * whole_drop
+        if for_hook:
+            score += 3.2 * whole_hook
+
+    # per-clause exact/soft
     for c in clauses:
-        kb = float(keep_boost.get(c, 0.0))
-        dp = float(drop_penalty.get(c, 0.0))
-        hb = float(hook_boost.get(c, 0.0))
-        if abs(kb) + abs(dp) + abs(hb) < 1e-6:
-            # soft match: clause contains a learned clause / reverse
-            for k, v in list(keep_boost.items())[:200]:
-                if len(k) >= 4 and (k in c or c in k):
-                    kb += 0.45 * float(v)
-            for k, v in list(drop_penalty.items())[:200]:
-                if len(k) >= 4 and (k in c or c in k):
-                    dp += 0.45 * float(v)
-            for k, v in list(hook_boost.items())[:200]:
-                if len(k) >= 4 and (k in c or c in k):
-                    hb += 0.45 * float(v)
+        kb = float(keep_boost.get(c, 0.0)) + 0.75 * _soft_bucket_hit(c, keep_boost, topn=120)
+        dp = float(drop_penalty.get(c, 0.0)) + 0.75 * _soft_bucket_hit(c, drop_penalty, topn=120)
+        hb = float(hook_boost.get(c, 0.0)) + 0.75 * _soft_bucket_hit(c, hook_boost, topn=120)
         if abs(kb) + abs(dp) + abs(hb) < 1e-6:
             continue
         hit += 1
-        # clause length weight: full small-sentence matches dominate
-        lw = min(2.2, max(1.0, len(c) / 8.0))
-        score += 2.0 * kb * lw
-        score -= 2.4 * dp * lw
+        lw = min(2.4, max(1.0, len(c) / 7.0))
+        score += 2.2 * kb * lw
+        score -= 2.6 * dp * lw
         if for_hook:
-            score += 3.0 * hb * lw
+            score += 3.2 * hb * lw
 
-    # secondary feature/keyword hits (weaker than clause)
-    for t in toks:
-        if t in clauses or len(t) < 2:
+    # secondary keyword residual (features + learned short keys)
+    for t in _tokens(text):
+        if len(t) < 2:
             continue
         kb = float(keep_boost.get(t, 0.0))
         dp = float(drop_penalty.get(t, 0.0))
@@ -427,16 +469,16 @@ def learned_text_score(text: str, *, for_hook: bool = False) -> float:
         if abs(kb) + abs(dp) + abs(hb) < 1e-6:
             continue
         hit += 1
-        w = 0.55 if len(t) <= 4 else 0.8
-        score += 1.2 * kb * w
-        score -= 1.5 * dp * w
+        w = 0.9 if t in _FEATURE_SEED else 0.55
+        score += 1.4 * kb * w
+        score -= 1.7 * dp * w
         if for_hook:
-            score += 1.8 * hb * w
+            score += 2.0 * hb * w
 
     if hit == 0:
         return 0.0
-    score = score / max(1.3, hit ** 0.28)
-    return max(-80.0, min(120.0, score))
+    score = score / max(1.15, hit ** 0.22)
+    return max(-100.0, min(150.0, score))
 
 
 def learning_status() -> dict[str, Any]:

@@ -1,45 +1,77 @@
 from __future__ import annotations
 
-from clipper.llm_plan import llm_obj_to_timeline
+from clipper.llm_plan import expand_lines_to_clauses, llm_obj_to_timeline
 from clipper.models import TimelinePlan
 
 
 def _lines():
     return [
         {"utt_id": "u1", "text": "家人们扣1点关注", "t0_ms": 0, "t1_ms": 2000},
-        {"utt_id": "u2", "text": "这件面料超级软还不透", "t0_ms": 3000, "t1_ms": 7000},
-        {"utt_id": "u3", "text": "收腰版型梨形显瘦", "t0_ms": 8000, "t1_ms": 12000},
-        {"utt_id": "u4", "text": "贴肤冰冰的很舒服不闷", "t0_ms": 13000, "t1_ms": 17000},
-        {"utt_id": "u5", "text": "建议穿M码偏大", "t0_ms": 18000, "t1_ms": 20000},
-        {"utt_id": "u6", "text": "底下蕾丝拼接很精致", "t0_ms": 21000, "t1_ms": 25000},
+        {
+            "utt_id": "u2",
+            "text": "这件面料超级软，还不透，夏天也不闷",
+            "t0_ms": 3000,
+            "t1_ms": 9000,
+        },
+        {"utt_id": "u3", "text": "收腰版型，梨形显瘦", "t0_ms": 10000, "t1_ms": 14000},
+        {"utt_id": "u4", "text": "贴肤冰冰的，很舒服不闷", "t0_ms": 15000, "t1_ms": 19000},
+        {"utt_id": "u5", "text": "建议穿M码偏大", "t0_ms": 20000, "t1_ms": 22000},
+        {"utt_id": "u6", "text": "底下蕾丝拼接很精致", "t0_ms": 23000, "t1_ms": 27000},
     ]
 
 
+def test_expand_lines_to_clauses_splits_full_asr():
+    clauses = expand_lines_to_clauses(_lines())
+    assert len(clauses) >= len(_lines())
+    # multi-clause line becomes multiple units
+    texts = " ".join(c["text"] for c in clauses)
+    assert "超级软" in texts and "不透" in texts
+    assert all(c["t1_ms"] > c["t0_ms"] for c in clauses)
+
+
 def test_llm_obj_to_timeline_orders_and_clamps():
+    clauses = expand_lines_to_clauses(_lines())
+    assert clauses
+
+    def find_id(*keys: str) -> str:
+        for c in clauses:
+            t = str(c["text"]).lower()
+            if any(k.lower() in t for k in keys):
+                return c["id"]
+        raise AssertionError(f"no clause matching {keys}: {[c['text'] for c in clauses]}")
+
+    id_soft = find_id("软", "面料")
+    id_fit = find_id("收腰", "显瘦", "版型")
+    id_wear = find_id("舒服", "冰冰", "闷")
+    id_detail = find_id("蕾丝", "拼接")
+    id_size = find_id("m码", "M码", "尺码", "偏大")
     llm_obj = {
         "product_summary": "软糯不透+收腰显瘦",
-        "logic": ["卖点", "版型", "体验", "细节"],
+        "main_points": ["面料软不透", "收腰显瘦", "穿着凉快"],
+        "logic": ["钩子", "版型", "体验", "细节"],
         "keep": [
-            {"id": "u2", "t0_ms": 3000, "t1_ms": 7000, "text": "这件面料超级软还不透", "why": "卖点"},
-            {"id": "u3", "t0_ms": 8000, "t1_ms": 12000, "text": "收腰版型梨形显瘦", "why": "版型"},
+            {"id": id_soft, "text": "这件面料超级软", "why": "卖点", "point": "面料"},
+            {"id": id_fit, "text": "收腰版型", "why": "版型", "point": "显瘦"},
             # out-of-range timestamps should clamp into source window
-            {"id": "u4", "t0_ms": 1000, "t1_ms": 999999, "text": "贴肤冰冰的很舒服不闷", "why": "体验"},
-            {"id": "u6", "t0_ms": 21000, "t1_ms": 25000, "text": "底下蕾丝拼接很精致", "why": "细节"},
+            {"id": id_wear, "t0_ms": 1000, "t1_ms": 999999, "text": "很舒服不闷", "why": "体验"},
+            {"id": id_detail, "text": "底下蕾丝拼接很精致", "why": "细节"},
             # should be dropped by safety even if llm kept
-            {"id": "u5", "t0_ms": 18000, "t1_ms": 20000, "text": "建议穿M码偏大", "why": "bad"},
+            {"id": id_size, "text": "建议穿M码偏大", "why": "bad"},
         ],
-        "drop_ids": ["u1", "u5"],
+        "drop_ids": [],
+        "_clauses": clauses,
     }
     plan = llm_obj_to_timeline(llm_obj, _lines(), target_seconds=60, playback_speed=1.0)
     assert isinstance(plan, TimelinePlan)
     assert plan.golden
     texts = [s.text for s in plan.golden]
-    assert "面料" in texts[0]
+    assert any(("软" in t) or ("面料" in t) for t in texts[:2])
     assert all("M码" not in t for t in texts)
-    # clamp check for u4
-    u4 = next(s for s in plan.golden if "舒服" in s.text)
-    assert u4.t0_ms >= 13000
-    assert u4.t1_ms <= 17200
+    # clamp check: even if LLM asks 1000~999999, result stays inside source clause window
+    wear_src = next(c for c in clauses if c["id"] == id_wear)
+    wear = next(s for s in plan.golden if s.clip_id.startswith(f"llm_{id_wear}_"))
+    assert wear.t0_ms >= wear_src["t0_ms"]
+    assert wear.t1_ms <= wear_src["t1_ms"] + 200
     assert any("llm_logic_plan" in w for w in plan.warnings)
 
 

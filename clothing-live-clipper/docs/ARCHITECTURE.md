@@ -24,7 +24,8 @@
 2. **抽音频** → 16k mono wav（可选降噪）  
 3. **ASR** → `transcript_asr.json`（本地 faster-whisper medium）  
 4. **LLM 逻辑排片（优先）** → `llm_plan.json` + `plan.json`  
-   - 输入：ASR 口播句 + 学习偏好提示  
+   - 输入：**ASR 全量口播**，先拆成小句 `all_clauses` + 学习偏好提示  
+   - LLM：先提 `main_points`，再从全量小句里选 `keep` 并重排  
    - 输出：按逻辑顺序的 keep 时间轴（role=story）  
    - 然后 **反剪渲染** `final.mp4`  
 5. **失败回退规则路径**：  

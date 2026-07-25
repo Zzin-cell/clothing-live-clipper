@@ -44,7 +44,7 @@ function stageLabel(stage) {
     asr: "GPU 口播打轴（medium+降噪，通常1–3分钟）",
     asr_done: "听写完成",
     filter: "过滤无效词",
-    llm_plan: "LLM 逻辑处理口播稿并反剪",
+    llm_plan: "LLM 全量小句提取主要内容并重排反剪",
     clipper: "规则逻辑排序",
     reclip: "按口播重剪",
     render: "渲染成片",

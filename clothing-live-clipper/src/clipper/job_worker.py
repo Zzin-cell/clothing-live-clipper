@@ -162,8 +162,10 @@ def process_job_dir(job_dir: Path) -> None:
                 from clipper.llm_plan import plan_from_asr_with_llm
                 from asr_enhance import is_garbage_asr_text  # type: ignore
 
-                # light pre-clean only (keep info for LLM; drop pure hallucination)
+                # Submit nearly full ASR; only drop pure hallucination loops.
+                # Do NOT pre-filter clothing content — LLM extracts main points from all clauses.
                 llm_input = []
+                dropped_garbage = 0
                 for u in raw:
                     if not isinstance(u, dict):
                         continue
@@ -172,6 +174,7 @@ def process_job_dir(job_dir: Path) -> None:
                         continue
                     try:
                         if is_garbage_asr_text(tx):
+                            dropped_garbage += 1
                             continue
                     except Exception:
                         pass
@@ -179,6 +182,12 @@ def process_job_dir(job_dir: Path) -> None:
                 if not llm_input:
                     llm_input = list(raw)
 
+                _set_progress(
+                    job_dir,
+                    "llm_plan",
+                    58,
+                    f"LLM 读取全量口播小句并提取主要内容（{len(llm_input)}句）…",
+                )
                 plan_llm, llm_obj = plan_from_asr_with_llm(
                     llm_input,
                     target_seconds=target,
@@ -187,11 +196,15 @@ def process_job_dir(job_dir: Path) -> None:
                 )
                 llm_debug = {
                     "product_summary": llm_obj.get("product_summary"),
+                    "main_points": llm_obj.get("main_points"),
+                    "hook_type": llm_obj.get("hook_type"),
                     "logic": llm_obj.get("logic"),
                     "notes": llm_obj.get("notes"),
                     "drop_ids": llm_obj.get("drop_ids"),
                     "_meta": llm_obj.get("_meta"),
                     "keep_n": len(plan_llm.golden),
+                    "input_utterances": len(llm_input),
+                    "dropped_garbage": dropped_garbage,
                 }
                 (job_dir / "llm_plan.json").write_text(
                     json.dumps(llm_obj, ensure_ascii=False, indent=2), encoding="utf-8"

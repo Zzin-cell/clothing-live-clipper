@@ -19,12 +19,16 @@ import urllib.request
 from typing import Any
 
 from clipper.config import Settings, resolve_llm_base_url, resolve_llm_key, resolve_llm_model
-from clipper.learning import learned_text_score, learning_status
+from clipper.learning import learned_text_score, learning_status, split_clauses
 from clipper.models import PlanSlot, TimelinePlan
 
 
 SYSTEM_PROMPT = """你是服装带货短视频剪辑导演（抖音/快手完播导向）。
-输入是直播口播 ASR 句子（含时间戳）。请输出约 55–65 秒成片的逻辑剧本。
+输入是直播口播 ASR 的【全部小句】（已尽量按逗号/句号切开，含时间戳）。
+你的核心任务：
+1) 先通读全部小句，提取主要内容（主卖点/版型/面料/体验/细节）
+2) 再从全部小句中挑选必要短句并重新排列成约 55–65 秒成片剧本
+不要只看前几句；要用全量口播信息做提炼。
 
 ====================
 一、开场钩子（前 3 秒，必选 1 种，只留 1 句最强）
@@ -73,22 +77,24 @@ SYSTEM_PROMPT = """你是服装带货短视频剪辑导演（抖音/快手完播
 ====================
 五、技术硬规则
 ====================
-1) 只能使用输入句子 id；t0_ms/t1_ms 必须落在该句原时间范围内（可微调切小段）
-2) 总源片时长尽量接近 target_source_ms（已按倍速预留，默认约 1.4x→60s）
-3) 删除：尺码建议（M/L/偏大偏小/胸围腰围）、长段砍价、直播控场、幻觉垃圾（对对对、xy）
-4) keep 按成片播放顺序；每条写 why（钩子/版型/细节/对比/体验）
-5) 只输出严格 JSON，不要 markdown
+1) 输入是全量小句；先提炼 main_points，再从中选 keep 并重排
+2) 只能使用输入小句 id；t0_ms/t1_ms 必须落在该小句时间范围内（可微调）
+3) 总源片时长尽量接近 target_source_ms（已按倍速预留，默认约 1.4x→60s）
+4) 删除：尺码建议、长段砍价、直播控场、幻觉垃圾（对对对、xy）
+5) keep 按成片播放顺序；每条写 why（钩子/版型/细节/对比/体验）与 point（对应 main_points）
+6) 只输出严格 JSON，不要 markdown
 
 输出 JSON schema:
 {
   "product_summary": "一句话主卖点",
   "hook_type": "visual|pain|welfare",
+  "main_points": ["主卖点1","版型点","体验点","细节点"],
   "logic": ["钩子","版型上身","细节","对比体验"],
   "keep": [
-    {"id":"u0003","t0_ms":12300,"t1_ms":15800,"text":"...","why":"3秒痛点钩子"}
+    {"id":"c00012","t0_ms":12300,"t1_ms":15800,"text":"...","why":"3秒痛点钩子","point":"显瘦"}
   ],
-  "drop_ids": ["u0001","u0002"],
-  "notes": "简短说明删了什么重复/闲聊"
+  "drop_ids": ["c00001","c00002"],
+  "notes": "从全部口播中删了哪些重复/闲聊/调试"
 }
 """
 
@@ -138,6 +144,56 @@ def _normalize_lines(raw_lines: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return out
 
 
+def expand_lines_to_clauses(
+    raw_lines: list[dict[str, Any]],
+    *,
+    max_clauses: int = 400,
+) -> list[dict[str, Any]]:
+    """
+    Expand full ASR transcript into 小句 units for LLM.
+    Each clause keeps proportional time within parent utterance.
+    """
+    parents = _normalize_lines(raw_lines)
+    out: list[dict[str, Any]] = []
+    cid = 0
+    for p in parents:
+        text = str(p.get("text") or "").strip()
+        t0 = int(p["t0_ms"])
+        t1 = int(p["t1_ms"])
+        clauses = split_clauses(text)
+        if not clauses:
+            # keep original if cannot split
+            clauses = [text]
+        # proportional windows
+        n = max(1, len(clauses))
+        span = max(300, t1 - t0)
+        # ensure each clause has at least ~350ms when possible
+        step = max(350, span // n)
+        cur = t0
+        for j, ctext in enumerate(clauses):
+            if cid >= max_clauses:
+                return out
+            if j == n - 1:
+                ct1 = t1
+            else:
+                ct1 = min(t1, cur + step)
+            if ct1 <= cur:
+                ct1 = min(t1, cur + 350)
+            out.append(
+                {
+                    "id": f"c{cid:05d}",
+                    "utt_id": f"c{cid:05d}",
+                    "parent_id": p["id"],
+                    "text": ctext,
+                    "t0_ms": cur,
+                    "t1_ms": max(cur + 300, ct1),
+                }
+            )
+            cid += 1
+            cur = ct1
+    return out
+
+
 def _learning_hints(limit: int = 12) -> dict[str, Any]:
     try:
         st = learning_status()
@@ -166,25 +222,30 @@ def call_llm_for_plan(
     sp = playback_speed if playback_speed and playback_speed > 0 else 1.4
     target_source_ms = int(round(target_seconds * 1000 * sp))
 
-    norm = _normalize_lines(lines)
-    if not norm:
+    # Full ASR -> 小句 units (all content for main-point extraction)
+    clauses = expand_lines_to_clauses(lines, max_clauses=420)
+    if not clauses:
         raise RuntimeError("empty_transcript")
 
-    # compact payload for token efficiency
     compact = [
         {
             "id": u["id"],
+            "parent_id": u.get("parent_id"),
             "t0_ms": u["t0_ms"],
             "t1_ms": u["t1_ms"],
-            "text": u["text"][:180],
+            "text": str(u["text"])[:160],
         }
-        for u in norm[:120]
+        for u in clauses
     ]
     user_payload = {
+        "task": "read_all_clauses_extract_main_points_then_reorder",
         "target_final_seconds": target_seconds,
         "playback_speed": sp,
         "target_source_ms": target_source_ms,
+        "clause_count": len(compact),
         "policy": {
+            "submit_mode": "full_asr_all_clauses",
+            "extract_first": True,
             "no_size": True,
             "no_live_room_filler": True,
             "clothing_only": True,
@@ -209,7 +270,7 @@ def call_llm_for_plan(
             ],
         },
         "learning_hints": _learning_hints(),
-        "utterances": compact,
+        "all_clauses": compact,
     }
 
     url = f"{base}/chat/completions"
@@ -226,7 +287,8 @@ def call_llm_for_plan(
             {
                 "role": "user",
                 "content": (
-                    "请基于以下ASR口播稿做逻辑剪辑剧本，只输出JSON：\n"
+                    "下面是该视频 ASR 全量口播小句。请先提取主要内容 main_points，"
+                    "再从全部小句中挑选并重新排列 keep，只输出JSON：\n"
                     + json.dumps(user_payload, ensure_ascii=False)
                 ),
             },
@@ -254,8 +316,12 @@ def call_llm_for_plan(
         "model": model,
         "base_url": base,
         "target_source_ms": target_source_ms,
-        "input_lines": len(norm),
+        "input_lines": len(_normalize_lines(lines)),
+        "input_clauses": len(clauses),
+        "submit_mode": "full_asr_all_clauses",
     }
+    # stash clauses for timeline mapping (full ASR units)
+    obj["_clauses"] = clauses
     return obj
 
 
@@ -266,7 +332,13 @@ def llm_obj_to_timeline(
     target_seconds: int = 60,
     playback_speed: float = 1.4,
 ) -> TimelinePlan:
-    by_id = {str(u.get("utt_id") or u.get("id")): u for u in _normalize_lines(lines)}
+    # Prefer clause units if provided by call_llm_for_plan; else expand now
+    clause_units = llm_obj.get("_clauses")
+    if not isinstance(clause_units, list) or not clause_units:
+        clause_units = expand_lines_to_clauses(lines)
+    by_id = {str(u.get("utt_id") or u.get("id")): u for u in clause_units}
+    # also index parents for fallback
+    parents = {str(u.get("id")): u for u in _normalize_lines(lines)}
     keep = llm_obj.get("keep") or []
     slots: list[PlanSlot] = []
     if not isinstance(keep, list):
@@ -276,13 +348,18 @@ def llm_obj_to_timeline(
         if not isinstance(item, dict):
             continue
         uid = str(item.get("id") or item.get("utt_id") or "")
-        src = by_id.get(uid)
+        src = by_id.get(uid) or parents.get(uid)
         if not src:
-            # try fuzzy by text
+            # try fuzzy by text over all clauses
             text_i = str(item.get("text") or "").strip()
             if text_i:
                 for u in by_id.values():
-                    if text_i[:12] and text_i[:12] in str(u.get("text") or ""):
+                    ut = str(u.get("text") or "")
+                    if text_i[:10] and text_i[:10] in ut:
+                        src = u
+                        uid = str(u.get("id"))
+                        break
+                    if ut[:10] and ut[:10] in text_i:
                         src = u
                         uid = str(u.get("id"))
                         break
@@ -292,14 +369,16 @@ def llm_obj_to_timeline(
         st1 = int(src["t1_ms"])
         t0 = int(item.get("t0_ms") or st0)
         t1 = int(item.get("t1_ms") or st1)
-        # clamp into source utterance window (+small pad)
+        # clamp into source clause/utterance window (+small pad)
         t0 = max(st0, min(st1 - 300, t0))
         t1 = max(t0 + 300, min(st1 + 200, t1))
         text = str(item.get("text") or src.get("text") or "").strip()
         if not text:
             continue
-        # hard safety: still drop obvious price/size tokens
-        if any(x in text for x in ("尺码", "M码", "L码", "券后", "只要", "加购", "小黄车", "包邮")):
+        # hard safety: still drop obvious size / long deal spam
+        if any(x in text for x in ("尺码", "M码", "L码", "胸围", "腰围", "偏大", "偏小")):
+            continue
+        if any(x in text for x in ("加购", "小黄车", "上链接", "点链接")):
             continue
         slots.append(
             PlanSlot(

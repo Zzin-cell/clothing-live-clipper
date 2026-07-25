@@ -1563,13 +1563,22 @@ function setupTranscriptPanelToggle() {
   });
 }
 
-async function loadLlmConfig() {
+async function loadLlmConfig(opts = {}) {
+  const keepMsg = !!opts.keepMsg;
   const st = $("llm-cfg-status");
   const msg = $("llm-cfg-msg");
   try {
     const res = await fetch("/api/system/config");
     const cfg = await res.json();
     if ($("llm_plan")) $("llm_plan").checked = cfg.llm_plan_enabled !== false;
+    // always sync base/model from saved config unless user is mid-edit with values
+    if ($("llm_base_url") && (!keepMsg || !$("llm_base_url").value)) {
+      $("llm_base_url").value = cfg.llm_base_url || $("llm_base_url").value || "";
+    }
+    if ($("llm_model") && (!keepMsg || !$("llm_model").value)) {
+      $("llm_model").value = cfg.llm_model || $("llm_model").value || "";
+    }
+    // if fields empty, fill saved values
     if ($("llm_base_url") && !$("llm_base_url").value) $("llm_base_url").value = cfg.llm_base_url || "";
     if ($("llm_model") && !$("llm_model").value) $("llm_model").value = cfg.llm_model || "";
     if (st) {
@@ -1577,13 +1586,15 @@ async function loadLlmConfig() {
       else if (cfg.has_llm_key) st.textContent = "有Key·检查模型/开关";
       else st.textContent = "请填写 Base/Model/Key";
     }
-    if (msg) {
+    if (msg && !keepMsg) {
       msg.textContent = cfg.llm_plan_ready
         ? `用户配置已启用：${cfg.llm_model || "-"} @ ${cfg.llm_base_url || "-"}（Key ***${cfg.api_key_hint || ""}）。不读环境变量。`
-        : "请填写并保存你的 API。兼容 OpenAI 协议（含多数中转）。未配置则自动规则排片。";
+        : "请填写 Base URL + API Key，点「自动匹配」或手动填 Model，再「测试连通」。";
     }
+    return cfg;
   } catch (e) {
     if (st) st.textContent = "配置读取失败";
+    return null;
   }
 }
 
@@ -1649,7 +1660,7 @@ function setupLlmConfig() {
           : `未拉到模型列表（中转可能禁用 /models）。可手动填 Model。· 延迟 ${ms} ms`;
       }
       loadHealth();
-      loadLlmConfig();
+      await loadLlmConfig({ keepMsg: true });
     } catch (e) {
       if (msg) msg.textContent = "自动匹配失败：" + (e.message || e);
     }
@@ -1657,9 +1668,11 @@ function setupLlmConfig() {
 
   $("llm-probe")?.addEventListener("click", async () => {
     const msg = $("llm-cfg-msg");
+    const st = $("llm-cfg-status");
     if (msg) msg.textContent = "测试连通与延迟中…";
     try {
       const body = collectBody();
+      if (!body.llm_base_url) throw new Error("请先填写 Base URL");
       if (body.llm_api_key && /^https?:\/\//i.test(body.llm_api_key)) {
         throw new Error("API Key 填成网址了。网址请填 Base URL，Key 填 sk-... 字符串");
       }
@@ -1678,34 +1691,42 @@ function setupLlmConfig() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ target: "llm" }),
       });
-      const data = await res.json();
+      const data = await res.json().catch(() => ({}));
       const clientMs = Math.round(performance.now() - t0);
-      const probe = data.probe || data;
-      const ok = !!(probe.ok || probe.llm?.ok);
-      // if probe returned models, fill them
-      const models = probe.models || probe.llm?.models || [];
+      // /api/system/probe returns {ok, probe, status}
+      const probe = (data && data.probe) ? data.probe : data;
+      const ok = !!(probe && probe.ok === true);
+      const models = (probe && probe.models) || [];
       if (models.length) fillModelDatalist(models);
-      if ((probe.auto_picked || probe.model) && probe.model && $("llm_model")) {
-        // if auto-picked or server returned effective model, reflect it
+      if (probe && probe.model && $("llm_model")) {
         if (probe.auto_picked || !$("llm_model").value) $("llm_model").value = probe.model;
       }
-      const lat = probe.latency || {};
-      const total = lat.total_ms != null ? lat.total_ms : probe.latency_ms != null ? probe.latency_ms : clientMs;
-      const chat = lat.chat_ms != null ? `，chat ${lat.chat_ms} ms` : "";
-      const modelsLat = lat.models_ms != null ? `，models ${lat.models_ms} ms` : "";
+      const lat = (probe && probe.latency) || {};
+      const total =
+        lat.total_ms != null
+          ? lat.total_ms
+          : probe && probe.latency_ms != null
+            ? probe.latency_ms
+            : clientMs;
+      const chat = lat.chat_ms != null ? ` · chat ${lat.chat_ms}ms` : "";
+      const modelsLat = lat.models_ms != null ? ` · models ${lat.models_ms}ms` : "";
+      const modelName = (probe && probe.model) || $("llm_model")?.value || "-";
+      const endpoint = (probe && probe.endpoint) || "";
       if (msg) {
         msg.textContent = ok
-          ? `连通成功 · ${probe.model || $("llm_model")?.value || ""}${probe.auto_picked ? "（已自动匹配模型）" : ""} · 延迟 ${total} ms${modelsLat}${chat}`
-          : `连通失败 · 延迟 ${total} ms：${probe.error || probe.detail || data.detail || "unknown"}`;
+          ? `连通成功 · ${modelName} · 延迟 ${total}ms${modelsLat}${chat}${endpoint ? ` · ${endpoint}` : ""}`
+          : `连通失败 · 延迟 ${total}ms：${(probe && (probe.error || probe.detail)) || data.detail || "unknown"}`;
       }
-      // if key was wrong URL before, force user to re-enter
-      if (!ok && String(probe.error || "").includes("API Key 填成网址")) {
+      if (st) st.textContent = ok ? `连通OK · ${total}ms` : "连通失败";
+      if (!ok && String((probe && probe.error) || "").includes("API Key 填成网址")) {
         if ($("llm_api_key")) $("llm_api_key").value = "";
       }
       loadHealth();
-      loadLlmConfig();
+      // keep probe result text, don't overwrite
+      await loadLlmConfig({ keepMsg: true });
     } catch (e) {
       if (msg) msg.textContent = "测试失败：" + (e.message || e);
+      if (st) st.textContent = "测试失败";
     }
   });
 

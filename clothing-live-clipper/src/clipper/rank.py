@@ -706,40 +706,93 @@ def _reorder_section_logical(slots: list[PlanSlot], by_id: dict[str, Clip], role
 
 
 def _eligible(c: Clip) -> bool:
-    """Global keep rules for story plan (no price/size/live filler)."""
+    """Global keep rules for story plan (fast-paced clothing short)."""
     if c.score <= 0 or _is_pure_filler(c):
         return False
     text = c.text or ""
-    if ClaimType.PRICE in c.claim_types or any(p in text for p in _PRICE_TEXT):
-        return False
+    # size always out
     if ClaimType.SIZE in c.claim_types or any(p in text for p in _SIZE_TEXT):
         return False
+    # price mostly out; welfare phrase may remain as optional opener candidate
+    if ClaimType.PRICE in c.claim_types or any(p in text for p in _PRICE_TEXT):
+        if not any(w in text for w in _WELFARE_HOOK_WORDS):
+            return False
     if _looks_like_live_room(text) and not _is_true_feature(c) and not _is_wear_experience(c):
+        return False
+    if any(w in text for w in ("调试", "对一下焦", "喝口水", "稍等一下", "卡了", "卡顿")):
         return False
     return True
 
 
+_PAIN_HOOK_WORDS = (
+    "微胖", "显壮", "小个子", "压身高", "显矮", "显廉价", "显土", "闷汗", "出汗",
+    "遮肉", "遮肚", "遮胯", "梨形", "胯宽", "显腿粗", "不挑人",
+)
+_WELFARE_HOOK_WORDS = (
+    "清仓", "限时", "限量", "现货", "平替", "专柜", "只要", "直播价", "秒杀", "福利",
+)
+_VISUAL_HOOK_WORDS = (
+    "全身", "上身效果", "显瘦", "对比", "特写", "黑白", "两色", "成品", "穿上就",
+)
+_OPENING_BAN_WORDS = (
+    "大家好", "晚上好", "早上好", "欢迎", "家人们", "老铁", "调试", "对一下", "听得到",
+)
+
+
+def _hook_open_score(c: Clip) -> float:
+    """Higher = better 3s opening hook candidate (visual/pain/welfare)."""
+    text = c.text or ""
+    s = 0.0
+    if any(w in text for w in _PAIN_HOOK_WORDS):
+        s += 40.0
+    if any(w in text for w in _VISUAL_HOOK_WORDS):
+        s += 34.0
+    if any(w in text for w in _WELFARE_HOOK_WORDS) and not any(p in text for p in _SIZE_TEXT):
+        s += 22.0
+    if _looks_like_live_room(text) or any(w in text for w in _OPENING_BAN_WORDS):
+        s -= 100.0
+    s += _hook_strength(c) * 0.25
+    try:
+        s += learned_text_score(text, for_hook=True) * 0.4
+    except Exception:
+        pass
+    return s
+
+
 def _logic_order_key(c: Clip) -> tuple:
     """
-    Story logic inspired by good sample shorts:
-    1) open with unique/selling/fabric hook
-    2) fit / structure
-    3) wear experience proof
-    4) detail
-    5) outfit/match later
+    Fast-paced clothing short logic (rules fallback for LLM):
+    3s钩子 → 上身/版型 → 面料 → 细节 → 对比/体验 → 搭配后置
+    priority: 上身效果 > 面料 > 价格
     """
+    text = c.text or ""
     stage = _primary_stage(c)
-    if _is_wear_experience(c) and stage > 2:
+    if any(w in text for w in _PAIN_HOOK_WORDS) or any(w in text for w in _VISUAL_HOOK_WORDS):
+        stage = 0
+    elif _is_true_feature(c) and stage <= 1:
+        stage = 1
+    elif ClaimType.FABRIC in c.claim_types or any(
+        w in text for w in ("面料", "布料", "材质", "垂感", "透气", "不透", "凉感")
+    ):
         stage = 2
+    elif ClaimType.DETAIL in c.claim_types or any(
+        w in text for w in ("细节", "蕾丝", "走线", "扣子", "拉链", "拼接")
+    ):
+        stage = 3
+    elif _is_wear_experience(c):
+        stage = 4
     if _is_outfit_or_change(c):
-        stage = max(stage, 4)
-    uniq = -_unique_feature_boost(c.text or "")
+        stage = max(stage, 5)
+
+    uniq = -_unique_feature_boost(text)
     hook = -_hook_strength(c)
+    open_s = -_hook_open_score(c) if stage == 0 else 0.0
     try:
-        learn = -learned_text_score(c.text or "", for_hook=(stage <= 2))
+        learn = -learned_text_score(text, for_hook=(stage <= 1))
     except Exception:
         learn = 0.0
-    return (stage, uniq, learn, hook, -c.score, c.t0_ms)
+    price_pen = 20.0 if any(p in text for p in _PRICE_TEXT) else 0.0
+    return (stage, open_s, uniq, learn, hook, price_pen, -c.score, c.t0_ms)
 
 
 def build_timeline_plan(
@@ -787,11 +840,14 @@ def build_timeline_plan(
     last_t1: int | None = None
     selected_texts: list[str] = []
 
-    openers = [c for c in ordered if _primary_stage(c) <= 2 and not _is_outfit_or_change(c)]
+    # 3s-style opener: pain / visual / welfare / strongest feature
+    openers = [c for c in ordered if not _is_outfit_or_change(c)]
+    openers = sorted(openers, key=_hook_open_score, reverse=True)
     if not openers:
         openers = ordered[:1]
     if openers:
         first = openers[0]
+        # keep opener short if possible (prefer <= 4.5s source for hook feel)
         selected.append(first)
         used.add(first.clip_id)
         total += first.duration_ms

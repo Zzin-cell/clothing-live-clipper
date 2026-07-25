@@ -94,6 +94,12 @@ def extract_chat_text(resp: dict[str, Any]) -> str:
             content = msg.get("content")
             if isinstance(content, str) and content.strip():
                 return content
+            # deepseek-reasoner / some flash models put text in reasoning_content
+            for rk in ("reasoning_content", "reasoning", "refusal"):
+                rv = msg.get(rk)
+                if isinstance(rv, str) and rv.strip():
+                    # for probe, any non-empty assistant field counts as success
+                    return rv.strip()[:200]
             # content as list of parts
             if isinstance(content, list):
                 parts = []
@@ -108,6 +114,9 @@ def extract_chat_text(resp: dict[str, Any]) -> str:
                 joined = "".join(parts).strip()
                 if joined:
                     return joined
+            # empty string content but HTTP 200 with message object => treat as ok
+            if isinstance(content, str) and "message" in c0:
+                return content  # may be empty; caller decides
             # some providers put text at choice level
             if isinstance(c0.get("text"), str) and c0["text"].strip():
                 return c0["text"]
@@ -115,6 +124,9 @@ def extract_chat_text(resp: dict[str, Any]) -> str:
             delta = c0.get("delta") or {}
             if isinstance(delta.get("content"), str) and delta["content"].strip():
                 return delta["content"]
+            # valid chat completion with empty content still means API is reachable
+            if c0.get("finish_reason") or msg.get("role") == "assistant":
+                return ""
     except Exception:
         pass
 
@@ -261,9 +273,9 @@ def chat_completions(
                 try:
                     raw = _http_json(url, headers, payload, method="POST", timeout=timeout)
                     content = extract_chat_text(raw)
-                    # empty content is still a valid HTTP success for some models; accept non-empty preferred
-                    if not (content or "").strip() and force_json:
-                        # try next payload/auth if JSON expected but empty
+                    # For force_json planning: empty content is unusable, try next variant.
+                    # For probe/fast path: empty-but-valid assistant response still means connected.
+                    if force_json and not (content or "").strip():
                         errors.append(f"empty_content@{url}")
                         continue
                     ms = int((time.perf_counter() - t0) * 1000)
@@ -480,15 +492,16 @@ def ping(
             }
 
         t1 = time.perf_counter()
+        # ultra-light probe body; accept empty assistant content as long as HTTP 200
         out = chat_completions(
-            messages=[{"role": "user", "content": "ok"}],
+            messages=[{"role": "user", "content": "1"}],
             model=picked,
             base_url=base_url,
             api_key=api_key,
             temperature=0,
-            max_tokens=4,
+            max_tokens=1,
             force_json=False,
-            timeout=min(timeout, 20),
+            timeout=min(timeout, 12),
             fast=True,
         )
         chat_ms = int((time.perf_counter() - t1) * 1000)
@@ -498,7 +511,7 @@ def ping(
             "model": out.get("model") or picked,
             "base_url": out.get("base_url"),
             "endpoint": out.get("endpoint"),
-            "content": (out.get("content") or "")[:80],
+            "content": (out.get("content") or "ok")[:80],
             "source": "user_ui",
             "models": models[:100],
             "model_count": len(models),
@@ -507,7 +520,7 @@ def ping(
             "latency": {
                 "total_ms": total_ms,
                 "models_ms": models_ms,
-                "chat_ms": chat_ms,
+                "chat_ms": chat_ms if chat_ms is not None else out.get("latency_ms"),
             },
         }
     except Exception as e:

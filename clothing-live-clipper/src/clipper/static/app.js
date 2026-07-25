@@ -1676,14 +1676,21 @@ function setupLlmConfig() {
       if (body.llm_api_key && /^https?:\/\//i.test(body.llm_api_key)) {
         throw new Error("API Key 填成网址了。网址请填 Base URL，Key 填 sk-... 字符串");
       }
-      // save first so probe uses latest user config
-      const saveRes = await fetch("/api/system/config", {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body),
-      });
-      const saveData = await saveRes.json().catch(() => ({}));
-      if (!saveRes.ok) throw new Error(saveData.detail || "保存配置失败");
+      // save only when fields changed / key provided; avoid extra RTT every probe
+      const needSave =
+        !!body.llm_api_key ||
+        !!body.llm_base_url ||
+        !!body.llm_model ||
+        body.llm_plan != null;
+      if (needSave) {
+        const saveRes = await fetch("/api/system/config", {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        });
+        const saveData = await saveRes.json().catch(() => ({}));
+        if (!saveRes.ok) throw new Error(saveData.detail || "保存配置失败");
+      }
 
       const t0 = performance.now();
       const res = await fetch("/api/system/probe", {
@@ -1702,27 +1709,27 @@ function setupLlmConfig() {
         if (probe.auto_picked || !$("llm_model").value) $("llm_model").value = probe.model;
       }
       const lat = (probe && probe.latency) || {};
+      // Prefer server chat latency (true API delay). Fall back to total/client.
+      const chatMs = lat.chat_ms != null ? lat.chat_ms : probe && probe.latency_ms != null ? probe.latency_ms : null;
       const total =
-        lat.total_ms != null
-          ? lat.total_ms
-          : probe && probe.latency_ms != null
-            ? probe.latency_ms
+        chatMs != null
+          ? chatMs
+          : lat.total_ms != null
+            ? lat.total_ms
             : clientMs;
-      const chat = lat.chat_ms != null ? ` · chat ${lat.chat_ms}ms` : "";
-      const modelsLat = lat.models_ms != null ? ` · models ${lat.models_ms}ms` : "";
       const modelName = (probe && probe.model) || $("llm_model")?.value || "-";
       const endpoint = (probe && probe.endpoint) || "";
       if (msg) {
         msg.textContent = ok
-          ? `连通成功 · ${modelName} · 延迟 ${total}ms${modelsLat}${chat}${endpoint ? ` · ${endpoint}` : ""}`
-          : `连通失败 · 延迟 ${total}ms：${(probe && (probe.error || probe.detail)) || data.detail || "unknown"}`;
+          ? `连通成功 · ${modelName} · API延迟 ${total}ms${endpoint ? ` · ${endpoint}` : ""}`
+          : `连通失败 · ${total}ms：${(probe && (probe.error || probe.detail)) || data.detail || "unknown"}`;
       }
       if (st) st.textContent = ok ? `连通OK · ${total}ms` : "连通失败";
       if (!ok && String((probe && probe.error) || "").includes("API Key 填成网址")) {
         if ($("llm_api_key")) $("llm_api_key").value = "";
       }
+      // lightweight health refresh; do not block/overwrite message
       loadHealth();
-      // keep probe result text, don't overwrite
       await loadLlmConfig({ keepMsg: true });
     } catch (e) {
       if (msg) msg.textContent = "测试失败：" + (e.message || e);

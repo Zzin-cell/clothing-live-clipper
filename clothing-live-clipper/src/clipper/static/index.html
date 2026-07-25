@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>小面 · CapCut</title>
-  <link rel="stylesheet" href="/static/styles.css?v=jy46" />
+  <link rel="stylesheet" href="/static/styles.css?v=jy47" />
 </head>
 <body>
   <div class="jy-app">
@@ -133,45 +133,38 @@
         </div>
       </section>
 
-      <!-- Right: jobs + actions -->
+      <!-- Right: current job + LLM config -->
       <aside class="jy-right">
-        <div class="jy-panel">
+        <div class="jy-panel jy-panel-job">
           <div class="jy-panel-head">
-            <span>草稿参数</span>
+            <span>当前任务</span>
+            <button type="button" class="jy-btn tiny" id="refresh-jobs">刷新状态</button>
           </div>
-          <div class="jy-kv">
-            <div><span>标准</span><b>看不出直播</b></div>
-            <div><span>前20s</span><b>重点吸睛</b></div>
-            <div><span>穿着体验</span><b>可进成片</b></div>
-            <div><span>品类</span><b>衣服</b></div>
-            <div><span>倍速</span><b>1.4x</b></div>
-            <div><span>目标</span><b>~60s</b></div>
-            <div><span>价格/尺码</span><b>剔除</b></div>
-            <div><span>换装搭配</span><b>后移</b></div>
-            <div><span>学习</span><b id="learn-stat">人机闭环</b></div>
-            <div><span>拼接</span><b>直接接</b></div>
-          </div>
-          <p class="jy-hint" id="learn-hint">你每次「保存口播并重剪」都会被记住，后续自动更像你的口味。</p>
+          <div class="jy-actions" id="actions"></div>
+          <p class="jy-hint" id="job-run-hint">支持多任务并发。上传后可继续上传，任务互不影响（听写阶段会短暂串行）。</p>
         </div>
 
-        <div class="jy-panel grow">
+        <div class="jy-panel jy-panel-llm">
           <div class="jy-panel-head">
             <span>LLM 用户配置</span>
             <span class="muted" id="llm-cfg-status">未配置</span>
           </div>
           <form id="llm-config-form" class="jy-form llm-form">
-            <p class="jy-hint">由使用者自行填写并调用，不读取环境变量。完整 OpenAI 兼容调用：自动补 /v1、多鉴权头、多端点/请求体回退，接近 Agent 接入方式，适配约 90% Key/中转。</p>
-            <label class="jy-switch">
+            <p class="jy-hint llm-intro">自行填写并调用，不读环境变量。兼容 OpenAI 协议（自动补 /v1、多鉴权/多端点回退）。</p>
+
+            <label class="jy-switch llm-enable">
               <input type="checkbox" id="llm_plan" checked />
               <span>启用 LLM 逻辑排片</span>
             </label>
+
             <label class="jy-field">
               <span>接口地址 Base URL</span>
               <input type="text" id="llm_base_url" placeholder="https://api.openai.com/v1 或你的中转/v1" />
             </label>
+
             <label class="jy-field">
               <span>模型 Model</span>
-              <input type="text" id="llm_model" placeholder="如 grok-4.5 / gpt-4o-mini / deepseek-chat" list="llm-model-list" />
+              <input type="text" id="llm_model" placeholder="grok-4.5 / gpt-4o-mini / deepseek-chat" list="llm-model-list" />
               <datalist id="llm-model-list">
                 <option value="grok-4.5"></option>
                 <option value="gpt-4o-mini"></option>
@@ -181,29 +174,39 @@
                 <option value="qwen-plus"></option>
               </datalist>
             </label>
+
             <label class="jy-field">
               <span>API Key</span>
               <input type="password" id="llm_api_key" placeholder="粘贴你的 Key（sk-... 或中转 key）" autocomplete="off" />
             </label>
+
             <label class="jy-field">
-              <span>Organization（可选，Azure/部分网关用）</span>
+              <span>Organization（可选）</span>
               <input type="text" id="llm_org" placeholder="可留空" />
             </label>
-            <div class="jy-row">
+
+            <div class="jy-row llm-actions">
               <button type="button" class="jy-btn tiny" id="llm-probe">测试连通</button>
               <button type="submit" class="jy-btn tiny primary" id="llm-save">保存并启用</button>
             </div>
-            <p class="jy-hint" id="llm-cfg-msg">填写后点保存。新上传任务并发处理；GPU听写会排队，LLM/渲染互不长期占用。</p>
+
+            <p class="jy-hint" id="llm-cfg-msg">填写后点保存。新上传将用此配置调用 LLM。</p>
           </form>
         </div>
 
-        <div class="jy-panel">
+        <div class="jy-panel jy-panel-policy">
           <div class="jy-panel-head">
-            <span>当前任务</span>
-            <button type="button" class="jy-btn tiny" id="refresh-jobs">刷新状态</button>
+            <span>成片策略</span>
           </div>
-          <div class="jy-actions" id="actions"></div>
-          <p class="jy-hint" id="job-run-hint">支持多任务并发。上传后可继续上传，任务互不影响（听写阶段会短暂串行）。</p>
+          <div class="jy-kv">
+            <div><span>标准</span><b>看不出直播</b></div>
+            <div><span>节奏</span><b>3秒钩子→上身→细节</b></div>
+            <div><span>优先级</span><b>上身＞面料＞价格</b></div>
+            <div><span>倍速</span><b>1.4x</b></div>
+            <div><span>目标</span><b>~60s</b></div>
+            <div><span>学习</span><b id="learn-stat">人机闭环</b></div>
+          </div>
+          <p class="jy-hint" id="learn-hint">勾选「学习这次重剪」后才会写入口味偏好。</p>
         </div>
       </aside>
     </div>
@@ -239,6 +242,6 @@
     </div>
   </aside>
 
-  <script src="/static/app.js?v=jy46"></script>
+  <script src="/static/app.js?v=jy47"></script>
 </body>
 </html>

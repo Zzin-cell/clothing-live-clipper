@@ -228,6 +228,7 @@ body {
   display: flex;
   flex-direction: column;
   gap: 12px;
+  flex: 0 0 auto;
 }
 .jy-row {
   display: flex;
@@ -237,13 +238,14 @@ body {
   flex-wrap: wrap;
 }
 .jy-field {
-  flex: 1 1 160px;
+  flex: 0 0 auto;
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 6px;
   font-size: 12px;
   color: var(--muted);
   min-width: 0;
+  width: 100%;
 }
 .jy-stepper {
   display: flex; align-items: center; gap: 8px;
@@ -368,31 +370,55 @@ body {
 }
 .learn-switch input { margin: 0; }
 
-.llm-form {
-  gap: 14px !important;
-  padding-bottom: 4px;
+/* right column: fixed logical blocks, no overlapping */
+.jy-right {
+  gap: 12px;
 }
-.llm-form > .jy-hint:first-child {
-  margin: 0 0 2px;
+.jy-panel-job,
+.jy-panel-llm,
+.jy-panel-policy {
+  flex: 0 0 auto;
+}
+.jy-panel-llm {
+  order: 0;
+}
+.jy-panel-job {
+  order: -1;
+}
+
+.llm-form {
+  gap: 12px !important;
+  padding-bottom: 2px;
+  flex: 0 0 auto !important;
+}
+.llm-form .llm-intro {
+  margin: 0;
   padding: 10px 12px;
   background: #f8fafc;
   border: 1px solid var(--line);
   border-radius: 12px;
+  line-height: 1.55;
+}
+.llm-form .jy-field {
+  width: 100%;
+  flex: 0 0 auto;
+  gap: 6px;
 }
 .llm-form .jy-field span {
   font-size: 12px;
   color: var(--muted);
-  line-height: 1.4;
+  line-height: 1.35;
 }
 .llm-form input[type="text"],
 .llm-form input[type="password"] {
   width: 100%;
   border: 1px solid var(--line);
   border-radius: 12px;
-  padding: 11px 12px;
+  padding: 10px 12px;
   font-size: 13px;
   background: #fff;
-  line-height: 1.4;
+  line-height: 1.35;
+  min-height: 40px;
 }
 .llm-form input[type="text"]:focus,
 .llm-form input[type="password"]:focus {
@@ -400,57 +426,45 @@ body {
   border-color: #93c5fd;
   box-shadow: 0 0 0 3px rgba(47, 123, 255, 0.12);
 }
-.llm-form .jy-row {
+.llm-form .llm-enable {
+  width: 100%;
   justify-content: flex-start;
-  gap: 10px;
-  margin-top: 2px;
-}
-.llm-form .jy-switch {
-  width: fit-content;
+  margin: 0;
   padding: 10px 12px;
   border: 1px solid var(--line);
   border-radius: 12px;
   background: #fafafa;
 }
+.llm-form .llm-actions {
+  width: 100%;
+  justify-content: flex-start;
+  gap: 10px;
+  margin: 2px 0 0;
+}
 .llm-form #llm-cfg-msg {
-  margin-top: 2px;
+  margin: 0;
   padding: 10px 12px;
   border-radius: 12px;
   background: #f8fafc;
   border: 1px solid var(--line);
-}
-
-/* center / track breathing room */
-.jy-player-wrap {
-  gap: 10px;
-}
-.jy-timeline-panel {
-  gap: 8px;
-}
-.jy-track-tools {
-  gap: 10px !important;
-  margin: 0 0 12px !important;
-}
-.jy-tracks {
-  gap: 12px;
-}
-.jy-clip {
-  margin-bottom: 2px;
+  line-height: 1.55;
 }
 
 /* right side current-job panel */
 #job-run-hint {
-  margin-top: 12px;
+  margin-top: 10px;
   padding: 10px 12px;
   border-radius: 12px;
   background: #f8fafc;
   border: 1px solid var(--line);
+  line-height: 1.55;
 }
 .jy-actions {
   display: flex;
   flex-wrap: wrap;
   gap: 10px;
   align-items: center;
+  min-height: 28px;
 }
 
 /* avoid tiny cramped buttons in toolbars */
@@ -664,34 +678,24 @@ body {
   height: 10px;
 }
 
-.jy-kv { display: grid; gap: 8px; font-size: 12px; }
-.jy-kv > div {
-  display: flex; justify-content: space-between; gap: 8px;
-  padding: 8px 10px; border-radius: 10px; background: #f8fafc; color: var(--muted); border: 1px solid var(--line);
-}
-.jy-kv b { color: var(--text); font-weight: 700; }
-
-.jy-jobs {
-  flex: 1 1 auto;
-  min-height: 120px;
-  overflow: auto;
-  overscroll-behavior: contain;
+.jy-kv {
   display: grid;
+  grid-template-columns: 1fr 1fr;
   gap: 8px;
-  align-content: start;
+  font-size: 12px;
 }
-.jy-job {
-  padding: 10px; border-radius: 12px; background: #fff; border: 1px solid var(--line);
-  cursor: pointer;
+.jy-kv > div {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 10px;
+  border-radius: 12px;
+  background: #f8fafc;
+  color: var(--muted);
+  border: 1px solid var(--line);
 }
-.jy-job:hover, .jy-job.active { border-color: rgba(0,194,199,.55); box-shadow: 0 0 0 3px rgba(0,194,199,.08); }
-.jy-job .id { font-family: ui-monospace, Consolas, monospace; font-size: 11px; }
-.jy-job .st { font-size: 12px; margin-top: 4px; color: var(--muted); }
-.jy-job .st.ok { color: var(--ok); }
-.jy-job .st.warn { color: var(--warn); }
-.jy-job .st.bad { color: var(--danger); }
+.jy-kv b { color: var(--text); font-weight: 700; font-size: 12px; }
 
-.jy-actions { display: flex; flex-wrap: wrap; gap: 8px; }
 .jy-actions a.jy-btn { text-decoration: none; }
 
 /* transcript drawer */

@@ -840,12 +840,14 @@ function setupPlanTools() {
 }
 
 function setAsrToolsEnabled(on) {
-  ["asr-reload", "asr-to-golden", "asr-to-trust", "asr-to-cta"].forEach((id) => {
+  ["asr-reload", "asr-to-golden"].forEach((id) => {
     if ($(id)) $(id).disabled = !on;
   });
 }
 
 function addAsrToTrack(trackKey, indices) {
+  // single logical track only
+  trackKey = "golden";
   if (!TRACK_ORDER.includes(trackKey)) return;
   if (!planEdit) {
     planEdit = { golden: [], trust: [], cta: [] };
@@ -934,18 +936,16 @@ function renderAsrCards() {
           <input type="checkbox" class="asr-check" ${checked} title="多选后批量加入成片" />
           <span class="clip-drag" title="拖到成片结构">⠿</span>
           <span class="clip-badge">口播 #${idx + 1}</span>
-          <button type="button" class="clip-x asr-add-one" title="加入黄金">＋</button>
+          <button type="button" class="clip-x asr-add-one" title="加入逻辑成片">＋</button>
         </div>
         <textarea class="clip-text-edit" rows="5" placeholder="编辑这段口播词…">${escapeHtml(u.text || "")}</textarea>
         <div class="clip-time-row">
           <label>开始(s)<input class="clip-t0s" type="number" step="0.1" min="0" value="${a}" /></label>
           <label>结束(s)<input class="clip-t1s" type="number" step="0.1" min="0" value="${b}" /></label>
         </div>
-        <div class="meta">可改词/改时码 · 拖到右侧成片结构 · 或勾选后点 +黄金/信任/收尾</div>
+        <div class="meta">可改词/改时码 · 拖到中间逻辑成片 · 或勾选后点「+加入成片」</div>
         <div class="clip-tools">
-          <button type="button" class="asr-add-golden">+黄金</button>
-          <button type="button" class="asr-add-trust">+信任</button>
-          <button type="button" class="asr-add-cta">+收尾</button>
+          <button type="button" class="asr-add-golden">+加入成片</button>
         </div>
       </div>`;
     })
@@ -1023,9 +1023,14 @@ function ensureAsrEventsBound() {
         asrCards[idx].t1_ms = Math.max(t0 + 300, Math.round(Number(t1s.value || 0) * 1000));
       }
     }
-    if (btn.classList.contains("asr-add-golden") || btn.classList.contains("asr-add-one")) addAsrToTrack("golden", [idx]);
-    else if (btn.classList.contains("asr-add-trust")) addAsrToTrack("trust", [idx]);
-    else if (btn.classList.contains("asr-add-cta")) addAsrToTrack("cta", [idx]);
+    if (
+      btn.classList.contains("asr-add-golden") ||
+      btn.classList.contains("asr-add-one") ||
+      btn.classList.contains("asr-add-trust") ||
+      btn.classList.contains("asr-add-cta")
+    ) {
+      addAsrToTrack("golden", [idx]);
+    }
   });
 
   box.addEventListener("dragstart", (e) => {
@@ -1095,8 +1100,6 @@ function setupAsrTools() {
     if (currentJobId) loadTranscript(currentJobId);
   });
   $("asr-to-golden")?.addEventListener("click", () => addAsrToTrack("golden"));
-  $("asr-to-trust")?.addEventListener("click", () => addAsrToTrack("trust"));
-  $("asr-to-cta")?.addEventListener("click", () => addAsrToTrack("cta"));
 }
 
 function renderJob(data) {

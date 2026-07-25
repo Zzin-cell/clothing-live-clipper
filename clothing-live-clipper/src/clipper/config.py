@@ -171,6 +171,22 @@ class Settings:
             raw = (_get(name) or ("true" if default else "false")).strip().lower()
             return raw in {"1", "true", "yes", "on"}
 
+        # Multi-user: LLM credentials never come from env. Frontend user config only.
+        llm_plan = True
+        llm_key = None
+        llm_base = ""
+        llm_model = ""
+        try:
+            from clipper.user_llm import runtime_llm
+
+            rt = runtime_llm()
+            llm_plan = bool(rt.get("enabled", True) and rt.get("plan_enabled", True))
+            llm_key = (rt.get("api_key") or None)
+            llm_base = str(rt.get("base_url") or "")
+            llm_model = str(rt.get("model") or "")
+        except Exception:
+            pass
+
         return cls(
             playback_speed=speed,
             golden_features_only=_flag("CLIPPER_GOLDEN_FEATURES_ONLY", True),
@@ -179,11 +195,10 @@ class Settings:
             ),
             exclude_price_from_cut=_flag("CLIPPER_EXCLUDE_PRICE", True),
             clothing_only=_flag("CLIPPER_CLOTHING_ONLY", True),
-            # default on when not explicitly disabled; worker still needs key
-            llm_plan_enabled=_flag("CLIPPER_LLM_PLAN", True),
-            llm_api_key=resolve_llm_key() or None,
-            llm_base_url=resolve_llm_base_url(),
-            llm_model=resolve_llm_model(),
+            llm_plan_enabled=llm_plan,
+            llm_api_key=llm_key,
+            llm_base_url=llm_base,
+            llm_model=llm_model,
         )
 
 

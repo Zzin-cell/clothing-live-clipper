@@ -34,7 +34,8 @@
    - 渲染 `final.mp4`  
 6. **摘要** → `review.md` / `learning_debug.json`  
 
-开关：`CLIPPER_LLM_PLAN=true` 且配置 `CLIPPER_LLM_API_KEY` 时走 LLM；否则规则。
+开关：前端「LLM 用户配置」填写 Base URL / Model / API Key 并启用后走 LLM；  
+配置保存在 `output/user_config/llm.json`（**不读 env 密钥**）。未配置或失败则规则回退。
 
 ## 3. 反剪链路（人工）
 

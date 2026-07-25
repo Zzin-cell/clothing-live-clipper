@@ -63,7 +63,7 @@ async function loadHealth() {
     el.className = "jy-pill " + (ok ? "ok" : "bad");
     const llmReady = !!data.llm_plan_ready;
     el.textContent = ok
-      ? `本机就绪 · ffmpeg${data.ffmpeg ? "✓" : "·"} · ${llmReady ? "LLM排片✓" : "规则排片"}`
+      ? `本机就绪 · ffmpeg${data.ffmpeg ? "✓" : "·"} · ${llmReady ? "用户LLM✓" : "待填LLM/规则"}`
       : `环境异常 · ffmpeg${data.ffmpeg ? "✓" : "缺失"}`;
   } catch (e) {
     el.className = "jy-pill bad";

@@ -193,21 +193,17 @@ def chat_completions(
     force_json: bool = False,
     timeout: int = 180,
     cfg: dict[str, Any] | None = None,
+    fast: bool = False,
 ) -> dict[str, Any]:
     """
     Full Agent-style OpenAI chat.completions call with wide compatibility.
 
-    Returns:
-      {
-        "content": str,
-        "raw": dict,
-        "model": str,
-        "base_url": str,
-        "endpoint": str,
-        "auth_variant": int,
-        "payload_variant": int,
-      }
+    fast=True: prefer last successful route and minimal retries (for probe/speed).
     """
+    import time
+
+    from clipper.user_llm import remember_successful_route
+
     rt = cfg or runtime_llm()
     key = (api_key if api_key is not None else rt.get("api_key") or "").strip()
     base = normalize_base_url(base_url if base_url is not None else (rt.get("base_url") or ""))
@@ -235,13 +231,51 @@ def chat_completions(
         force_json=force_json,
     )
 
+    # Prefer last known-good route first (big speed win after first success)
+    last_ep = str(rt.get("last_endpoint") or "")
+    last_auth = int(rt.get("last_auth_variant") or 0)
+    last_payload = int(rt.get("last_payload_variant") or 1)
+    if last_ep:
+        endpoints = [last_ep] + [u for u in endpoints if u != last_ep]
+    if 0 <= last_auth < len(headers_list):
+        headers_list = [headers_list[last_auth]] + [
+            h for i, h in enumerate(headers_list) if i != last_auth
+        ]
+    if 0 <= last_payload < len(payloads):
+        payloads = [payloads[last_payload]] + [
+            p for i, p in enumerate(payloads) if i != last_payload
+        ]
+
+    # Fast mode: only first endpoint + first 2 auth + first 2 payloads
+    if fast:
+        endpoints = endpoints[:1]
+        headers_list = headers_list[:2]
+        payloads = payloads[:2]
+        timeout = min(timeout, 25)
+
     errors: list[str] = []
+    t0 = time.perf_counter()
     for url in endpoints:
         for hi, headers in enumerate(headers_list):
             for pi, payload in enumerate(payloads):
                 try:
                     raw = _http_json(url, headers, payload, method="POST", timeout=timeout)
                     content = extract_chat_text(raw)
+                    # empty content is still a valid HTTP success for some models; accept non-empty preferred
+                    if not (content or "").strip() and force_json:
+                        # try next payload/auth if JSON expected but empty
+                        errors.append(f"empty_content@{url}")
+                        continue
+                    ms = int((time.perf_counter() - t0) * 1000)
+                    try:
+                        remember_successful_route(
+                            endpoint=url,
+                            auth_variant=hi if not last_ep else last_auth,
+                            payload_variant=pi if not last_ep else last_payload,
+                            latency_ms=ms,
+                        )
+                    except Exception:
+                        pass
                     return {
                         "content": content,
                         "raw": raw,
@@ -250,6 +284,7 @@ def chat_completions(
                         "endpoint": url,
                         "auth_variant": hi,
                         "payload_variant": pi,
+                        "latency_ms": ms,
                     }
                 except OpenAICompatError as e:
                     msg = str(e)
@@ -392,10 +427,10 @@ def ping(
     base_url: str | None = None,
     api_key: str | None = None,
     model: str | None = None,
-    timeout: int = 40,
-    auto_pick_model: bool = True,
+    timeout: int = 20,
+    auto_pick_model: bool = False,
 ) -> dict[str, Any]:
-    """Connectivity probe used by frontend '测试连通' (includes latency)."""
+    """Fast connectivity probe: chat only by default (includes latency)."""
     import time
 
     t_all = time.perf_counter()
@@ -422,28 +457,39 @@ def ping(
         mdl = (model or "").strip() or None
         models: list[str] = []
         picked = mdl
-        if auto_pick_model:
+        # Only fetch /models when model empty or explicitly requested
+        if auto_pick_model or not picked:
             t0 = time.perf_counter()
             disc = discover_models_and_pick(
-                base_url=base_url, api_key=api_key, preferred=mdl, timeout=min(30, timeout)
+                base_url=base_url, api_key=api_key, preferred=mdl, timeout=min(12, timeout)
             )
             models_ms = int((time.perf_counter() - t0) * 1000)
             models = disc.get("models") or []
-            if not mdl:
+            if not picked:
                 picked = disc.get("picked")
-            elif models and mdl not in models:
-                # user typed unavailable model -> auto switch to available
-                picked = disc.get("picked") or mdl
+            elif models and picked not in models:
+                picked = disc.get("picked") or picked
+        if not picked:
+            return {
+                "ok": False,
+                "error": "未指定模型，且 /models 未返回可用模型",
+                "source": "user_ui",
+                "latency_ms": int((time.perf_counter() - t_all) * 1000),
+                "models": models[:100],
+                "model_count": len(models),
+            }
+
         t1 = time.perf_counter()
         out = chat_completions(
-            messages=[{"role": "user", "content": "reply with ok only"}],
+            messages=[{"role": "user", "content": "ok"}],
             model=picked,
             base_url=base_url,
             api_key=api_key,
             temperature=0,
-            max_tokens=8,
+            max_tokens=4,
             force_json=False,
-            timeout=timeout,
+            timeout=min(timeout, 20),
+            fast=True,
         )
         chat_ms = int((time.perf_counter() - t1) * 1000)
         total_ms = int((time.perf_counter() - t_all) * 1000)
@@ -456,7 +502,7 @@ def ping(
             "source": "user_ui",
             "models": models[:100],
             "model_count": len(models),
-            "auto_picked": bool(auto_pick_model and picked and picked != (model or "").strip()),
+            "auto_picked": bool(picked and picked != (model or "").strip()),
             "latency_ms": total_ms,
             "latency": {
                 "total_ms": total_ms,
@@ -466,20 +512,13 @@ def ping(
         }
     except Exception as e:
         total_ms = int((time.perf_counter() - t_all) * 1000)
-        # still try return model list if auth works but chat fails
-        try:
-            t0 = time.perf_counter()
-            models = list_models(base_url=base_url, api_key=api_key, timeout=20)
-            models_ms = int((time.perf_counter() - t0) * 1000)
-        except Exception:
-            models = []
         return {
             "ok": False,
             "error": str(e)[:500],
             "source": "user_ui",
-            "models": models[:100],
-            "model_count": len(models),
-            "picked": pick_default_model(models, preferred=model),
+            "models": [],
+            "model_count": 0,
+            "picked": model,
             "latency_ms": total_ms,
             "latency": {
                 "total_ms": total_ms,

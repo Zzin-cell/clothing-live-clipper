@@ -314,8 +314,9 @@ def call_llm_for_plan(
             temperature=0.2,
             max_tokens=4096,
             force_json=True,
-            timeout=180,
+            timeout=120,
             cfg=cfg,
+            fast=False,  # first success route is cached; subsequent calls become fast
         )
     except OpenAICompatError as e:
         raise RuntimeError(f"llm_request_failed:{e}") from e

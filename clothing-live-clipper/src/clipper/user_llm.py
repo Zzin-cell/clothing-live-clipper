@@ -30,6 +30,11 @@ def _default() -> dict[str, Any]:
         "api_style": "openai_chat",  # openai_chat
         "organization": "",
         "extra_headers": {},
+        # last successful call path for speed (skip blind retries)
+        "last_endpoint": "",
+        "last_auth_variant": 0,
+        "last_payload_variant": 1,
+        "last_ok_ms": None,
     }
 
 
@@ -240,7 +245,35 @@ def runtime_llm() -> dict[str, Any]:
         "model": str(d.get("model") or "").strip(),
         "organization": str(d.get("organization") or "").strip(),
         "extra_headers": dict(d.get("extra_headers") or {}),
+        "last_endpoint": str(d.get("last_endpoint") or ""),
+        "last_auth_variant": int(d.get("last_auth_variant") or 0),
+        "last_payload_variant": int(d.get("last_payload_variant") or 1),
+        "last_ok_ms": d.get("last_ok_ms"),
     }
+
+
+def remember_successful_route(
+    *,
+    endpoint: str | None = None,
+    auth_variant: int | None = None,
+    payload_variant: int | None = None,
+    latency_ms: int | None = None,
+) -> None:
+    """Persist last working route so next calls are fast (no blind multi-retry)."""
+    d = load_user_llm()
+    if endpoint:
+        d["last_endpoint"] = str(endpoint)
+    if auth_variant is not None:
+        d["last_auth_variant"] = int(auth_variant)
+    if payload_variant is not None:
+        d["last_payload_variant"] = int(payload_variant)
+    if latency_ms is not None:
+        d["last_ok_ms"] = int(latency_ms)
+    USER_CFG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with _lock:
+        USER_CFG_PATH.write_text(json.dumps(d, ensure_ascii=False, indent=2), encoding="utf-8")
+        _CACHE.clear()
+        _CACHE.update(d)
 
 
 def build_openai_headers(cfg: dict[str, Any] | None = None) -> dict[str, str]:

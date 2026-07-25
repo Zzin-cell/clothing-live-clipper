@@ -253,8 +253,8 @@ def probe_whisper(timeout_s: float = 30.0) -> dict[str, Any]:
         return {"target": "whisper", "ok": False, "error": str(e)}
 
 
-def probe_llm(timeout_s: float = 40.0) -> dict[str, Any]:
-    """Probe user UI LLM config via full OpenAI-compatible client."""
+def probe_llm(timeout_s: float = 20.0) -> dict[str, Any]:
+    """Fast probe of user UI LLM config (chat only, with latency)."""
     try:
         from clipper.openai_compat import ping
         from clipper.user_llm import runtime_llm
@@ -264,7 +264,8 @@ def probe_llm(timeout_s: float = 40.0) -> dict[str, Any]:
             base_url=cfg.get("base_url"),
             api_key=cfg.get("api_key"),
             model=cfg.get("model"),
-            timeout=int(timeout_s),
+            timeout=int(min(timeout_s, 20)),
+            auto_pick_model=False,
         )
         out["target"] = "llm"
         out["optional"] = True

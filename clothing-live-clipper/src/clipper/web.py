@@ -34,8 +34,11 @@ class ConfigUpdate(BaseModel):
     api_key: str | None = None
     base_url: str | None = None
     asr_model: str | None = None
+    llm_api_key: str | None = None
+    llm_base_url: str | None = None
     llm_model: str | None = None
     llm_enabled: bool | None = None
+    llm_plan: bool | None = None
     asr_enabled: bool | None = None
     asr_provider: str | None = None
 

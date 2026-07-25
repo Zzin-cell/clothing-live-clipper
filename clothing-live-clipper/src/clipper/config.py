@@ -99,7 +99,8 @@ def resolve_llm_base_url() -> str:
 
 
 def resolve_llm_model() -> str:
-    return (_get("CLIPPER_LLM_MODEL") or "gpt-4o-mini").strip()
+    # default grok-4.5 for current distributor gateway; override via env/UI
+    return (_get("CLIPPER_LLM_MODEL") or "grok-4.5").strip()
 
 
 def _key_source() -> str:
@@ -349,10 +350,22 @@ def apply_config_update(payload: dict[str, Any], *, env_path: Path | None = None
         put("CLIPPER_ASR_API_KEY", str(payload["api_key"]).strip())
         put("OPENAI_API_KEY", str(payload["api_key"]).strip())
 
+    # dedicated LLM key (preferred for plan)
+    if "llm_api_key" in payload and str(payload.get("llm_api_key") or "").strip():
+        k = str(payload["llm_api_key"]).strip()
+        put("CLIPPER_LLM_API_KEY", k)
+        # also set OPENAI_API_KEY so shared clients work
+        put("OPENAI_API_KEY", k)
+
     if "base_url" in payload and payload.get("base_url") is not None:
         bu = str(payload.get("base_url") or "").strip().rstrip("/")
         if bu:
             put("CLIPPER_ASR_BASE_URL", bu)
+            put("CLIPPER_LLM_BASE_URL", bu)
+
+    if "llm_base_url" in payload and payload.get("llm_base_url") is not None:
+        bu = str(payload.get("llm_base_url") or "").strip().rstrip("/")
+        if bu:
             put("CLIPPER_LLM_BASE_URL", bu)
 
     if "asr_model" in payload and payload.get("asr_model") is not None:
@@ -367,6 +380,9 @@ def apply_config_update(payload: dict[str, Any], *, env_path: Path | None = None
 
     if "llm_enabled" in payload:
         put("CLIPPER_LLM_ENABLED", "true" if payload.get("llm_enabled") else "false")
+
+    if "llm_plan" in payload:
+        put("CLIPPER_LLM_PLAN", "true" if payload.get("llm_plan") else "false")
 
     if "asr_enabled" in payload:
         put("CLIPPER_ASR_ENABLED", "true" if payload.get("asr_enabled") else "false")

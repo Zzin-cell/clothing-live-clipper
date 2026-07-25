@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>小面 · CapCut</title>
-  <link rel="stylesheet" href="/static/styles.css?v=jy35" />
+  <link rel="stylesheet" href="/static/styles.css?v=jy41" />
 </head>
 <body>
   <div class="jy-app">
@@ -156,6 +156,42 @@
           <p class="jy-hint" id="learn-hint">你每次「保存口播并重剪」都会被记住，后续自动更像你的口味。</p>
         </div>
 
+        <div class="jy-panel">
+          <div class="jy-panel-head">
+            <span>LLM 排片配置</span>
+            <span class="muted" id="llm-cfg-status">检测中…</span>
+          </div>
+          <form id="llm-config-form" class="jy-form llm-form">
+            <label class="jy-switch">
+              <input type="checkbox" id="llm_plan" checked />
+              <span>启用 LLM 逻辑排片</span>
+            </label>
+            <label class="jy-field">
+              <span>接口地址 Base URL</span>
+              <input type="text" id="llm_base_url" placeholder="https://api.openai.com/v1" />
+            </label>
+            <label class="jy-field">
+              <span>模型 Model</span>
+              <input type="text" id="llm_model" placeholder="grok-4.5" list="llm-model-list" />
+              <datalist id="llm-model-list">
+                <option value="grok-4.5"></option>
+                <option value="gpt-4o-mini"></option>
+                <option value="gpt-4o"></option>
+                <option value="deepseek-chat"></option>
+              </datalist>
+            </label>
+            <label class="jy-field">
+              <span>API Key（留空则不修改已有 Key）</span>
+              <input type="password" id="llm_api_key" placeholder="sk-..." autocomplete="off" />
+            </label>
+            <div class="jy-row">
+              <button type="button" class="jy-btn tiny" id="llm-probe">测试连通</button>
+              <button type="submit" class="jy-btn tiny primary" id="llm-save">保存配置</button>
+            </div>
+            <p class="jy-hint" id="llm-cfg-msg">ASR 全量小句 → LLM 提取主点并重排 → 反剪。失败自动回退规则。</p>
+          </form>
+        </div>
+
         <div class="jy-panel grow">
           <div class="jy-panel-head">
             <span>历史任务</span>
@@ -201,6 +237,6 @@
     </div>
   </aside>
 
-  <script src="/static/app.js?v=jy40"></script>
+  <script src="/static/app.js?v=jy41"></script>
 </body>
 </html>

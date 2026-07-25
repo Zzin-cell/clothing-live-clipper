@@ -332,6 +332,19 @@ body {
   user-select: none;
 }
 .learn-switch input { margin: 0; }
+
+.llm-form { gap: 8px; }
+.llm-form .jy-field span { font-size: 12px; color: var(--muted); }
+.llm-form input[type="text"],
+.llm-form input[type="password"] {
+  width: 100%;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 8px 10px;
+  font-size: 12px;
+  background: #fff;
+}
+.llm-form .jy-row { justify-content: flex-start; }
 .jy-tracks {
   flex: 1 1 auto;
   min-height: 0;

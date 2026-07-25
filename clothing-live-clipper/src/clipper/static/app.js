@@ -1299,6 +1299,15 @@ async function loadJobs() {
               : ""
           }${j.final_duration_s ? ` · ${j.final_duration_s}s` : ""}</div>
           <div class="st">${escapeHtml(j.video_source || "")}</div>
+          <div class="st muted">${escapeHtml(
+            j.planner === "llm"
+              ? `LLM${j.llm_model ? "·" + j.llm_model : ""}`
+              : j.llm_fallback
+                ? "规则(LLM失败回退)"
+                : j.planner
+                  ? "规则"
+                  : ""
+          )}</div>
         </div>`;
       })
       .join("");
@@ -1561,6 +1570,103 @@ function setupTranscriptPanelToggle() {
   });
 }
 
+async function loadLlmConfig() {
+  const st = $("llm-cfg-status");
+  const msg = $("llm-cfg-msg");
+  try {
+    const res = await fetch("/api/system/config");
+    const cfg = await res.json();
+    if ($("llm_plan")) $("llm_plan").checked = cfg.llm_plan_enabled !== false;
+    if ($("llm_base_url")) $("llm_base_url").value = cfg.llm_base_url || "";
+    if ($("llm_model")) $("llm_model").value = cfg.llm_model || "grok-4.5";
+    if (st) {
+      if (cfg.llm_plan_ready) st.textContent = `已就绪 · ${cfg.llm_model || ""}`;
+      else if (cfg.has_llm_key) st.textContent = "有Key·排片关闭";
+      else st.textContent = "未配置Key·将回退规则";
+    }
+    if (msg && cfg.has_llm_key) {
+      msg.textContent = `当前模型 ${cfg.llm_model || "-"} @ ${cfg.llm_base_url || "-"}（Key ***${cfg.api_key_hint || ""}）`;
+    }
+  } catch (e) {
+    if (st) st.textContent = "配置读取失败";
+  }
+}
+
+function setupLlmConfig() {
+  const form = $("llm-config-form");
+  if (!form) return;
+  loadLlmConfig();
+
+  $("llm-probe")?.addEventListener("click", async () => {
+    const msg = $("llm-cfg-msg");
+    if (msg) msg.textContent = "测试中…";
+    try {
+      // save current form first (session+persist) so probe uses latest model/base
+      const body = {
+        persist: true,
+        llm_plan: !!$("llm_plan")?.checked,
+        llm_enabled: true,
+        llm_base_url: $("llm_base_url")?.value?.trim() || undefined,
+        llm_model: $("llm_model")?.value?.trim() || undefined,
+      };
+      const key = $("llm_api_key")?.value?.trim();
+      if (key) body.llm_api_key = key;
+      await fetch("/api/system/config", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      const res = await fetch("/api/system/probe", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ target: "llm" }),
+      });
+      const data = await res.json();
+      const probe = data.probe || data;
+      const ok = !!(probe.ok || probe.llm?.ok || data.status?.llm?.ok);
+      if (msg) {
+        msg.textContent = ok
+          ? `连通成功 · ${$("llm_model")?.value || ""}`
+          : `连通失败：${probe.error || probe.llm?.error || data.detail || "unknown"}`;
+      }
+      loadHealth();
+      loadLlmConfig();
+    } catch (e) {
+      if (msg) msg.textContent = "测试失败：" + (e.message || e);
+    }
+  });
+
+  form.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const msg = $("llm-cfg-msg");
+    if (msg) msg.textContent = "保存中…";
+    try {
+      const body = {
+        persist: true,
+        llm_plan: !!$("llm_plan")?.checked,
+        llm_enabled: true,
+        llm_base_url: $("llm_base_url")?.value?.trim() || undefined,
+        llm_model: $("llm_model")?.value?.trim() || undefined,
+      };
+      const key = $("llm_api_key")?.value?.trim();
+      if (key) body.llm_api_key = key;
+      const res = await fetch("/api/system/config", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.detail || "保存失败");
+      if ($("llm_api_key")) $("llm_api_key").value = "";
+      if (msg) msg.textContent = "已保存。新上传视频将按此 LLM 配置排片。";
+      loadHealth();
+      loadLlmConfig();
+    } catch (ex) {
+      if (msg) msg.textContent = "保存失败：" + (ex.message || ex);
+    }
+  });
+}
+
 $("refresh-jobs")?.addEventListener("click", loadJobs);
 loadHealth();
 loadJobs();
@@ -1569,3 +1675,4 @@ setupTranscriptModule();
 setupPlanTools();
 setupAsrTools();
 setupTranscriptPanelToggle();
+setupLlmConfig();

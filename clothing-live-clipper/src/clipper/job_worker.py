@@ -125,19 +125,179 @@ def process_job_dir(job_dir: Path) -> None:
         _write_meta(job_dir, meta)
         _set_progress(job_dir, "asr_done", 40, f"听写完成 {len(raw)} 句 · {meta['asr_seconds']}s")
 
-        _set_progress(job_dir, "filter", 45, "过滤无效/非服装内容（含学习偏好）")
-        # source length for 1.4x → ~60s final
         sp = speed if speed > 0 else 1.4
+        settings = Settings.from_env()
+        settings = Settings(
+            target_duration_s=target,
+            golden_s=settings.golden_s,
+            cta_s=settings.cta_s,
+            min_clip_ms=settings.min_clip_ms,
+            max_clip_ms=settings.max_clip_ms,
+            min_plan_ms=settings.min_plan_ms,
+            max_plan_ms=settings.max_plan_ms,
+            playback_speed=sp,
+            golden_weight_ratio=settings.golden_weight_ratio,
+            golden_features_only=settings.golden_features_only,
+            demote_outfit_change_from_golden=settings.demote_outfit_change_from_golden,
+            exclude_price_from_cut=settings.exclude_price_from_cut,
+            clothing_only=settings.clothing_only,
+            de_live_room_feel=getattr(settings, "de_live_room_feel", True),
+            unique_features_first=getattr(settings, "unique_features_first", True),
+            llm_plan_enabled=getattr(settings, "llm_plan_enabled", True),
+            llm_api_key=settings.llm_api_key,
+            llm_base_url=settings.llm_base_url,
+            llm_model=settings.llm_model,
+        )
+
+        tr_path = job_dir / "transcript_for_clipper.json"
+        planner = "rules"
+        llm_debug: dict[str, Any] = {}
+        used_llm = False
+
+        # ---- Preferred path: ASR -> LLM logic plan -> reverse cut ----
+        can_llm = bool(getattr(settings, "llm_plan_enabled", True) and (settings.llm_api_key or "").strip())
+        if can_llm:
+            _set_progress(job_dir, "llm_plan", 55, "LLM 逻辑处理口播稿…")
+            try:
+                from clipper.llm_plan import plan_from_asr_with_llm
+                from asr_enhance import is_garbage_asr_text  # type: ignore
+
+                # light pre-clean only (keep info for LLM; drop pure hallucination)
+                llm_input = []
+                for u in raw:
+                    if not isinstance(u, dict):
+                        continue
+                    tx = str(u.get("text") or "").strip()
+                    if not tx:
+                        continue
+                    try:
+                        if is_garbage_asr_text(tx):
+                            continue
+                    except Exception:
+                        pass
+                    llm_input.append(u)
+                if not llm_input:
+                    llm_input = list(raw)
+
+                plan_llm, llm_obj = plan_from_asr_with_llm(
+                    llm_input,
+                    target_seconds=target,
+                    playback_speed=sp,
+                    settings=settings,
+                )
+                llm_debug = {
+                    "product_summary": llm_obj.get("product_summary"),
+                    "logic": llm_obj.get("logic"),
+                    "notes": llm_obj.get("notes"),
+                    "drop_ids": llm_obj.get("drop_ids"),
+                    "_meta": llm_obj.get("_meta"),
+                    "keep_n": len(plan_llm.golden),
+                }
+                (job_dir / "llm_plan.json").write_text(
+                    json.dumps(llm_obj, ensure_ascii=False, indent=2), encoding="utf-8"
+                )
+                (job_dir / "plan.json").write_text(
+                    plan_llm.model_dump_json(indent=2), encoding="utf-8"
+                )
+                # keep lines for UI / learning compatibility
+                kept_lines = []
+                for i, s in enumerate(plan_llm.golden):
+                    kept_lines.append(
+                        {
+                            "utt_id": str(s.clip_id or f"llm{i:04d}"),
+                            "text": s.text,
+                            "t0_ms": int(s.t0_ms),
+                            "t1_ms": int(s.t1_ms),
+                        }
+                    )
+                tr_path.write_text(
+                    json.dumps(kept_lines, ensure_ascii=False, indent=2), encoding="utf-8"
+                )
+                planner = "llm"
+                used_llm = True
+                meta = _read_meta(job_dir)
+                meta["planner"] = "llm"
+                meta["llm_model"] = (llm_obj.get("_meta") or {}).get("model") or settings.llm_model
+                meta["llm_summary"] = str(llm_obj.get("product_summary") or "")[:120]
+                meta["selected_clips"] = len(plan_llm.golden)
+                meta["warnings"] = list(plan_llm.warnings or [])
+                _write_meta(job_dir, meta)
+
+                if render:
+                    _set_progress(job_dir, "render", 80, f"按 LLM 逻辑反剪渲染（{len(plan_llm.golden)}段）")
+                    render_from_plan_only(job_dir)
+                    # render_from_plan_only writes final status; reload
+                    meta = _read_meta(job_dir)
+                    meta["planner"] = "llm"
+                    meta["transcript_source"] = "faster_whisper_local"
+                    meta["playback_speed"] = sp
+                    meta["llm_summary"] = str(llm_obj.get("product_summary") or "")[:120]
+                    _write_meta(job_dir, meta)
+                else:
+                    meta = _read_meta(job_dir)
+                    meta.update(
+                        {
+                            "status": "success_partial",
+                            "stage": "done",
+                            "progress": 100,
+                            "finished_at": _utc_now(),
+                            "has_final": False,
+                            "output_mp4": False,
+                            "planner": "llm",
+                            "worker": "local_auto",
+                            "playback_speed": sp,
+                            "selected_clips": len(plan_llm.golden),
+                            "duration_s": plan_llm.total_duration_ms / 1000.0,
+                            "warnings": plan_llm.warnings,
+                            "error": None,
+                        }
+                    )
+                    _write_meta(job_dir, meta)
+
+                # learning debug (planner=llm)
+                try:
+                    from clipper.learning import learning_status
+
+                    (job_dir / "learning_debug.json").write_text(
+                        json.dumps(
+                            {
+                                "planner": "llm",
+                                "status": learning_status(),
+                                "llm": llm_debug,
+                            },
+                            ensure_ascii=False,
+                            indent=2,
+                        ),
+                        encoding="utf-8",
+                    )
+                except Exception:
+                    pass
+                return
+            except Exception as e:
+                # fall through to rules
+                meta = _read_meta(job_dir)
+                meta["planner"] = "rules"
+                meta["llm_fallback"] = True
+                meta["llm_error"] = str(e)[:500]
+                _write_meta(job_dir, meta)
+                _set_progress(job_dir, "filter", 50, f"LLM 不可用，回退规则：{str(e)[:80]}")
+        else:
+            meta = _read_meta(job_dir)
+            meta["planner"] = "rules"
+            meta["llm_fallback"] = False
+            meta["llm_error"] = "llm_plan_disabled_or_missing_key"
+            _write_meta(job_dir, meta)
+
+        # ---- Fallback path: rules filter + rank + render ----
+        _set_progress(job_dir, "filter", 52, "过滤无效/非服装内容（规则+学习）")
         kept = filter_for_duration(
             raw,
             target_ms=int(84_000 * sp / 1.4),
             min_ms=int(76_000 * sp / 1.4),
             max_ms=int(92_000 * sp / 1.4),
         )
-        tr_path = job_dir / "transcript_for_clipper.json"
         tr_path.write_text(json.dumps(kept, ensure_ascii=False, indent=2), encoding="utf-8")
 
-        # attach learning diagnostics for UI/debug
         try:
             from clipper.learning import learned_text_score, learning_status
 
@@ -155,8 +315,10 @@ def process_job_dir(job_dir: Path) -> None:
             (job_dir / "learning_debug.json").write_text(
                 json.dumps(
                     {
+                        "planner": "rules",
                         "status": learning_status(),
                         "kept_top": learn_rows[:12],
+                        "llm": llm_debug or None,
                     },
                     ensure_ascii=False,
                     indent=2,
@@ -173,31 +335,7 @@ def process_job_dir(job_dir: Path) -> None:
             meta["learning_error"] = str(e)
             _write_meta(job_dir, meta)
 
-        _set_progress(job_dir, "clipper", 65, "卖点排序与时间轴（学习加权）")
-        settings = Settings.from_env()
-        # rebuild settings with target + speed
-        settings = Settings(
-            target_duration_s=target,
-            golden_s=settings.golden_s,
-            cta_s=settings.cta_s,
-            min_clip_ms=settings.min_clip_ms,
-            max_clip_ms=settings.max_clip_ms,
-            min_plan_ms=settings.min_plan_ms,
-            max_plan_ms=settings.max_plan_ms,
-            playback_speed=sp,
-            golden_weight_ratio=settings.golden_weight_ratio,
-            # always inherit global product policy
-            golden_features_only=settings.golden_features_only,
-            demote_outfit_change_from_golden=settings.demote_outfit_change_from_golden,
-            exclude_price_from_cut=settings.exclude_price_from_cut,
-            clothing_only=settings.clothing_only,
-            de_live_room_feel=getattr(settings, "de_live_room_feel", True),
-            unique_features_first=getattr(settings, "unique_features_first", True),
-            llm_api_key=settings.llm_api_key,
-            llm_base_url=settings.llm_base_url,
-            llm_model=settings.llm_model,
-        )
-
+        _set_progress(job_dir, "clipper", 65, "规则逻辑排序与时间轴")
         _set_progress(job_dir, "render", 80, "渲染成片" if render else "仅生成计划")
         result = run_pipeline(
             video=video,
@@ -228,6 +366,7 @@ def process_job_dir(job_dir: Path) -> None:
                 "output_mp4": has_final,
                 "transcript_source": "faster_whisper_local",
                 "worker": "local_auto",
+                "planner": meta.get("planner") or planner,
                 "playback_speed": sp,
                 "selected_clips": len(result.plan.all_slots()) if result.plan else 0,
                 "golden20_passed": bool(result.plan.golden20_passed) if result.plan else False,

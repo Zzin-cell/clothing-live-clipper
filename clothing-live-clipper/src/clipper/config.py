@@ -135,6 +135,8 @@ class Settings:
     clothing_only: bool = True
     de_live_room_feel: bool = True
     unique_features_first: bool = True
+    # ASR transcript -> LLM logic plan -> reverse cut (optional; falls back to rules)
+    llm_plan_enabled: bool = True
     llm_api_key: str | None = None
     llm_base_url: str = "https://api.openai.com/v1"
     llm_model: str = "gpt-4o-mini"
@@ -176,6 +178,8 @@ class Settings:
             ),
             exclude_price_from_cut=_flag("CLIPPER_EXCLUDE_PRICE", True),
             clothing_only=_flag("CLIPPER_CLOTHING_ONLY", True),
+            # default on when not explicitly disabled; worker still needs key
+            llm_plan_enabled=_flag("CLIPPER_LLM_PLAN", True),
             llm_api_key=resolve_llm_key() or None,
             llm_base_url=resolve_llm_base_url(),
             llm_model=resolve_llm_model(),
@@ -226,6 +230,8 @@ def llm_status() -> dict:
     key = resolve_llm_key()
     enabled_raw = (_get("CLIPPER_LLM_ENABLED") or "true").lower()
     enabled = enabled_raw in {"1", "true", "yes"}
+    plan_raw = (_get("CLIPPER_LLM_PLAN") or "true").lower()
+    plan_enabled = plan_raw in {"1", "true", "yes", "on"}
     base = resolve_llm_base_url()
     model = resolve_llm_model()
     src = "session" if any(
@@ -236,6 +242,8 @@ def llm_status() -> dict:
             "configured": False,
             "optional": True,
             "note": "disabled",
+            "plan_enabled": False,
+            "plan_ready": False,
             "model": model,
             "base_url": base,
             "source": src,
@@ -246,6 +254,8 @@ def llm_status() -> dict:
             "configured": False,
             "optional": True,
             "note": "missing_api_key",
+            "plan_enabled": plan_enabled,
+            "plan_ready": False,
             "model": model,
             "base_url": base,
             "source": src,
@@ -255,6 +265,8 @@ def llm_status() -> dict:
         "configured": True,
         "optional": True,
         "note": None,
+        "plan_enabled": plan_enabled,
+        "plan_ready": bool(plan_enabled and key),
         "model": model,
         "base_url": base,
         "source": src,
@@ -271,6 +283,8 @@ def public_config() -> dict[str, Any]:
         "base_url": a.get("asr_base_url"),
         "asr_model": a.get("asr_model"),
         "llm_enabled": (_get("CLIPPER_LLM_ENABLED") or "true").lower() in {"1", "true", "yes"},
+        "llm_plan_enabled": bool(l.get("plan_enabled")),
+        "llm_plan_ready": bool(l.get("plan_ready")),
         "llm_base_url": l.get("base_url"),
         "llm_model": l.get("model"),
         "api_key_hint": a.get("key_hint"),

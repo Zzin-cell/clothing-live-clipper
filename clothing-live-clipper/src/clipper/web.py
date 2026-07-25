@@ -164,7 +164,10 @@ def create_app() -> FastAPI:
 
     @app.get("/api/health")
     def health() -> dict[str, Any]:
+        from clipper.config import llm_status, public_config
+
         a = asr_status()
+        l = llm_status()
         st = build_status()
         return {
             "ok": True,
@@ -172,7 +175,15 @@ def create_app() -> FastAPI:
             "sample_transcript": SAMPLE_TRANSCRIPT.exists(),
             "asr_configured": a["asr_configured"],
             "asr_note": a.get("asr_note"),
+            "llm_plan_ready": bool(l.get("plan_ready")),
+            "llm_plan_enabled": bool(l.get("plan_enabled")),
+            "llm_model": l.get("model"),
+            "llm_note": l.get("note"),
             "lights": st.get("lights"),
+            "config": {
+                "llm_plan_ready": bool(l.get("plan_ready")),
+                "has_llm_key": bool(l.get("has_key")),
+            },
             "time": _utc_now(),
         }
 

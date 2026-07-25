@@ -44,7 +44,8 @@ function stageLabel(stage) {
     asr: "GPU 口播打轴（medium+降噪，通常1–3分钟）",
     asr_done: "听写完成",
     filter: "过滤无效词",
-    clipper: "卖点排序",
+    llm_plan: "LLM 逻辑处理口播稿并反剪",
+    clipper: "规则逻辑排序",
     reclip: "按口播重剪",
     render: "渲染成片",
     done: "完成",
@@ -60,8 +61,9 @@ async function loadHealth() {
     const data = await res.json();
     const ok = !!data.ok && !!data.ffmpeg;
     el.className = "jy-pill " + (ok ? "ok" : "bad");
+    const llmReady = !!data.llm_plan_ready;
     el.textContent = ok
-      ? `本机就绪 · ffmpeg${data.ffmpeg ? "✓" : "·"} · 自动切片`
+      ? `本机就绪 · ffmpeg${data.ffmpeg ? "✓" : "·"} · ${llmReady ? "LLM排片✓" : "规则排片"}`
       : `环境异常 · ffmpeg${data.ffmpeg ? "✓" : "缺失"}`;
   } catch (e) {
     el.className = "jy-pill bad";

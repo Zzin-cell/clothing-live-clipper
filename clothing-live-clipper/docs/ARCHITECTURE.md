@@ -21,12 +21,19 @@
 ## 2. 主链路（自动）
 
 1. **上传视频** → `output/web_jobs/{job_id}/uploads/`  
-2. **抽音频** → 16k mono wav  
-3. **ASR** → `transcript_asr.json`  
-4. **过滤** → `transcript_for_clipper.json`（衣服相关、去尺码价格直播感）  
-5. **提取标签 + 打分排序** → `plan.json`  
-6. **渲染** → `_parts/` + `final.mp4`  
-7. **摘要** → `review.md`
+2. **抽音频** → 16k mono wav（可选降噪）  
+3. **ASR** → `transcript_asr.json`（本地 faster-whisper medium）  
+4. **LLM 逻辑排片（优先）** → `llm_plan.json` + `plan.json`  
+   - 输入：ASR 口播句 + 学习偏好提示  
+   - 输出：按逻辑顺序的 keep 时间轴（role=story）  
+   - 然后 **反剪渲染** `final.mp4`  
+5. **失败回退规则路径**：  
+   - 过滤 → `transcript_for_clipper.json`  
+   - `build_timeline_plan` 逻辑排序 → `plan.json`  
+   - 渲染 `final.mp4`  
+6. **摘要** → `review.md` / `learning_debug.json`  
+
+开关：`CLIPPER_LLM_PLAN=true` 且配置 `CLIPPER_LLM_API_KEY` 时走 LLM；否则规则。
 
 ## 3. 反剪链路（人工）
 

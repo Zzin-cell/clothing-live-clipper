@@ -25,6 +25,10 @@ if _ffbin.exists():
 
 _lock = threading.Lock()
 _running: set[str] = set()
+# Whisper/CUDA model load+infer is safest serialized; other stages can run concurrent.
+_asr_lock = threading.Lock()
+# allow many jobs in parallel (non-ASR stages overlap)
+_MAX_CONCURRENT_JOBS = int(os.environ.get("CLIPPER_MAX_CONCURRENT_JOBS") or "4")
 
 
 def _utc_now() -> str:
@@ -110,12 +114,15 @@ def process_job_dir(job_dir: Path) -> None:
         extract_wav(video, wav)
 
         model_name = resolve_local_model()
-        _set_progress(job_dir, "asr", 25, f"高精度口播打轴 ({model_name})，首次加载/听写可能需几分钟")
+        _set_progress(job_dir, "asr", 25, f"高精度口播打轴 ({model_name})，GPU听写排队中/进行中")
         # heartbeat: if asr takes long, UI still shows activity
         import time as _time
 
         t_asr0 = _time.time()
-        raw = asr_local(wav)
+        # serialize only the Whisper call so concurrent jobs don't thrash GPU/model
+        with _asr_lock:
+            _set_progress(job_dir, "asr", 28, f"正在听写 ({model_name})")
+            raw = asr_local(wav)
         raw_path = job_dir / "transcript_asr.json"
         raw_path.write_text(json.dumps(raw, ensure_ascii=False, indent=2), encoding="utf-8")
         meta = _read_meta(job_dir)
@@ -155,7 +162,38 @@ def process_job_dir(job_dir: Path) -> None:
         used_llm = False
 
         # ---- Preferred path: ASR -> LLM logic plan -> reverse cut ----
-        can_llm = bool(getattr(settings, "llm_plan_enabled", True) and (settings.llm_api_key or "").strip())
+        # LLM credentials come from frontend user config, not env
+        try:
+            from clipper.user_llm import public_user_llm, runtime_llm
+
+            _ul = public_user_llm()
+            can_llm = bool(_ul.get("plan_ready"))
+            if can_llm:
+                # inject into settings-like fields for debug only
+                rt = runtime_llm()
+                settings = Settings(
+                    target_duration_s=settings.target_duration_s,
+                    golden_s=settings.golden_s,
+                    cta_s=settings.cta_s,
+                    min_clip_ms=settings.min_clip_ms,
+                    max_clip_ms=settings.max_clip_ms,
+                    min_plan_ms=settings.min_plan_ms,
+                    max_plan_ms=settings.max_plan_ms,
+                    playback_speed=settings.playback_speed,
+                    golden_weight_ratio=settings.golden_weight_ratio,
+                    golden_features_only=settings.golden_features_only,
+                    demote_outfit_change_from_golden=settings.demote_outfit_change_from_golden,
+                    exclude_price_from_cut=settings.exclude_price_from_cut,
+                    clothing_only=settings.clothing_only,
+                    de_live_room_feel=settings.de_live_room_feel,
+                    unique_features_first=settings.unique_features_first,
+                    llm_plan_enabled=True,
+                    llm_api_key=rt.get("api_key"),
+                    llm_base_url=rt.get("base_url") or "",
+                    llm_model=rt.get("model") or "",
+                )
+        except Exception:
+            can_llm = False
         if can_llm:
             _set_progress(job_dir, "llm_plan", 55, "LLM 逻辑处理口播稿…")
             try:
@@ -524,28 +562,71 @@ def reclip_from_saved_transcript(job_dir: Path) -> None:
             _running.discard(job_id)
 
 
+def running_job_ids() -> list[str]:
+    with _lock:
+        return sorted(_running)
+
+
 def start_job_async(job_dir: Path) -> bool:
-    """Start background thread if not already running this job."""
+    """Start background thread if not already running this job.
+
+    Multiple different jobs can run concurrently. Whisper ASR stage is
+    serialized via `_asr_lock` so GPU model use does not thrash; LLM/render
+    stages of different jobs can overlap.
+    """
     job_dir = Path(job_dir)
     job_id = job_dir.name
     with _lock:
         if job_id in _running:
             return False
+        # soft cap: still allow queueing by returning False when too many
+        if len(_running) >= max(1, _MAX_CONCURRENT_JOBS):
+            # keep job meta as queued for UI retry/poll
+            try:
+                meta = _read_meta(job_dir)
+                meta["status"] = "queued"
+                meta["stage"] = "queued"
+                meta["stage_detail"] = f"等待并发空位（{_MAX_CONCURRENT_JOBS}）"
+                meta["progress"] = max(1, int(meta.get("progress") or 1))
+                _write_meta(job_dir, meta)
+            except Exception:
+                pass
+            # schedule delayed retry start without blocking caller
+            def _retry():
+                import time as _t
+
+                for _ in range(120):
+                    _t.sleep(2.0)
+                    with _lock:
+                        if job_id in _running:
+                            return
+                        if len(_running) >= max(1, _MAX_CONCURRENT_JOBS):
+                            continue
+                        _running.add(job_id)
+                    threading.Thread(
+                        target=process_job_dir, args=(job_dir,), daemon=True, name=f"job-{job_id}"
+                    ).start()
+                    return
+
+            threading.Thread(target=_retry, daemon=True, name=f"queue-{job_id}").start()
+            return True
         _running.add(job_id)
-    t = threading.Thread(target=process_job_dir, args=(job_dir,), daemon=True)
+    t = threading.Thread(target=process_job_dir, args=(job_dir,), daemon=True, name=f"job-{job_id}")
     t.start()
     return True
 
 
 def start_reclip_async(job_dir: Path) -> bool:
-    """Reclip using saved transcript without ASR."""
+    """Reclip using saved transcript without ASR (concurrent across jobs)."""
     job_dir = Path(job_dir)
     job_id = job_dir.name
     with _lock:
         if job_id in _running:
             return False
         _running.add(job_id)
-    t = threading.Thread(target=reclip_from_saved_transcript, args=(job_dir,), daemon=True)
+    t = threading.Thread(
+        target=reclip_from_saved_transcript, args=(job_dir,), daemon=True, name=f"reclip-{job_id}"
+    )
     t.start()
     return True
 

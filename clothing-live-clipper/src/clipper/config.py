@@ -228,51 +228,37 @@ def asr_status() -> dict:
 
 
 def llm_status() -> dict:
-    key = resolve_llm_key()
-    enabled_raw = (_get("CLIPPER_LLM_ENABLED") or "true").lower()
-    enabled = enabled_raw in {"1", "true", "yes"}
-    plan_raw = (_get("CLIPPER_LLM_PLAN") or "true").lower()
-    plan_enabled = plan_raw in {"1", "true", "yes", "on"}
-    base = resolve_llm_base_url()
-    model = resolve_llm_model()
-    src = "session" if any(
-        k in _SESSION for k in ("CLIPPER_LLM_API_KEY", "OPENAI_API_KEY", "CLIPPER_ASR_API_KEY")
-    ) else ("env" if key else "none")
-    if not enabled:
+    """LLM status from user UI config only (not process env secrets)."""
+    try:
+        from clipper.user_llm import public_user_llm
+
+        u = public_user_llm()
+        return {
+            "configured": bool(u.get("has_key") and u.get("model") and u.get("base_url")),
+            "optional": True,
+            "note": None if u.get("plan_ready") else ("disabled" if not u.get("enabled") else "missing_user_config"),
+            "plan_enabled": bool(u.get("plan_enabled")),
+            "plan_ready": bool(u.get("plan_ready")),
+            "model": u.get("model") or "",
+            "base_url": u.get("base_url") or "",
+            "source": "user_ui",
+            "has_key": bool(u.get("has_key")),
+            "key_hint": u.get("key_hint"),
+            "store": u.get("store"),
+        }
+    except Exception as e:
         return {
             "configured": False,
             "optional": True,
-            "note": "disabled",
+            "note": f"user_config_error:{e}",
             "plan_enabled": False,
             "plan_ready": False,
-            "model": model,
-            "base_url": base,
-            "source": src,
-            **mask_key(None),
+            "model": "",
+            "base_url": "",
+            "source": "user_ui",
+            "has_key": False,
+            "key_hint": None,
         }
-    if not key:
-        return {
-            "configured": False,
-            "optional": True,
-            "note": "missing_api_key",
-            "plan_enabled": plan_enabled,
-            "plan_ready": False,
-            "model": model,
-            "base_url": base,
-            "source": src,
-            **mask_key(None),
-        }
-    return {
-        "configured": True,
-        "optional": True,
-        "note": None,
-        "plan_enabled": plan_enabled,
-        "plan_ready": bool(plan_enabled and key),
-        "model": model,
-        "base_url": base,
-        "source": src,
-        **mask_key(key),
-    }
 
 
 def public_config() -> dict[str, Any]:
@@ -283,15 +269,17 @@ def public_config() -> dict[str, Any]:
         "asr_provider": a.get("asr_provider"),
         "base_url": a.get("asr_base_url"),
         "asr_model": a.get("asr_model"),
-        "llm_enabled": (_get("CLIPPER_LLM_ENABLED") or "true").lower() in {"1", "true", "yes"},
+        "llm_enabled": bool(l.get("plan_enabled") or l.get("configured")),
         "llm_plan_enabled": bool(l.get("plan_enabled")),
         "llm_plan_ready": bool(l.get("plan_ready")),
-        "llm_base_url": l.get("base_url"),
-        "llm_model": l.get("model"),
-        "api_key_hint": a.get("key_hint"),
+        "llm_base_url": l.get("base_url") or "",
+        "llm_model": l.get("model") or "",
+        "api_key_hint": l.get("key_hint") or a.get("key_hint"),
         "has_api_key": bool(a.get("has_key")),
         "has_llm_key": bool(l.get("has_key")),
-        "source": a.get("source"),
+        "source": "user_ui",
+        "llm_source": "user_ui",
+        "llm_store": l.get("store"),
         "env_path": str(DEFAULT_ENV_PATH),
     }
 
@@ -335,66 +323,43 @@ def _merge_env_file(path: Path, updates: dict[str, str]) -> None:
 
 
 def apply_config_update(payload: dict[str, Any], *, env_path: Path | None = None) -> dict[str, Any]:
-    """Apply UI config. persist=True writes .env; always can set session overlay."""
-    persist = bool(payload.get("persist", True))
-    path = env_path or DEFAULT_ENV_PATH
+    """Apply UI config.
 
-    env_updates: dict[str, str] = {}
+    LLM fields are saved to user_config (NOT env).
+    ASR fields may still use session/.env for local whisper runtime flags.
+    """
+    del env_path  # kept for API compatibility
+
+    # ---- LLM: user UI config only ----
+    llm_payload = {
+        "llm_enabled": payload.get("llm_enabled"),
+        "llm_plan": payload.get("llm_plan", payload.get("plan_enabled")),
+        "llm_base_url": payload.get("llm_base_url", payload.get("base_url")),
+        "llm_model": payload.get("llm_model", payload.get("model")),
+        "llm_api_key": payload.get("llm_api_key", payload.get("api_key")),
+        "organization": payload.get("organization"),
+        "extra_headers": payload.get("extra_headers"),
+    }
+    # only touch user llm store when any llm field present
+    if any(v is not None and v != "" for v in llm_payload.values()):
+        try:
+            from clipper.user_llm import save_user_llm
+
+            save_user_llm(llm_payload, keep_old_key_if_blank=True)
+        except Exception:
+            pass
+
+    # ---- ASR optional session flags (non-secret runtime) ----
     session_vals: dict[str, str] = {}
-
-    def put(env_key: str, value: str) -> None:
-        session_vals[env_key] = value
-        env_updates[env_key] = value
-
-    if "api_key" in payload and str(payload.get("api_key") or "").strip():
-        put("CLIPPER_ASR_API_KEY", str(payload["api_key"]).strip())
-        put("OPENAI_API_KEY", str(payload["api_key"]).strip())
-
-    # dedicated LLM key (preferred for plan)
-    if "llm_api_key" in payload and str(payload.get("llm_api_key") or "").strip():
-        k = str(payload["llm_api_key"]).strip()
-        put("CLIPPER_LLM_API_KEY", k)
-        # also set OPENAI_API_KEY so shared clients work
-        put("OPENAI_API_KEY", k)
-
-    if "base_url" in payload and payload.get("base_url") is not None:
-        bu = str(payload.get("base_url") or "").strip().rstrip("/")
-        if bu:
-            put("CLIPPER_ASR_BASE_URL", bu)
-            put("CLIPPER_LLM_BASE_URL", bu)
-
-    if "llm_base_url" in payload and payload.get("llm_base_url") is not None:
-        bu = str(payload.get("llm_base_url") or "").strip().rstrip("/")
-        if bu:
-            put("CLIPPER_LLM_BASE_URL", bu)
-
+    if "asr_enabled" in payload and payload.get("asr_enabled") is not None:
+        session_vals["CLIPPER_ASR_ENABLED"] = "true" if payload.get("asr_enabled") else "false"
+    if "asr_provider" in payload and payload.get("asr_provider") is not None:
+        session_vals["CLIPPER_ASR_PROVIDER"] = str(payload.get("asr_provider") or "openai_whisper")
     if "asr_model" in payload and payload.get("asr_model") is not None:
         m = str(payload.get("asr_model") or "").strip()
         if m:
-            put("CLIPPER_ASR_MODEL", m)
-
-    if "llm_model" in payload and payload.get("llm_model") is not None:
-        m = str(payload.get("llm_model") or "").strip()
-        if m:
-            put("CLIPPER_LLM_MODEL", m)
-
-    if "llm_enabled" in payload:
-        put("CLIPPER_LLM_ENABLED", "true" if payload.get("llm_enabled") else "false")
-
-    if "llm_plan" in payload:
-        put("CLIPPER_LLM_PLAN", "true" if payload.get("llm_plan") else "false")
-
-    if "asr_enabled" in payload:
-        put("CLIPPER_ASR_ENABLED", "true" if payload.get("asr_enabled") else "false")
-
-    if "asr_provider" in payload and payload.get("asr_provider") is not None:
-        put("CLIPPER_ASR_PROVIDER", str(payload.get("asr_provider") or "openai_whisper"))
-
-    # Always update session so current process sees changes immediately
-    session_update(session_vals)
-
-    if persist and env_updates:
-        _merge_env_file(path, env_updates)
-        load_dotenv(path, override=True)
+            session_vals["CLIPPER_ASR_MODEL"] = m
+    if session_vals:
+        session_update(session_vals)
 
     return public_config()

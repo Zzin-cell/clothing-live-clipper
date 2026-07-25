@@ -254,11 +254,20 @@ def probe_whisper(timeout_s: float = 30.0) -> dict[str, Any]:
 
 
 def probe_llm(timeout_s: float = 30.0) -> dict[str, Any]:
-    key = resolve_llm_key()
+    # user UI config only (OpenAI-compatible)
+    try:
+        from clipper.user_llm import build_openai_headers, runtime_llm
+
+        cfg = runtime_llm()
+    except Exception as e:
+        return {"target": "llm", "ok": False, "error": f"user_config:{e}", "optional": True}
+    key = str(cfg.get("api_key") or "").strip()
     if not key:
-        return {"target": "llm", "ok": False, "error": "missing_api_key", "optional": True}
-    base = resolve_llm_base_url()
-    model = resolve_llm_model()
+        return {"target": "llm", "ok": False, "error": "missing_user_api_key", "optional": True}
+    base = str(cfg.get("base_url") or "").rstrip("/")
+    model = str(cfg.get("model") or "").strip()
+    if not base or not model:
+        return {"target": "llm", "ok": False, "error": "missing_base_url_or_model", "optional": True}
     url = f"{base}/chat/completions"
     body = {
         "model": model,
@@ -269,7 +278,7 @@ def probe_llm(timeout_s: float = 30.0) -> dict[str, Any]:
         with httpx.Client(timeout=timeout_s) as client:
             r = client.post(
                 url,
-                headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+                headers=build_openai_headers(cfg),
                 json=body,
             )
         if r.status_code >= 400:
@@ -278,9 +287,11 @@ def probe_llm(timeout_s: float = 30.0) -> dict[str, Any]:
                 "ok": False,
                 "error": f"HTTP {r.status_code}",
                 "detail": r.text[:300],
+                "model": model,
+                "base_url": base,
                 "optional": True,
             }
-        return {"target": "llm", "ok": True, "model": model, "base_url": base}
+        return {"target": "llm", "ok": True, "model": model, "base_url": base, "source": "user_ui"}
     except httpx.HTTPError as e:
         return {"target": "llm", "ok": False, "error": str(e), "optional": True}
 

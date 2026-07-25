@@ -18,9 +18,10 @@ import urllib.error
 import urllib.request
 from typing import Any
 
-from clipper.config import Settings, resolve_llm_base_url, resolve_llm_key, resolve_llm_model
-from clipper.learning import learned_text_score, learning_status, split_clauses
+from clipper.config import Settings
+from clipper.learning import learning_status, split_clauses
 from clipper.models import PlanSlot, TimelinePlan
+from clipper.user_llm import build_openai_headers, runtime_llm
 
 
 SYSTEM_PROMPT = """你是服装带货短视频剪辑导演（抖音/快手完播导向）。
@@ -224,12 +225,17 @@ def call_llm_for_plan(
     playback_speed: float = 1.4,
     settings: Settings | None = None,
 ) -> dict[str, Any]:
-    settings = settings or Settings.from_env()
-    key = (settings.llm_api_key or resolve_llm_key() or "").strip()
+    del settings  # LLM credentials come from user UI config only
+    cfg = runtime_llm()
+    key = str(cfg.get("api_key") or "").strip()
     if not key:
-        raise RuntimeError("missing_llm_api_key")
-    base = (settings.llm_base_url or resolve_llm_base_url()).rstrip("/")
-    model = (settings.llm_model or resolve_llm_model() or "gpt-4o-mini").strip()
+        raise RuntimeError("missing_llm_api_key_user_config")
+    if not cfg.get("enabled", True) or not cfg.get("plan_enabled", True):
+        raise RuntimeError("llm_plan_disabled_in_user_config")
+    base = str(cfg.get("base_url") or "").rstrip("/")
+    model = str(cfg.get("model") or "").strip()
+    if not base or not model:
+        raise RuntimeError("missing_llm_base_url_or_model_user_config")
     sp = playback_speed if playback_speed and playback_speed > 0 else 1.4
     target_source_ms = int(round(target_seconds * 1000 * sp))
 
@@ -288,11 +294,14 @@ def call_llm_for_plan(
         "all_clauses": compact,
     }
 
-    url = f"{base}/chat/completions"
-    headers = {
-        "Content-Type": "application/json",
-        "Authorization": f"Bearer {key}",
-    }
+    # OpenAI-compatible endpoint shapes
+    endpoints = [f"{base}/chat/completions"]
+    if base.endswith("/v1"):
+        endpoints.append(f"{base[:-3]}/chat/completions")
+    else:
+        endpoints.append(f"{base}/v1/chat/completions")
+
+    headers = build_openai_headers(cfg)
     payload = {
         "model": model,
         "temperature": 0.2,
@@ -310,16 +319,30 @@ def call_llm_for_plan(
         ],
     }
 
-    try:
-        resp = _http_json(url, headers, payload, timeout=120)
-    except urllib.error.HTTPError as e:
-        # some providers don't support response_format
-        err = e.read().decode("utf-8", errors="replace") if hasattr(e, "read") else str(e)
-        if "response_format" in err or e.code in {400, 404}:
-            payload.pop("response_format", None)
-            resp = _http_json(url, headers, payload, timeout=120)
-        else:
-            raise RuntimeError(f"llm_http_{e.code}:{err[:400]}") from e
+    last_err = None
+    resp = None
+    for url in endpoints:
+        try:
+            resp = _http_json(url, headers, payload, timeout=180)
+            break
+        except urllib.error.HTTPError as e:
+            err = e.read().decode("utf-8", errors="replace") if hasattr(e, "read") else str(e)
+            # some providers don't support response_format
+            if "response_format" in err or e.code in {400, 404, 422}:
+                payload2 = dict(payload)
+                payload2.pop("response_format", None)
+                try:
+                    resp = _http_json(url, headers, payload2, timeout=180)
+                    break
+                except Exception as e2:
+                    last_err = e2
+                    continue
+            last_err = RuntimeError(f"llm_http_{e.code}:{err[:400]}")
+        except Exception as e:
+            last_err = e
+            continue
+    if resp is None:
+        raise RuntimeError(f"llm_request_failed:{last_err}")
 
     content = ""
     try:

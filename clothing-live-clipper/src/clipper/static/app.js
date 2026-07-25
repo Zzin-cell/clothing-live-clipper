@@ -1278,45 +1278,35 @@ function pollJob(jobId) {
 }
 
 async function loadJobs() {
-  const box = $("job-list");
+  // history list removed; keep as lightweight status refresher for current job
+  const hint = $("job-run-hint");
   try {
-    const res = await fetch("/api/jobs?limit=30");
+    const res = await fetch("/api/jobs?limit=12");
     const data = await res.json();
     const jobs = data.jobs || [];
-    if (!jobs.length) {
-      box.innerHTML = '<div class="jy-empty">暂无任务</div>';
-      return;
+    const running = jobs.filter((j) =>
+      ["queued", "processing", "starting", "claimed"].includes(j.status)
+    );
+    if (hint) {
+      hint.textContent = running.length
+        ? `并发中 ${running.length} 个任务（听写串行，LLM/渲染并行）。当前：${currentJobId || "无"}`
+        : `当前任务：${currentJobId || "无"}。可连续上传，任务互不影响。`;
     }
-    box.innerHTML = jobs
-      .map((j) => {
-        const st = j.status || "";
-        const cls = statusClass(st);
-        return `<div class="jy-job" data-id="${escapeHtml(j.job_id)}">
-          <div class="id">${escapeHtml(j.job_id)}</div>
-          <div class="st ${cls}">${escapeHtml(STATUS_LABEL[st] || st)}${
-            j.progress != null && ["processing", "starting", "queued"].includes(st)
-              ? ` · ${j.progress}%`
-              : ""
-          }${j.final_duration_s ? ` · ${j.final_duration_s}s` : ""}</div>
-          <div class="st">${escapeHtml(j.video_source || "")}</div>
-          <div class="st muted">${escapeHtml(
-            j.planner === "llm"
-              ? `LLM${j.llm_model ? "·" + j.llm_model : ""}`
-              : j.llm_fallback
-                ? "规则(LLM失败回退)"
-                : j.planner
-                  ? "规则"
-                  : ""
-          )}</div>
-        </div>`;
-      })
-      .join("");
-    box.querySelectorAll(".jy-job").forEach((el) => {
-      el.addEventListener("click", () => showJob(el.dataset.id));
-    });
-    if (currentJobId) highlightJob(currentJobId);
+    if (currentJobId) {
+      // refresh current only
+      const cur = jobs.find((j) => j.job_id === currentJobId);
+      if (cur && ["queued", "processing", "starting", "claimed"].includes(cur.status)) {
+        // poll handles detailed progress
+      } else if (cur) {
+        // finished: soft refresh
+        try {
+          const r = await fetch(`/api/jobs/${encodeURIComponent(currentJobId)}`);
+          if (r.ok) renderJob(await r.json());
+        } catch (_) {}
+      }
+    }
   } catch (e) {
-    box.textContent = "加载失败：" + e;
+    if (hint) hint.textContent = "状态刷新失败：" + e;
   }
 }
 
@@ -1577,15 +1567,17 @@ async function loadLlmConfig() {
     const res = await fetch("/api/system/config");
     const cfg = await res.json();
     if ($("llm_plan")) $("llm_plan").checked = cfg.llm_plan_enabled !== false;
-    if ($("llm_base_url")) $("llm_base_url").value = cfg.llm_base_url || "";
-    if ($("llm_model")) $("llm_model").value = cfg.llm_model || "grok-4.5";
+    if ($("llm_base_url") && !$("llm_base_url").value) $("llm_base_url").value = cfg.llm_base_url || "";
+    if ($("llm_model") && !$("llm_model").value) $("llm_model").value = cfg.llm_model || "";
     if (st) {
       if (cfg.llm_plan_ready) st.textContent = `已就绪 · ${cfg.llm_model || ""}`;
-      else if (cfg.has_llm_key) st.textContent = "有Key·排片关闭";
-      else st.textContent = "未配置Key·将回退规则";
+      else if (cfg.has_llm_key) st.textContent = "有Key·检查模型/开关";
+      else st.textContent = "请填写 Base/Model/Key";
     }
-    if (msg && cfg.has_llm_key) {
-      msg.textContent = `当前模型 ${cfg.llm_model || "-"} @ ${cfg.llm_base_url || "-"}（Key ***${cfg.api_key_hint || ""}）`;
+    if (msg) {
+      msg.textContent = cfg.llm_plan_ready
+        ? `用户配置已启用：${cfg.llm_model || "-"} @ ${cfg.llm_base_url || "-"}（Key ***${cfg.api_key_hint || ""}）。不读环境变量。`
+        : "请填写并保存你的 API。兼容 OpenAI 协议（含多数中转）。未配置则自动规则排片。";
     }
   } catch (e) {
     if (st) st.textContent = "配置读取失败";
@@ -1597,24 +1589,28 @@ function setupLlmConfig() {
   if (!form) return;
   loadLlmConfig();
 
+  const collectBody = () => {
+    const body = {
+      persist: true,
+      llm_plan: !!$("llm_plan")?.checked,
+      llm_enabled: true,
+      llm_base_url: $("llm_base_url")?.value?.trim() || "",
+      llm_model: $("llm_model")?.value?.trim() || "",
+      organization: $("llm_org")?.value?.trim() || "",
+    };
+    const key = $("llm_api_key")?.value?.trim();
+    if (key) body.llm_api_key = key;
+    return body;
+  };
+
   $("llm-probe")?.addEventListener("click", async () => {
     const msg = $("llm-cfg-msg");
     if (msg) msg.textContent = "测试中…";
     try {
-      // save current form first (session+persist) so probe uses latest model/base
-      const body = {
-        persist: true,
-        llm_plan: !!$("llm_plan")?.checked,
-        llm_enabled: true,
-        llm_base_url: $("llm_base_url")?.value?.trim() || undefined,
-        llm_model: $("llm_model")?.value?.trim() || undefined,
-      };
-      const key = $("llm_api_key")?.value?.trim();
-      if (key) body.llm_api_key = key;
       await fetch("/api/system/config", {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body),
+        body: JSON.stringify(collectBody()),
       });
       const res = await fetch("/api/system/probe", {
         method: "POST",
@@ -1627,7 +1623,7 @@ function setupLlmConfig() {
       if (msg) {
         msg.textContent = ok
           ? `连通成功 · ${$("llm_model")?.value || ""}`
-          : `连通失败：${probe.error || probe.llm?.error || data.detail || "unknown"}`;
+          : `连通失败：${probe.error || probe.llm?.error || data.detail || JSON.stringify(probe).slice(0, 180)}`;
       }
       loadHealth();
       loadLlmConfig();
@@ -1641,15 +1637,15 @@ function setupLlmConfig() {
     const msg = $("llm-cfg-msg");
     if (msg) msg.textContent = "保存中…";
     try {
-      const body = {
-        persist: true,
-        llm_plan: !!$("llm_plan")?.checked,
-        llm_enabled: true,
-        llm_base_url: $("llm_base_url")?.value?.trim() || undefined,
-        llm_model: $("llm_model")?.value?.trim() || undefined,
-      };
-      const key = $("llm_api_key")?.value?.trim();
-      if (key) body.llm_api_key = key;
+      const body = collectBody();
+      if (!body.llm_base_url || !body.llm_model) {
+        throw new Error("请填写 Base URL 和 Model");
+      }
+      // require key on first save if none stored
+      const cur = await (await fetch("/api/system/config")).json();
+      if (!body.llm_api_key && !cur.has_llm_key) {
+        throw new Error("请填写 API Key");
+      }
       const res = await fetch("/api/system/config", {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
@@ -1658,7 +1654,7 @@ function setupLlmConfig() {
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data.detail || "保存失败");
       if ($("llm_api_key")) $("llm_api_key").value = "";
-      if (msg) msg.textContent = "已保存。新上传视频将按此 LLM 配置排片。";
+      if (msg) msg.textContent = "已保存到用户配置（非环境变量）。新上传将用此 Key 调用。";
       loadHealth();
       loadLlmConfig();
     } catch (ex) {

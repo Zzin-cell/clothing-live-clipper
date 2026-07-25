@@ -1587,6 +1587,16 @@ async function loadLlmConfig() {
   }
 }
 
+function fillModelDatalist(models) {
+  const dl = $("llm-model-list");
+  if (!dl) return;
+  const arr = Array.isArray(models) ? models : [];
+  dl.innerHTML = arr
+    .slice(0, 200)
+    .map((m) => `<option value="${escapeHtml(String(m))}"></option>`)
+    .join("");
+}
+
 function setupLlmConfig() {
   const form = $("llm-config-form");
   if (!form) return;
@@ -1606,10 +1616,44 @@ function setupLlmConfig() {
     return body;
   };
 
+  $("llm-fetch-models")?.addEventListener("click", async () => {
+    const msg = $("llm-cfg-msg");
+    if (msg) msg.textContent = "正在从 Base URL 拉取模型列表…";
+    try {
+      const base_url = $("llm_base_url")?.value?.trim() || "";
+      const api_key = $("llm_api_key")?.value?.trim() || "";
+      const preferred = $("llm_model")?.value?.trim() || "";
+      if (!base_url) throw new Error("请先填写 Base URL");
+      // key can be previously saved
+      const body = { base_url, preferred };
+      if (api_key) body.api_key = api_key;
+      const res = await fetch("/api/system/llm/models", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.detail || "拉取模型失败");
+      const models = data.models || [];
+      fillModelDatalist(models);
+      if (data.picked && $("llm_model")) $("llm_model").value = data.picked;
+      if (msg) {
+        msg.textContent = models.length
+          ? `已匹配 ${models.length} 个模型，当前选择：${data.picked || "-"}`
+          : "未拉到模型列表（中转可能禁用 /models）。可手动填写 Model 后再测连通。";
+      }
+      loadHealth();
+      loadLlmConfig();
+    } catch (e) {
+      if (msg) msg.textContent = "自动匹配失败：" + (e.message || e);
+    }
+  });
+
   $("llm-probe")?.addEventListener("click", async () => {
     const msg = $("llm-cfg-msg");
     if (msg) msg.textContent = "测试中…";
     try {
+      // save first so probe uses latest user config
       await fetch("/api/system/config", {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
@@ -1622,11 +1666,17 @@ function setupLlmConfig() {
       });
       const data = await res.json();
       const probe = data.probe || data;
-      const ok = !!(probe.ok || probe.llm?.ok || data.status?.llm?.ok);
+      const ok = !!(probe.ok || probe.llm?.ok);
+      // if probe returned models, fill them
+      const models = probe.models || probe.llm?.models || [];
+      if (models.length) fillModelDatalist(models);
+      if (probe.auto_picked && probe.model && $("llm_model")) {
+        $("llm_model").value = probe.model;
+      }
       if (msg) {
         msg.textContent = ok
-          ? `连通成功 · ${$("llm_model")?.value || ""}`
-          : `连通失败：${probe.error || probe.llm?.error || data.detail || JSON.stringify(probe).slice(0, 180)}`;
+          ? `连通成功 · ${probe.model || $("llm_model")?.value || ""}${probe.auto_picked ? "（已自动匹配模型）" : ""}`
+          : `连通失败：${probe.error || probe.detail || data.detail || "unknown"}`;
       }
       loadHealth();
       loadLlmConfig();
@@ -1641,14 +1691,27 @@ function setupLlmConfig() {
     if (msg) msg.textContent = "保存中…";
     try {
       const body = collectBody();
-      if (!body.llm_base_url || !body.llm_model) {
-        throw new Error("请填写 Base URL 和 Model");
-      }
-      // require key on first save if none stored
+      if (!body.llm_base_url) throw new Error("请填写 Base URL");
       const cur = await (await fetch("/api/system/config")).json();
-      if (!body.llm_api_key && !cur.has_llm_key) {
-        throw new Error("请填写 API Key");
+      if (!body.llm_api_key && !cur.has_llm_key) throw new Error("请填写 API Key");
+      // if model empty, try auto match first
+      if (!body.llm_model) {
+        const mres = await fetch("/api/system/llm/models", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            base_url: body.llm_base_url,
+            api_key: body.llm_api_key,
+          }),
+        });
+        const md = await mres.json().catch(() => ({}));
+        if (md.picked) {
+          body.llm_model = md.picked;
+          if ($("llm_model")) $("llm_model").value = md.picked;
+          fillModelDatalist(md.models || []);
+        }
       }
+      if (!body.llm_model) throw new Error("请填写或自动匹配 Model");
       const res = await fetch("/api/system/config", {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
@@ -1657,7 +1720,7 @@ function setupLlmConfig() {
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data.detail || "保存失败");
       if ($("llm_api_key")) $("llm_api_key").value = "";
-      if (msg) msg.textContent = "已保存到用户配置（非环境变量）。新上传将用此 Key 调用。";
+      if (msg) msg.textContent = `已保存：${body.llm_model} @ ${body.llm_base_url}（用户配置，非 env）`;
       loadHealth();
       loadLlmConfig();
     } catch (ex) {

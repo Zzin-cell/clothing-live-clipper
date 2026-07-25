@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>小面 · CapCut</title>
-  <link rel="stylesheet" href="/static/styles.css?v=jy47" />
+  <link rel="stylesheet" href="/static/styles.css?v=jy48" />
 </head>
 <body>
   <div class="jy-app">
@@ -158,26 +158,22 @@
             </label>
 
             <label class="jy-field">
-              <span>接口地址 Base URL</span>
-              <input type="text" id="llm_base_url" placeholder="https://api.openai.com/v1 或你的中转/v1" />
-            </label>
-
-            <label class="jy-field">
-              <span>模型 Model</span>
-              <input type="text" id="llm_model" placeholder="grok-4.5 / gpt-4o-mini / deepseek-chat" list="llm-model-list" />
-              <datalist id="llm-model-list">
-                <option value="grok-4.5"></option>
-                <option value="gpt-4o-mini"></option>
-                <option value="gpt-4o"></option>
-                <option value="gpt-4.1-mini"></option>
-                <option value="deepseek-chat"></option>
-                <option value="qwen-plus"></option>
-              </datalist>
+              <span>Base URL（OpenAI 兼容）</span>
+              <input type="text" id="llm_base_url" placeholder="https://api.openai.com/v1 或中转站 /v1" />
             </label>
 
             <label class="jy-field">
               <span>API Key</span>
               <input type="password" id="llm_api_key" placeholder="粘贴你的 Key（sk-... 或中转 key）" autocomplete="off" />
+            </label>
+
+            <label class="jy-field">
+              <span>模型 Model（可自动匹配）</span>
+              <div class="jy-row llm-model-row">
+                <input type="text" id="llm_model" placeholder="点右侧自动匹配，或手动填写" list="llm-model-list" />
+                <button type="button" class="jy-btn tiny" id="llm-fetch-models" title="从 Base URL 拉取 /models 并自动选择">自动匹配</button>
+              </div>
+              <datalist id="llm-model-list"></datalist>
             </label>
 
             <label class="jy-field">
@@ -190,7 +186,7 @@
               <button type="submit" class="jy-btn tiny primary" id="llm-save">保存并启用</button>
             </div>
 
-            <p class="jy-hint" id="llm-cfg-msg">填写后点保存。新上传将用此配置调用 LLM。</p>
+            <p class="jy-hint" id="llm-cfg-msg">填 Base URL + Key 后点「自动匹配」选模型，再「测试连通 / 保存」。</p>
           </form>
         </div>
 
@@ -242,6 +238,6 @@
     </div>
   </aside>
 
-  <script src="/static/app.js?v=jy47"></script>
+  <script src="/static/app.js?v=jy48"></script>
 </body>
 </html>

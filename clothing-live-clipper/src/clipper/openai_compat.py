@@ -278,6 +278,7 @@ def list_models(
     timeout: int = 30,
     cfg: dict[str, Any] | None = None,
 ) -> list[str]:
+    """GET {base}/models  (OpenAI compatible)."""
     rt = cfg or runtime_llm()
     key = (api_key if api_key is not None else rt.get("api_key") or "").strip()
     base = normalize_base_url(base_url if base_url is not None else (rt.get("base_url") or ""))
@@ -296,14 +297,94 @@ def list_models(
             try:
                 data = _http_json(url, headers, None, method="GET", timeout=timeout)
                 ids = []
-                for m in data.get("data") or []:
-                    if isinstance(m, dict) and m.get("id"):
+                # common shapes: {data:[{id:...}]} or {models:[...]} or [..]
+                arr = data.get("data") if isinstance(data, dict) else None
+                if arr is None and isinstance(data, dict):
+                    arr = data.get("models")
+                if arr is None and isinstance(data, list):
+                    arr = data
+                for m in arr or []:
+                    if isinstance(m, str):
+                        ids.append(m)
+                    elif isinstance(m, dict) and m.get("id"):
                         ids.append(str(m["id"]))
-                if ids:
-                    return ids
+                # unique preserve order
+                out = []
+                seen = set()
+                for x in ids:
+                    if x and x not in seen:
+                        seen.add(x)
+                        out.append(x)
+                if out:
+                    return out
             except Exception:
                 continue
     return []
+
+
+def pick_default_model(models: list[str], preferred: str | None = None) -> str | None:
+    """Auto-match a sensible chat model from /models list."""
+    if not models:
+        return preferred or None
+    pref = (preferred or "").strip()
+    if pref and pref in models:
+        return pref
+    # exact-ish preferred aliases
+    aliases = [
+        pref,
+        "grok-4.5",
+        "gpt-4o-mini",
+        "gpt-4o",
+        "gpt-4.1-mini",
+        "gpt-4.1",
+        "deepseek-chat",
+        "deepseek-v3",
+        "qwen-plus",
+        "qwen2.5-72b-instruct",
+    ]
+    lower_map = {m.lower(): m for m in models}
+    for a in aliases:
+        if not a:
+            continue
+        if a in models:
+            return a
+        if a.lower() in lower_map:
+            return lower_map[a.lower()]
+    # fuzzy contains rank
+    rank_keys = [
+        "gpt-4o-mini",
+        "4o-mini",
+        "gpt-4o",
+        "grok",
+        "deepseek",
+        "qwen",
+        "gpt-4.1",
+        "gpt-3.5",
+        "chat",
+    ]
+    for k in rank_keys:
+        for m in models:
+            if k in m.lower():
+                return m
+    return models[0]
+
+
+def discover_models_and_pick(
+    *,
+    base_url: str | None = None,
+    api_key: str | None = None,
+    preferred: str | None = None,
+    timeout: int = 30,
+) -> dict[str, Any]:
+    models = list_models(base_url=base_url, api_key=api_key, timeout=timeout)
+    picked = pick_default_model(models, preferred=preferred)
+    return {
+        "ok": bool(models),
+        "models": models,
+        "picked": picked,
+        "count": len(models),
+        "base_url": normalize_base_url(base_url or ""),
+    }
 
 
 def ping(
@@ -312,12 +393,26 @@ def ping(
     api_key: str | None = None,
     model: str | None = None,
     timeout: int = 40,
+    auto_pick_model: bool = True,
 ) -> dict[str, Any]:
     """Connectivity probe used by frontend '测试连通'."""
     try:
+        mdl = (model or "").strip() or None
+        models: list[str] = []
+        picked = mdl
+        if auto_pick_model:
+            disc = discover_models_and_pick(
+                base_url=base_url, api_key=api_key, preferred=mdl, timeout=min(30, timeout)
+            )
+            models = disc.get("models") or []
+            if not mdl:
+                picked = disc.get("picked")
+            elif models and mdl not in models:
+                # user typed unavailable model -> auto switch to available
+                picked = disc.get("picked") or mdl
         out = chat_completions(
             messages=[{"role": "user", "content": "reply with ok only"}],
-            model=model,
+            model=picked,
             base_url=base_url,
             api_key=api_key,
             temperature=0,
@@ -327,11 +422,26 @@ def ping(
         )
         return {
             "ok": True,
-            "model": out.get("model"),
+            "model": out.get("model") or picked,
             "base_url": out.get("base_url"),
             "endpoint": out.get("endpoint"),
             "content": (out.get("content") or "")[:80],
             "source": "user_ui",
+            "models": models[:100],
+            "model_count": len(models),
+            "auto_picked": bool(auto_pick_model and picked and picked != (model or "").strip()),
         }
     except Exception as e:
-        return {"ok": False, "error": str(e)[:500], "source": "user_ui"}
+        # still try return model list if auth works but chat fails
+        try:
+            models = list_models(base_url=base_url, api_key=api_key, timeout=20)
+        except Exception:
+            models = []
+        return {
+            "ok": False,
+            "error": str(e)[:500],
+            "source": "user_ui",
+            "models": models[:100],
+            "model_count": len(models),
+            "picked": pick_default_model(models, preferred=model),
+        }

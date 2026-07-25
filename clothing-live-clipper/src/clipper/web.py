@@ -47,6 +47,12 @@ class ProbeBody(BaseModel):
     target: str = Field(default="all")
 
 
+class LlmModelsBody(BaseModel):
+    base_url: str | None = None
+    api_key: str | None = None
+    preferred: str | None = None
+
+
 class AgentCompleteBody(BaseModel):
     status: str = "success"
     error: str | None = None
@@ -242,10 +248,47 @@ def create_app() -> FastAPI:
             if isinstance(lm, dict) and lm.get("ok") is True:
                 status["llm"]["ok"] = True
                 status["lights"]["llm"] = "green"
-            elif isinstance(lm, dict) and lm.get("ok") is False and lm.get("error") != "missing_api_key":
+            elif isinstance(lm, dict) and lm.get("ok") is False and lm.get("error") not in {
+                "missing_api_key",
+                "missing_user_api_key",
+            }:
                 status["llm"]["ok"] = False
                 status["lights"]["llm"] = "red"
         return {"ok": True, "probe": result, "status": status}
+
+    @app.post("/api/system/llm/models")
+    def system_llm_models(body: LlmModelsBody) -> dict[str, Any]:
+        """List models from user-provided OpenAI-compatible base_url + key, auto-pick one."""
+        from clipper.openai_compat import discover_models_and_pick
+        from clipper.user_llm import runtime_llm, save_user_llm
+
+        rt = runtime_llm()
+        base = (body.base_url or rt.get("base_url") or "").strip()
+        key = (body.api_key or rt.get("api_key") or "").strip()
+        preferred = (body.preferred or rt.get("model") or "").strip() or None
+        if not base or not key:
+            raise HTTPException(status_code=400, detail="请先填写 Base URL 和 API Key")
+        disc = discover_models_and_pick(base_url=base, api_key=key, preferred=preferred)
+        # optionally remember base/key/model to user config if key provided in request
+        if body.api_key or body.base_url or disc.get("picked"):
+            save_user_llm(
+                {
+                    "llm_base_url": base,
+                    "llm_api_key": body.api_key if body.api_key else None,
+                    "llm_model": disc.get("picked") or preferred or "",
+                    "llm_plan": True,
+                    "llm_enabled": True,
+                },
+                keep_old_key_if_blank=True,
+            )
+        return {
+            "ok": bool(disc.get("ok")),
+            "base_url": disc.get("base_url") or base,
+            "models": disc.get("models") or [],
+            "picked": disc.get("picked"),
+            "count": disc.get("count") or 0,
+            "config": public_config(),
+        }
 
     @app.get("/api/jobs")
     def list_jobs(limit: int = 30) -> dict[str, Any]:

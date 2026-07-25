@@ -924,11 +924,27 @@ def build_timeline_plan(
         return sum(c.duration_ms for c in items)
 
     while _plan_ms(selected) > max_plan and len(selected) > 3:
-        drop_i = max(
-            range(1, len(selected)),
-            key=lambda i: (1 if _is_outfit_or_change(selected[i]) else 0, -selected[i].score),
-        )
+        # prefer dropping incomplete / outfit crumbs, keep opener + closer
+        def drop_key(i: int) -> tuple:
+            c = selected[i]
+            t = c.text or ""
+            incomplete = 1 if t.endswith(("然后", "因为", "所以", "而且", "但是", "的话", "的")) else 0
+            return (incomplete, 1 if _is_outfit_or_change(c) else 0, -c.score)
+
+        drop_i = max(range(1, len(selected) - 1), key=drop_key) if len(selected) > 2 else len(selected) - 1
         selected.pop(drop_i)
+
+    # complete dangling last thought with next nearby clip if needed
+    if selected:
+        last_t = (selected[-1].text or "").strip()
+        if last_t.endswith(("然后", "因为", "所以", "而且", "但是", "的话", "你看", "还有")):
+            for c in ordered:
+                if c.clip_id in used:
+                    continue
+                if 0 <= c.t0_ms - selected[-1].t1_ms <= 8000 and not _is_outfit_or_change(c):
+                    selected.append(c)
+                    used.add(c.clip_id)
+                    break
 
     story = [_to_slot(c, "story") for c in selected]
     # merge adjacent tiny modules that are almost continuous (avoid choppy hard stops)
@@ -941,8 +957,11 @@ def build_timeline_plan(
         gap = s.t0_ms - prev.t1_ms
         prev_dur = prev.t1_ms - prev.t0_ms
         cur_dur = s.t1_ms - s.t0_ms
-        # merge only very close + short fragments into one natural module
-        if 0 <= gap <= 450 and (prev_dur < 2600 or cur_dur < 2600) and (prev_dur + cur_dur + gap) <= 9000:
+        prev_incomplete = (prev.text or "").endswith(("然后", "因为", "所以", "而且", "但是", "的话", "的", "了"))
+        # merge close fragments / incomplete tails into one natural module
+        if 0 <= gap <= 650 and (
+            prev_incomplete or prev_dur < 3000 or cur_dur < 2800
+        ) and (prev_dur + cur_dur + gap) <= 11000:
             prev.t1_ms = max(prev.t1_ms, s.t1_ms)
             if s.text and s.text not in (prev.text or ""):
                 joiner = "" if (prev.text or "").endswith(("，", "。", "！", "？", ",", ".")) else "，"
@@ -952,14 +971,26 @@ def build_timeline_plan(
         merged.append(s)
     story = merged
 
+    # never end on incomplete text
+    if story:
+        end = (story[-1].text or "").strip()
+        if end.endswith(("然后", "因为", "所以", "而且", "但是", "的话", "你看", "还有", "的", "了")) and len(story) > 2:
+            story.pop()
+            warnings.append("dropped_incomplete_tail")
+
     total = sum(s.t1_ms - s.t0_ms for s in story)
     if total < min_plan and story:
+        # prefer complete under-duration over forced pad into nonsense
         need = min_plan - total
-        story[-1].t1_ms += min(need, 2500)
-        total = sum(s.t1_ms - s.t0_ms for s in story)
-        warnings.append("duration_edge_padded")
+        if not (story[-1].text or "").endswith(("然后", "因为", "所以", "而且", "但是", "的话")):
+            story[-1].t1_ms += min(need, 1800)
+            total = sum(s.t1_ms - s.t0_ms for s in story)
+            warnings.append("duration_edge_padded")
+        else:
+            warnings.append(f"short_but_complete_ms={total}")
     if total < min_plan:
         warnings.append(f"short_content_ms={total}")
+    warnings.append("policy:complete_logic_no_cutoff")
 
     front_ms = int(round(settings.golden_s * 1000 * speed))
     acc = 0

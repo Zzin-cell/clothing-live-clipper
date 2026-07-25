@@ -75,13 +75,24 @@ SYSTEM_PROMPT = """你是服装带货短视频剪辑导演（抖音/快手完播
 不要输出“黄金/信任/收尾”分区标题；输出一条通顺时间线即可。
 
 ====================
-五、技术硬规则
+五、完整逻辑（非常重要，禁止戛然而止）
+====================
+1) 成片必须是“完整表达”，不能话说一半就结束
+2) keep 里每一条都必须是语义完整的小句（主谓/卖点完整），禁止半截词、半截转折
+3) 若某卖点只讲了上半句，必须补上下一句把意思说完，否则整段不要
+4) 结尾必须有收束感：用体验确认/效果总结/行动暗示其一自然结束
+   （例如“穿上就显瘦”“夏天也不会闷”“这个细节真的加分”）
+5) 禁止在“然后/因为/所以/你看/而且”等连接词处切断
+6) 可以短，但不能断；完整逻辑 > 硬凑满 60 秒
+
+====================
+六、技术硬规则
 ====================
 1) 输入是全量小句；先提炼 main_points，再从中选 keep 并重排
-2) 只能使用输入小句 id；t0_ms/t1_ms 必须落在该小句时间范围内（可微调）
-3) 总源片时长尽量接近 target_source_ms（已按倍速预留，默认约 1.4x→60s）
+2) 只能使用输入小句 id；优先整句采用该小句完整 t0~t1，不要随意砍半句
+3) 总源片时长尽量接近 target_source_ms；若无法完整讲完，宁可少 5–8 秒，也要完整
 4) 删除：尺码建议、长段砍价、直播控场、幻觉垃圾（对对对、xy）
-5) keep 按成片播放顺序；每条写 why（钩子/版型/细节/对比/体验）与 point（对应 main_points）
+5) keep 按成片播放顺序；每条写 why 与 point；最后 1–2 条必须是收束，不能是未完成句
 6) 只输出严格 JSON，不要 markdown
 
 输出 JSON schema:
@@ -89,12 +100,12 @@ SYSTEM_PROMPT = """你是服装带货短视频剪辑导演（抖音/快手完播
   "product_summary": "一句话主卖点",
   "hook_type": "visual|pain|welfare",
   "main_points": ["主卖点1","版型点","体验点","细节点"],
-  "logic": ["钩子","版型上身","细节","对比体验"],
+  "logic": ["钩子","版型上身","细节","对比体验","收束"],
   "keep": [
-    {"id":"c00012","t0_ms":12300,"t1_ms":15800,"text":"...","why":"3秒痛点钩子","point":"显瘦"}
+    {"id":"c00012","t0_ms":12300,"t1_ms":15800,"text":"...","why":"3秒痛点钩子","point":"显瘦","complete":true}
   ],
   "drop_ids": ["c00001","c00002"],
-  "notes": "从全部口播中删了哪些重复/闲聊/调试"
+  "notes": "如何保证完整逻辑、删了哪些半句/重复"
 }
 """
 
@@ -257,7 +268,10 @@ def call_llm_for_plan(
                 "pain: 微胖显壮/小个子压身高/显廉价/夏天闷汗",
                 "welfare: 低价/限时限量/现货清仓/专柜平替（仅开场一句）",
             ],
-            "sequence": "3秒钩子 → 版型上身 → 细节特写 → 对比/体验",
+            "sequence": "3秒钩子 → 版型上身 → 细节特写 → 对比/体验 → 自然收束",
+            "complete_logic_required": True,
+            "no_mid_sentence_cutoff": True,
+            "prefer_complete_under_duration": True,
             "drop_always": [
                 "打招呼",
                 "调试镜头",
@@ -267,6 +281,7 @@ def call_llm_for_plan(
                 "整理衣服",
                 "喝水",
                 "对对对/xy幻觉",
+                "话说一半的半截句",
             ],
         },
         "learning_hints": _learning_hints(),
@@ -325,6 +340,38 @@ def call_llm_for_plan(
     return obj
 
 
+_INCOMPLETE_TAIL = (
+    "然后", "因为", "所以", "而且", "但是", "不过", "就是", "那个", "这个",
+    "你看", "你看一下", "还有", "以及", "比如", "比如说", "包括", "以及呢",
+    "的话", "的话呢", "的话啊", "的", "了", "呢", "啊", "哦", "嗯",
+)
+
+
+def _looks_incomplete_text(text: str) -> bool:
+    t = re.sub(r"\s+", "", (text or "").strip())
+    if not t:
+        return True
+    if len(t) < 4:
+        return True
+    # ends with connective / dangling particle => incomplete thought
+    for w in _INCOMPLETE_TAIL:
+        if t.endswith(w):
+            return True
+    # pure list crumbs
+    if t in {"对", "好", "是", "嗯", "啊", "哦"}:
+        return True
+    return False
+
+
+def _is_closing_text(text: str) -> bool:
+    t = text or ""
+    keys = (
+        "显瘦", "舒服", "好看", "好穿", "不闷", "凉快", "推荐", "闭眼入",
+        "真的", "完全", "足够", "就这些", "就这样", "效果", "气质", "高级",
+    )
+    return any(k in t for k in keys) and not _looks_incomplete_text(t)
+
+
 def llm_obj_to_timeline(
     llm_obj: dict[str, Any],
     lines: list[dict[str, Any]],
@@ -337,87 +384,175 @@ def llm_obj_to_timeline(
     if not isinstance(clause_units, list) or not clause_units:
         clause_units = expand_lines_to_clauses(lines)
     by_id = {str(u.get("utt_id") or u.get("id")): u for u in clause_units}
-    # also index parents for fallback
+    # ordered list for neighbor completion
+    ordered = list(clause_units)
+    id_to_idx = {str(u.get("id")): i for i, u in enumerate(ordered)}
     parents = {str(u.get("id")): u for u in _normalize_lines(lines)}
     keep = llm_obj.get("keep") or []
     slots: list[PlanSlot] = []
     if not isinstance(keep, list):
         keep = []
 
-    for i, item in enumerate(keep):
-        if not isinstance(item, dict):
-            continue
+    used_ids: set[str] = set()
+
+    def _resolve_src(item: dict[str, Any]) -> tuple[str, dict[str, Any] | None]:
         uid = str(item.get("id") or item.get("utt_id") or "")
         src = by_id.get(uid) or parents.get(uid)
-        if not src:
-            # try fuzzy by text over all clauses
-            text_i = str(item.get("text") or "").strip()
-            if text_i:
-                for u in by_id.values():
-                    ut = str(u.get("text") or "")
-                    if text_i[:10] and text_i[:10] in ut:
-                        src = u
-                        uid = str(u.get("id"))
-                        break
-                    if ut[:10] and ut[:10] in text_i:
-                        src = u
-                        uid = str(u.get("id"))
-                        break
-        if not src:
-            continue
-        st0 = int(src["t0_ms"])
-        st1 = int(src["t1_ms"])
-        t0 = int(item.get("t0_ms") or st0)
-        t1 = int(item.get("t1_ms") or st1)
-        # clamp into source clause/utterance window (+small pad)
-        t0 = max(st0, min(st1 - 300, t0))
-        t1 = max(t0 + 300, min(st1 + 200, t1))
-        text = str(item.get("text") or src.get("text") or "").strip()
+        if src:
+            return uid, src
+        text_i = str(item.get("text") or "").strip()
+        if text_i:
+            for u in by_id.values():
+                ut = str(u.get("text") or "")
+                if text_i[:10] and text_i[:10] in ut:
+                    return str(u.get("id")), u
+                if ut[:10] and ut[:10] in text_i:
+                    return str(u.get("id")), u
+        return uid, None
+
+    def _append_from_src(uid: str, src: dict[str, Any], *, why: str = "", score: float = 50.0) -> None:
+        if uid in used_ids:
+            return
+        text = str(src.get("text") or "").strip()
         if not text:
-            continue
-        # hard safety: still drop obvious size / long deal spam
-        if any(x in text for x in ("尺码", "M码", "L码", "胸围", "腰围", "偏大", "偏小")):
-            continue
+            return
+        if any(x in text for x in ("尺码", "M码", "L码", "m码", "胸围", "腰围", "偏大", "偏小")):
+            return
         if any(x in text for x in ("加购", "小黄车", "上链接", "点链接")):
-            continue
+            return
+        # always take full clause window first (avoid mid-clause cutoff)
+        t0 = int(src["t0_ms"])
+        t1 = max(t0 + 300, int(src["t1_ms"]))
+        # small natural pad, not truncation
+        t1 = t1 + 120
         slots.append(
             PlanSlot(
-                clip_id=f"llm_{uid}_{i}",
+                clip_id=f"llm_{uid}_{len(slots)}",
                 role="story",
                 t0_ms=t0,
                 t1_ms=t1,
                 text=text,
-                score=float(50 + max(0, 20 - i)),
+                score=score,
             )
         )
+        used_ids.add(uid)
 
-    # duration trim/pad toward target source length
+    for i, item in enumerate(keep):
+        if not isinstance(item, dict):
+            continue
+        uid, src = _resolve_src(item)
+        if not src:
+            continue
+        text = str(item.get("text") or src.get("text") or "").strip()
+        # skip incomplete crumbs unless we can complete with neighbor below
+        if _looks_incomplete_text(text) and len(text) < 6:
+            # try neighbor completion first
+            pass
+        _append_from_src(uid, src, why=str(item.get("why") or ""), score=float(50 + max(0, 20 - i)))
+
+        # if current text looks incomplete, auto-append next clause from full ASR
+        if _looks_incomplete_text(text):
+            idx = id_to_idx.get(uid)
+            if idx is not None:
+                for j in range(idx + 1, min(idx + 3, len(ordered))):
+                    nxt = ordered[j]
+                    nid = str(nxt.get("id"))
+                    ntext = str(nxt.get("text") or "")
+                    if nid in used_ids:
+                        continue
+                    # don't pull greetings as completion
+                    if any(b in ntext for b in ("家人们", "扣1", "欢迎", "链接")):
+                        break
+                    _append_from_src(nid, nxt, why="complete_logic_next_clause", score=40)
+                    if not _looks_incomplete_text(ntext):
+                        break
+
+    # duration trim/pad toward target source length, but NEVER drop the closing complete clause first
     sp = playback_speed if playback_speed and playback_speed > 0 else 1.4
     aim = int(round(target_seconds * 1000 * sp))
-    min_ms = int(aim * 0.88)
+    min_ms = int(aim * 0.82)  # allow shorter if complete
     max_ms = int(aim * 1.12)
 
     def total_ms() -> int:
         return sum(max(0, s.t1_ms - s.t0_ms) for s in slots)
 
-    while total_ms() > max_ms and len(slots) > 3:
-        slots.pop()
+    # trim from middle-low value first; keep first hook and last closer
+    guard = 0
+    while total_ms() > max_ms and len(slots) > 4 and guard < 20:
+        guard += 1
+        # drop near-end incomplete crumbs first
+        drop_i = None
+        for i in range(len(slots) - 2, 0, -1):
+            if _looks_incomplete_text(slots[i].text):
+                drop_i = i
+                break
+        if drop_i is None:
+            # drop lowest score middle item
+            mid = slots[1:-1]
+            if not mid:
+                break
+            victim = min(mid, key=lambda s: s.score)
+            drop_i = slots.index(victim)
+        slots.pop(drop_i)
+
+    # ensure ending is complete: if last is incomplete, try append a closing candidate
+    if slots and _looks_incomplete_text(slots[-1].text):
+        # search remaining clauses for a short closer
+        for u in ordered:
+            uid = str(u.get("id"))
+            if uid in used_ids:
+                continue
+            tx = str(u.get("text") or "")
+            if _is_closing_text(tx):
+                _append_from_src(uid, u, why="force_complete_ending", score=45)
+                break
+        # if still incomplete, drop dangling last crumb
+        if slots and _looks_incomplete_text(slots[-1].text) and len(slots) > 2:
+            slots.pop()
+
+    # merge adjacent continuous clauses into smoother modules (same parent or tiny gap)
+    merged: list[PlanSlot] = []
+    for s in slots:
+        if not merged:
+            merged.append(s)
+            continue
+        prev = merged[-1]
+        gap = s.t0_ms - prev.t1_ms
+        if 0 <= gap <= 500 and (prev.t1_ms - prev.t0_ms) + (s.t1_ms - s.t0_ms) <= 10000:
+            # merge only if it improves completeness
+            prev.t1_ms = max(prev.t1_ms, s.t1_ms)
+            if s.text and s.text not in (prev.text or ""):
+                joiner = "" if (prev.text or "").endswith(("，", "。", "！", "？", ",", ".")) else "，"
+                prev.text = f"{prev.text}{joiner}{s.text}"
+            prev.score = max(prev.score, s.score)
+            continue
+        merged.append(s)
+    slots = merged
 
     warnings = [
         "policy:llm_logic_plan",
         "policy:logic_storyline",
+        "policy:complete_logic_no_cutoff",
         "policy:size_excluded",
         "policy:de_live_room_feel",
     ]
     if llm_obj.get("product_summary"):
         warnings.append(f"llm_summary:{(str(llm_obj.get('product_summary'))[:80])}")
+    if llm_obj.get("main_points"):
+        warnings.append("policy:main_points_first")
     if not slots:
         warnings.append("llm_empty_keep")
     tot = total_ms()
     if tot < min_ms:
-        warnings.append(f"short_content_ms={tot}")
-        if slots:
-            slots[-1].t1_ms += min(2500, min_ms - tot)
+        warnings.append(f"short_but_complete_ms={tot}")
+        # mild pad only on last complete slot
+        if slots and not _looks_incomplete_text(slots[-1].text):
+            slots[-1].t1_ms += min(1800, min_ms - tot)
+
+    # final guard: never end with incomplete text
+    if slots and _looks_incomplete_text(slots[-1].text) and len(slots) > 1:
+        slots.pop()
+        warnings.append("dropped_incomplete_tail")
 
     return TimelinePlan(
         target_duration_s=target_seconds,

@@ -79,3 +79,26 @@ def test_llm_empty_keep_yields_empty_plan_flag():
     plan = llm_obj_to_timeline({"keep": []}, _lines(), target_seconds=60, playback_speed=1.4)
     assert plan.golden == []
     assert any("llm_empty_keep" in w for w in plan.warnings)
+
+
+def test_llm_completes_incomplete_tail_instead_of_hard_cutoff():
+    clauses = expand_lines_to_clauses(_lines())
+    # force an incomplete keep item then ensure planner prefers complete windows
+    id_soft = next(c["id"] for c in clauses if "软" in c["text"] or "面料" in c["text"])
+    id_fit = next(c["id"] for c in clauses if "收腰" in c["text"] or "显瘦" in c["text"])
+    id_wear = next(c["id"] for c in clauses if "舒服" in c["text"] or "冰冰" in c["text"])
+    llm_obj = {
+        "product_summary": "完整逻辑测试",
+        "main_points": ["面料", "版型", "体验"],
+        "keep": [
+            {"id": id_soft, "text": "这件面料超级软", "why": "钩子"},
+            {"id": id_fit, "text": "收腰版型", "why": "版型"},
+            {"id": id_wear, "text": "很舒服不闷", "why": "收束"},
+        ],
+        "_clauses": clauses,
+    }
+    plan = llm_obj_to_timeline(llm_obj, _lines(), target_seconds=60, playback_speed=1.0)
+    assert plan.golden
+    assert any("complete_logic_no_cutoff" in w for w in plan.warnings)
+    # ending should not be an empty/incomplete crumb only
+    assert len(plan.golden[-1].text.strip()) >= 4

@@ -35,7 +35,14 @@
 6. **摘要** → `review.md` / `learning_debug.json`  
 
 开关：前端「LLM 用户配置」填写 Base URL / Model / API Key 并启用后走 LLM；  
-配置保存在 `output/user_config/llm.json`（**不读 env 密钥**）。未配置或失败则规则回退。
+配置保存在 `output/user_config/llm.json`（**不读 env 密钥**）。未配置或失败则规则回退。  
+
+LLM 调用走 `openai_compat.py` 完整兼容客户端（类似 Agent 接入）：
+- 自动规范化 Base URL（补 `/v1`、剥离误粘贴的 `/chat/completions`）
+- 多端点尝试（`/v1/chat/completions` 等）
+- 多鉴权头（Bearer / api-key / x-api-key）
+- 多请求体回退（`response_format` / `max_tokens` / 最小字段）
+- 统一解析 `choices[0].message.content` 及兼容变体
 
 ## 3. 反剪链路（人工）
 

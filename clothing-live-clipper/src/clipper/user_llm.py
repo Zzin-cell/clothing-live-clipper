@@ -34,14 +34,62 @@ def _default() -> dict[str, Any]:
 
 
 def _normalize_base_url(url: str) -> str:
-    u = (url or "").strip().rstrip("/")
+    """
+    Normalize many provider URL styles to an OpenAI-compatible base.
+    Accepts:
+      https://api.openai.com
+      https://api.openai.com/v1
+      https://xxx.com/v1/
+      https://xxx.com/openai/v1
+      https://xxx.openai.azure.com/
+    """
+    u = (url or "").strip()
     if not u:
         return "https://api.openai.com/v1"
-    # accept roots without /v1 (common for some gateways)
-    if not u.endswith("/v1") and not re.search(r"/v\d+$", u):
-        # keep as-is if user already has full path like .../v1
-        pass
+    u = u.rstrip("/")
+    # strip trailing endpoint if user pasted full chat url
+    for suf in (
+        "/chat/completions",
+        "/completions",
+        "/responses",
+        "/models",
+    ):
+        if u.lower().endswith(suf):
+            u = u[: -len(suf)].rstrip("/")
+            break
+    # azure often uses .../openai/deployments/{name}
+    if "/openai/deployments/" in u.lower():
+        # keep up to /openai
+        idx = u.lower().find("/openai")
+        if idx > 0:
+            u = u[: idx + len("/openai")]
+    # if no version suffix, append /v1 (covers ~most openers/gateways)
+    if not re.search(r"/v\d+$", u, flags=re.I) and not u.lower().endswith("/openai"):
+        u = u + "/v1"
     return u
+
+
+def candidate_chat_endpoints(base_url: str) -> list[str]:
+    """Generate common OpenAI-compatible chat endpoints for broad gateway support."""
+    base = _normalize_base_url(base_url)
+    cands: list[str] = []
+    def add(x: str) -> None:
+        x = x.rstrip("/")
+        if x not in cands:
+            cands.append(x)
+
+    add(f"{base}/chat/completions")
+    # without /v1
+    if base.endswith("/v1"):
+        add(f"{base[:-3]}/chat/completions")
+        add(f"{base}/v1/chat/completions")  # rare double
+    else:
+        add(f"{base}/v1/chat/completions")
+    # some CN gateways
+    add(f"{base}/openai/chat/completions")
+    if base.endswith("/v1"):
+        add(f"{base[:-3]}/openai/v1/chat/completions")
+    return cands
 
 
 def load_user_llm() -> dict[str, Any]:
@@ -147,20 +195,78 @@ def runtime_llm() -> dict[str, Any]:
 
 
 def build_openai_headers(cfg: dict[str, Any] | None = None) -> dict[str, str]:
-    """OpenAI-compatible headers used by ~90% gateways."""
+    """
+    OpenAI-compatible auth headers covering most distributors:
+    - Authorization: Bearer <key>   (OpenAI / most gateways)
+    - api-key: <key>                (Azure OpenAI)
+    - x-api-key: <key>              (some Anthropic-style proxies)
+    """
     cfg = cfg or runtime_llm()
+    key = str(cfg.get("api_key") or "").strip()
     headers = {
         "Content-Type": "application/json",
-        "Authorization": f"Bearer {cfg.get('api_key') or ''}",
+        "Accept": "application/json",
+        "User-Agent": "xiaomian-capcut/1.0",
     }
-    # common alternates some providers accept
-    if cfg.get("api_key"):
-        headers["api-key"] = str(cfg["api_key"])  # Azure-style sometimes
-        headers["x-api-key"] = str(cfg["api_key"])  # anthropic-style proxies
+    if key:
+        headers["Authorization"] = f"Bearer {key}"
+        headers["api-key"] = key
+        headers["x-api-key"] = key
+        # a few gateways use these
+        headers["Token"] = key
+        headers["X-Token"] = key
     org = (cfg.get("organization") or "").strip()
     if org:
         headers["OpenAI-Organization"] = org
+        headers["OpenAI-Project"] = org
     for k, v in (cfg.get("extra_headers") or {}).items():
-        if k and v is not None:
+        if k and v is not None and str(k).strip():
             headers[str(k)] = str(v)
     return headers
+
+
+def auth_header_variants(cfg: dict[str, Any] | None = None) -> list[dict[str, str]]:
+    """
+    Try a few auth styles if the first fails (401/403).
+    Order matters: most common first.
+    """
+    cfg = cfg or runtime_llm()
+    key = str(cfg.get("api_key") or "").strip()
+    base = {
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+        "User-Agent": "xiaomian-capcut/1.0",
+    }
+    org = (cfg.get("organization") or "").strip()
+    if org:
+        base["OpenAI-Organization"] = org
+
+    variants: list[dict[str, str]] = []
+    if not key:
+        return [base]
+
+    # 1) OpenAI standard
+    h1 = dict(base)
+    h1["Authorization"] = f"Bearer {key}"
+    variants.append(h1)
+
+    # 2) Azure style
+    h2 = dict(base)
+    h2["api-key"] = key
+    variants.append(h2)
+
+    # 3) Bearer + api-key together (many CN gateways)
+    h3 = dict(base)
+    h3["Authorization"] = f"Bearer {key}"
+    h3["api-key"] = key
+    h3["x-api-key"] = key
+    variants.append(h3)
+
+    # 4) raw Authorization without Bearer
+    h4 = dict(base)
+    h4["Authorization"] = key
+    variants.append(h4)
+
+    # 5) full multi-header set
+    variants.append(build_openai_headers(cfg))
+    return variants

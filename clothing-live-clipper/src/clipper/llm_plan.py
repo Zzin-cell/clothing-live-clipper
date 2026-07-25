@@ -21,7 +21,8 @@ from typing import Any
 from clipper.config import Settings
 from clipper.learning import learning_status, split_clauses
 from clipper.models import PlanSlot, TimelinePlan
-from clipper.user_llm import build_openai_headers, runtime_llm
+from clipper.openai_compat import OpenAICompatError, chat_completions
+from clipper.user_llm import runtime_llm
 
 
 SYSTEM_PROMPT = """你是服装带货短视频剪辑导演（抖音/快手完播导向）。
@@ -294,69 +295,48 @@ def call_llm_for_plan(
         "all_clauses": compact,
     }
 
-    # OpenAI-compatible endpoint shapes
-    endpoints = [f"{base}/chat/completions"]
-    if base.endswith("/v1"):
-        endpoints.append(f"{base[:-3]}/chat/completions")
-    else:
-        endpoints.append(f"{base}/v1/chat/completions")
+    user_text = (
+        "下面是该视频 ASR 全量口播小句。请先提取主要内容 main_points，"
+        "再从全部小句中挑选并重新排列 keep，只输出JSON：\n"
+        + json.dumps(user_payload, ensure_ascii=False)
+    )
+    messages = [
+        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "user", "content": user_text},
+    ]
 
-    headers = build_openai_headers(cfg)
-    payload = {
-        "model": model,
-        "temperature": 0.2,
-        "response_format": {"type": "json_object"},
-        "messages": [
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {
-                "role": "user",
-                "content": (
-                    "下面是该视频 ASR 全量口播小句。请先提取主要内容 main_points，"
-                    "再从全部小句中挑选并重新排列 keep，只输出JSON：\n"
-                    + json.dumps(user_payload, ensure_ascii=False)
-                ),
-            },
-        ],
-    }
-
-    last_err = None
-    resp = None
-    for url in endpoints:
-        try:
-            resp = _http_json(url, headers, payload, timeout=180)
-            break
-        except urllib.error.HTTPError as e:
-            err = e.read().decode("utf-8", errors="replace") if hasattr(e, "read") else str(e)
-            # some providers don't support response_format
-            if "response_format" in err or e.code in {400, 404, 422}:
-                payload2 = dict(payload)
-                payload2.pop("response_format", None)
-                try:
-                    resp = _http_json(url, headers, payload2, timeout=180)
-                    break
-                except Exception as e2:
-                    last_err = e2
-                    continue
-            last_err = RuntimeError(f"llm_http_{e.code}:{err[:400]}")
-        except Exception as e:
-            last_err = e
-            continue
-    if resp is None:
-        raise RuntimeError(f"llm_request_failed:{last_err}")
-
-    content = ""
     try:
-        content = resp["choices"][0]["message"]["content"]
-    except Exception as e:
-        raise RuntimeError(f"llm_bad_response:{str(resp)[:400]}") from e
+        out = chat_completions(
+            messages=messages,
+            model=model,
+            base_url=base,
+            api_key=key,
+            temperature=0.2,
+            max_tokens=4096,
+            force_json=True,
+            timeout=180,
+            cfg=cfg,
+        )
+    except OpenAICompatError as e:
+        raise RuntimeError(f"llm_request_failed:{e}") from e
+
+    content = out.get("content") or ""
     obj = _extract_json_obj(content)
     obj["_meta"] = {
-        "model": model,
-        "base_url": base,
+        "model": out.get("model") or model,
+        "base_url": out.get("base_url") or base,
+        "endpoint": out.get("endpoint"),
         "target_source_ms": target_source_ms,
         "input_lines": len(_normalize_lines(lines)),
         "input_clauses": len(clauses),
         "submit_mode": "full_asr_all_clauses",
+        "compat": {
+            "auth_variant": out.get("auth_variant"),
+            "payload_variant": out.get("payload_variant"),
+            "endpoint": out.get("endpoint"),
+        },
+        "auth_source": "user_ui",
+        "client": "openai_compat_full",
     }
     # stash clauses for timeline mapping (full ASR units)
     obj["_clauses"] = clauses

@@ -162,7 +162,7 @@
             <span class="muted" id="llm-cfg-status">未配置</span>
           </div>
           <form id="llm-config-form" class="jy-form llm-form">
-            <p class="jy-hint">由使用者自行填写并调用，不读取环境变量。兼容 OpenAI 协议（绝大多数中转/厂商 Key）。</p>
+            <p class="jy-hint">由使用者自行填写并调用，不读取环境变量。完整 OpenAI 兼容调用：自动补 /v1、多鉴权头、多端点/请求体回退，接近 Agent 接入方式，适配约 90% Key/中转。</p>
             <label class="jy-switch">
               <input type="checkbox" id="llm_plan" checked />
               <span>启用 LLM 逻辑排片</span>
@@ -241,6 +241,6 @@
     </div>
   </aside>
 
-  <script src="/static/app.js?v=jy43"></script>
+  <script src="/static/app.js?v=jy45"></script>
 </body>
 </html>

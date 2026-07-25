@@ -253,46 +253,23 @@ def probe_whisper(timeout_s: float = 30.0) -> dict[str, Any]:
         return {"target": "whisper", "ok": False, "error": str(e)}
 
 
-def probe_llm(timeout_s: float = 30.0) -> dict[str, Any]:
-    # user UI config only (OpenAI-compatible)
+def probe_llm(timeout_s: float = 40.0) -> dict[str, Any]:
+    """Probe user UI LLM config via full OpenAI-compatible client."""
     try:
-        from clipper.user_llm import build_openai_headers, runtime_llm
+        from clipper.openai_compat import ping
+        from clipper.user_llm import runtime_llm
 
         cfg = runtime_llm()
+        out = ping(
+            base_url=cfg.get("base_url"),
+            api_key=cfg.get("api_key"),
+            model=cfg.get("model"),
+            timeout=int(timeout_s),
+        )
+        out["target"] = "llm"
+        out["optional"] = True
+        return out
     except Exception as e:
-        return {"target": "llm", "ok": False, "error": f"user_config:{e}", "optional": True}
-    key = str(cfg.get("api_key") or "").strip()
-    if not key:
-        return {"target": "llm", "ok": False, "error": "missing_user_api_key", "optional": True}
-    base = str(cfg.get("base_url") or "").rstrip("/")
-    model = str(cfg.get("model") or "").strip()
-    if not base or not model:
-        return {"target": "llm", "ok": False, "error": "missing_base_url_or_model", "optional": True}
-    url = f"{base}/chat/completions"
-    body = {
-        "model": model,
-        "messages": [{"role": "user", "content": "ping"}],
-        "max_tokens": 5,
-    }
-    try:
-        with httpx.Client(timeout=timeout_s) as client:
-            r = client.post(
-                url,
-                headers=build_openai_headers(cfg),
-                json=body,
-            )
-        if r.status_code >= 400:
-            return {
-                "target": "llm",
-                "ok": False,
-                "error": f"HTTP {r.status_code}",
-                "detail": r.text[:300],
-                "model": model,
-                "base_url": base,
-                "optional": True,
-            }
-        return {"target": "llm", "ok": True, "model": model, "base_url": base, "source": "user_ui"}
-    except httpx.HTTPError as e:
         return {"target": "llm", "ok": False, "error": str(e), "optional": True}
 
 

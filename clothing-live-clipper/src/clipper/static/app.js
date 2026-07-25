@@ -1624,23 +1624,29 @@ function setupLlmConfig() {
       const api_key = $("llm_api_key")?.value?.trim() || "";
       const preferred = $("llm_model")?.value?.trim() || "";
       if (!base_url) throw new Error("请先填写 Base URL");
+      if (api_key && /^https?:\/\//i.test(api_key)) {
+        throw new Error("API Key 填成网址了。网址请填 Base URL，Key 填 sk-... 字符串");
+      }
       // key can be previously saved
       const body = { base_url, preferred };
       if (api_key) body.api_key = api_key;
+      const t0 = performance.now();
       const res = await fetch("/api/system/llm/models", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),
       });
       const data = await res.json().catch(() => ({}));
+      const clientMs = Math.round(performance.now() - t0);
       if (!res.ok) throw new Error(data.detail || "拉取模型失败");
       const models = data.models || [];
       fillModelDatalist(models);
       if (data.picked && $("llm_model")) $("llm_model").value = data.picked;
+      const ms = data.latency_ms != null ? data.latency_ms : clientMs;
       if (msg) {
         msg.textContent = models.length
-          ? `已匹配 ${models.length} 个模型，当前选择：${data.picked || "-"}`
-          : "未拉到模型列表（中转可能禁用 /models）。可手动填写 Model 后再测连通。";
+          ? `已匹配 ${models.length} 个模型，当前：${data.picked || "-"} · 延迟 ${ms} ms`
+          : `未拉到模型列表（中转可能禁用 /models）。可手动填 Model。· 延迟 ${ms} ms`;
       }
       loadHealth();
       loadLlmConfig();
@@ -1651,32 +1657,50 @@ function setupLlmConfig() {
 
   $("llm-probe")?.addEventListener("click", async () => {
     const msg = $("llm-cfg-msg");
-    if (msg) msg.textContent = "测试中…";
+    if (msg) msg.textContent = "测试连通与延迟中…";
     try {
+      const body = collectBody();
+      if (body.llm_api_key && /^https?:\/\//i.test(body.llm_api_key)) {
+        throw new Error("API Key 填成网址了。网址请填 Base URL，Key 填 sk-... 字符串");
+      }
       // save first so probe uses latest user config
-      await fetch("/api/system/config", {
+      const saveRes = await fetch("/api/system/config", {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(collectBody()),
+        body: JSON.stringify(body),
       });
+      const saveData = await saveRes.json().catch(() => ({}));
+      if (!saveRes.ok) throw new Error(saveData.detail || "保存配置失败");
+
+      const t0 = performance.now();
       const res = await fetch("/api/system/probe", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ target: "llm" }),
       });
       const data = await res.json();
+      const clientMs = Math.round(performance.now() - t0);
       const probe = data.probe || data;
       const ok = !!(probe.ok || probe.llm?.ok);
       // if probe returned models, fill them
       const models = probe.models || probe.llm?.models || [];
       if (models.length) fillModelDatalist(models);
-      if (probe.auto_picked && probe.model && $("llm_model")) {
-        $("llm_model").value = probe.model;
+      if ((probe.auto_picked || probe.model) && probe.model && $("llm_model")) {
+        // if auto-picked or server returned effective model, reflect it
+        if (probe.auto_picked || !$("llm_model").value) $("llm_model").value = probe.model;
       }
+      const lat = probe.latency || {};
+      const total = lat.total_ms != null ? lat.total_ms : probe.latency_ms != null ? probe.latency_ms : clientMs;
+      const chat = lat.chat_ms != null ? `，chat ${lat.chat_ms} ms` : "";
+      const modelsLat = lat.models_ms != null ? `，models ${lat.models_ms} ms` : "";
       if (msg) {
         msg.textContent = ok
-          ? `连通成功 · ${probe.model || $("llm_model")?.value || ""}${probe.auto_picked ? "（已自动匹配模型）" : ""}`
-          : `连通失败：${probe.error || probe.detail || data.detail || "unknown"}`;
+          ? `连通成功 · ${probe.model || $("llm_model")?.value || ""}${probe.auto_picked ? "（已自动匹配模型）" : ""} · 延迟 ${total} ms${modelsLat}${chat}`
+          : `连通失败 · 延迟 ${total} ms：${probe.error || probe.detail || data.detail || "unknown"}`;
+      }
+      // if key was wrong URL before, force user to re-enter
+      if (!ok && String(probe.error || "").includes("API Key 填成网址")) {
+        if ($("llm_api_key")) $("llm_api_key").value = "";
       }
       loadHealth();
       loadLlmConfig();

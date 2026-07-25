@@ -39,6 +39,7 @@ class ConfigUpdate(BaseModel):
     llm_model: str | None = None
     llm_enabled: bool | None = None
     llm_plan: bool | None = None
+    organization: str | None = None
     asr_enabled: bool | None = None
     asr_provider: str | None = None
 
@@ -225,7 +226,21 @@ def create_app() -> FastAPI:
     @app.put("/api/system/config")
     def system_config_put(body: ConfigUpdate) -> dict[str, Any]:
         try:
+            # validate LLM fields early with clear Chinese errors
+            from clipper.user_llm import validate_user_llm_fields
+
+            errs = validate_user_llm_fields(
+                base_url=body.llm_base_url or body.base_url,
+                api_key=body.llm_api_key or body.api_key,
+                model=body.llm_model,
+            )
+            if errs:
+                raise HTTPException(status_code=400, detail="；".join(errs))
             cfg = apply_config_update(body.model_dump(exclude_none=True))
+        except HTTPException:
+            raise
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e)) from e
         except OSError as e:
             raise HTTPException(status_code=500, detail=f"写入配置失败: {e}") from e
         return {"ok": True, "config": cfg, "status": build_status()}
@@ -259,34 +274,43 @@ def create_app() -> FastAPI:
     @app.post("/api/system/llm/models")
     def system_llm_models(body: LlmModelsBody) -> dict[str, Any]:
         """List models from user-provided OpenAI-compatible base_url + key, auto-pick one."""
+        import time
+
         from clipper.openai_compat import discover_models_and_pick
-        from clipper.user_llm import runtime_llm, save_user_llm
+        from clipper.user_llm import runtime_llm, save_user_llm, validate_user_llm_fields
 
         rt = runtime_llm()
         base = (body.base_url or rt.get("base_url") or "").strip()
         key = (body.api_key or rt.get("api_key") or "").strip()
         preferred = (body.preferred or rt.get("model") or "").strip() or None
-        if not base or not key:
-            raise HTTPException(status_code=400, detail="请先填写 Base URL 和 API Key")
+        errs = validate_user_llm_fields(base_url=base, api_key=key, require_key=True)
+        if errs:
+            raise HTTPException(status_code=400, detail="；".join(errs))
+        t0 = time.perf_counter()
         disc = discover_models_and_pick(base_url=base, api_key=key, preferred=preferred)
+        latency_ms = int((time.perf_counter() - t0) * 1000)
         # optionally remember base/key/model to user config if key provided in request
         if body.api_key or body.base_url or disc.get("picked"):
-            save_user_llm(
-                {
-                    "llm_base_url": base,
-                    "llm_api_key": body.api_key if body.api_key else None,
-                    "llm_model": disc.get("picked") or preferred or "",
-                    "llm_plan": True,
-                    "llm_enabled": True,
-                },
-                keep_old_key_if_blank=True,
-            )
+            try:
+                save_user_llm(
+                    {
+                        "llm_base_url": base,
+                        "llm_api_key": body.api_key if body.api_key else None,
+                        "llm_model": disc.get("picked") or preferred or "",
+                        "llm_plan": True,
+                        "llm_enabled": True,
+                    },
+                    keep_old_key_if_blank=True,
+                )
+            except ValueError as e:
+                raise HTTPException(status_code=400, detail=str(e)) from e
         return {
             "ok": bool(disc.get("ok")),
             "base_url": disc.get("base_url") or base,
             "models": disc.get("models") or [],
             "picked": disc.get("picked"),
             "count": disc.get("count") or 0,
+            "latency_ms": latency_ms,
             "config": public_config(),
         }
 

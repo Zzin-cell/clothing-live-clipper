@@ -395,21 +395,46 @@ def ping(
     timeout: int = 40,
     auto_pick_model: bool = True,
 ) -> dict[str, Any]:
-    """Connectivity probe used by frontend '测试连通'."""
+    """Connectivity probe used by frontend '测试连通' (includes latency)."""
+    import time
+
+    t_all = time.perf_counter()
+    models_ms = None
+    chat_ms = None
     try:
+        key = (api_key or "").strip()
+        bu = (base_url or "").strip()
+        if key.lower().startswith("http://") or key.lower().startswith("https://"):
+            return {
+                "ok": False,
+                "error": "API Key 填成网址了。请把网址放到 Base URL，Key 填 sk-... 字符串",
+                "source": "user_ui",
+                "latency_ms": 0,
+            }
+        if bu and not (bu.lower().startswith("http://") or bu.lower().startswith("https://")):
+            return {
+                "ok": False,
+                "error": "Base URL 需以 http:// 或 https:// 开头",
+                "source": "user_ui",
+                "latency_ms": 0,
+            }
+
         mdl = (model or "").strip() or None
         models: list[str] = []
         picked = mdl
         if auto_pick_model:
+            t0 = time.perf_counter()
             disc = discover_models_and_pick(
                 base_url=base_url, api_key=api_key, preferred=mdl, timeout=min(30, timeout)
             )
+            models_ms = int((time.perf_counter() - t0) * 1000)
             models = disc.get("models") or []
             if not mdl:
                 picked = disc.get("picked")
             elif models and mdl not in models:
                 # user typed unavailable model -> auto switch to available
                 picked = disc.get("picked") or mdl
+        t1 = time.perf_counter()
         out = chat_completions(
             messages=[{"role": "user", "content": "reply with ok only"}],
             model=picked,
@@ -420,6 +445,8 @@ def ping(
             force_json=False,
             timeout=timeout,
         )
+        chat_ms = int((time.perf_counter() - t1) * 1000)
+        total_ms = int((time.perf_counter() - t_all) * 1000)
         return {
             "ok": True,
             "model": out.get("model") or picked,
@@ -430,11 +457,20 @@ def ping(
             "models": models[:100],
             "model_count": len(models),
             "auto_picked": bool(auto_pick_model and picked and picked != (model or "").strip()),
+            "latency_ms": total_ms,
+            "latency": {
+                "total_ms": total_ms,
+                "models_ms": models_ms,
+                "chat_ms": chat_ms,
+            },
         }
     except Exception as e:
+        total_ms = int((time.perf_counter() - t_all) * 1000)
         # still try return model list if auth works but chat fails
         try:
+            t0 = time.perf_counter()
             models = list_models(base_url=base_url, api_key=api_key, timeout=20)
+            models_ms = int((time.perf_counter() - t0) * 1000)
         except Exception:
             models = []
         return {
@@ -444,4 +480,10 @@ def ping(
             "models": models[:100],
             "model_count": len(models),
             "picked": pick_default_model(models, preferred=model),
+            "latency_ms": total_ms,
+            "latency": {
+                "total_ms": total_ms,
+                "models_ms": models_ms,
+                "chat_ms": chat_ms,
+            },
         }

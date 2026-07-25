@@ -109,6 +109,43 @@ def load_user_llm() -> dict[str, Any]:
         return dict(data)
 
 
+def _looks_like_url(s: str) -> bool:
+    t = (s or "").strip().lower()
+    return t.startswith("http://") or t.startswith("https://") or "://" in t
+
+
+def validate_user_llm_fields(
+    *,
+    base_url: str | None = None,
+    api_key: str | None = None,
+    model: str | None = None,
+    require_key: bool = False,
+) -> list[str]:
+    """Return human-readable validation errors (empty = ok)."""
+    errs: list[str] = []
+    if base_url is not None:
+        bu = str(base_url or "").strip()
+        if not bu:
+            errs.append("Base URL 不能为空")
+        elif not _looks_like_url(bu):
+            errs.append("Base URL 需以 http:// 或 https:// 开头")
+    if api_key is not None:
+        k = str(api_key or "").strip()
+        if require_key and not k:
+            errs.append("API Key 不能为空")
+        if k and _looks_like_url(k):
+            errs.append("API Key 填成网址了。Key 一般是 sk-... 字符串，网址请填到 Base URL")
+        if k and (" " in k or "\n" in k or "\t" in k):
+            errs.append("API Key 不能包含空格/换行")
+        if k and len(k) < 8:
+            errs.append("API Key 过短，请检查是否粘贴完整")
+    if model is not None:
+        m = str(model or "").strip()
+        if m and _looks_like_url(m):
+            errs.append("Model 不能填网址")
+    return errs
+
+
 def save_user_llm(payload: dict[str, Any], *, keep_old_key_if_blank: bool = True) -> dict[str, Any]:
     cur = load_user_llm()
     nxt = dict(cur)
@@ -125,16 +162,28 @@ def save_user_llm(payload: dict[str, Any], *, keep_old_key_if_blank: bool = True
 
     if payload.get("base_url") is not None or payload.get("llm_base_url") is not None:
         bu = payload.get("llm_base_url", payload.get("base_url"))
-        nxt["base_url"] = _normalize_base_url(str(bu or ""))
+        bu_s = str(bu or "").strip()
+        if bu_s and not _looks_like_url(bu_s):
+            raise ValueError("Base URL 需以 http:// 或 https:// 开头")
+        nxt["base_url"] = _normalize_base_url(bu_s)
 
     if payload.get("model") is not None or payload.get("llm_model") is not None:
         m = payload.get("llm_model", payload.get("model"))
-        nxt["model"] = str(m or "").strip()
+        m_s = str(m or "").strip()
+        if m_s and _looks_like_url(m_s):
+            raise ValueError("Model 不能填网址")
+        nxt["model"] = m_s
 
     key_in = payload.get("api_key", payload.get("llm_api_key"))
     if key_in is not None:
         k = str(key_in or "").strip()
         if k:
+            if _looks_like_url(k):
+                raise ValueError("API Key 填成网址了。请把网址填到 Base URL，Key 填 sk-... 字符串")
+            if " " in k or "\n" in k or "\t" in k:
+                raise ValueError("API Key 不能包含空格/换行")
+            if len(k) < 8:
+                raise ValueError("API Key 过短，请检查是否粘贴完整")
             nxt["api_key"] = k
         elif not keep_old_key_if_blank:
             nxt["api_key"] = ""

@@ -344,16 +344,24 @@ def create_app() -> FastAPI:
             meta["plan"] = _read_json(plan_path)
         if review_path.exists():
             meta["review_md"] = review_path.read_text(encoding="utf-8")
+        has_preview = (d / "preview.mp4").exists()
+        has_final = (d / "final.mp4").exists()
         meta["files"] = {
             "plan": (d / "plan.json").exists(),
             "review": (d / "review.md").exists(),
             "clips": (d / "clips.json").exists(),
-            "final": (d / "final.mp4").exists(),
+            "preview": has_preview,
+            "final": has_final,
             "result": (d / "result.json").exists(),
             "transcript": (d / "transcript.json").exists()
             or (d / "transcript_asr.json").exists(),
             "transcript_asr": (d / "transcript_asr.json").exists(),
         }
+        meta["has_preview"] = has_preview
+        meta["has_final"] = has_final
+        meta["render_profile"] = meta.get("render_profile") or (
+            "draft" if has_preview and not meta.get("export_final") else meta.get("render_profile")
+        )
         return meta
 
     @app.get("/api/jobs/{job_id}/files/{filename}")
@@ -366,6 +374,7 @@ def create_app() -> FastAPI:
             "transcript.json",
             "transcript_asr.json",
             "result.json",
+            "preview.mp4",
             "final.mp4",
             "job_meta.json",
         }
@@ -756,9 +765,35 @@ def create_app() -> FastAPI:
             meta["stage"] = "render"
             meta["progress"] = 70
             meta["error"] = None
+            # reverse-cut iteration stays on draft for speed (P1/P3)
+            meta["render_profile"] = "draft"
             meta.pop("finished_at", None)
             _write_meta(d, meta)
             start_render_plan_async(d)
+        return get_job(job_id)
+
+    @app.post("/api/jobs/{job_id}/export-final")
+    def export_final(job_id: str) -> dict[str, Any]:
+        """Re-render current plan at final quality (NVENC/libx264 single-pass)."""
+        d = _job_dir(job_id)
+        meta_path = d / "job_meta.json"
+        if not meta_path.exists():
+            raise HTTPException(status_code=404, detail="job not found")
+        if not (d / "plan.json").exists():
+            raise HTTPException(status_code=400, detail="missing plan.json")
+        from clipper.job_worker import start_render_plan_async
+
+        meta = _read_json(meta_path)
+        meta["status"] = "processing"
+        meta["stage"] = "export"
+        meta["stage_detail"] = "导出终稿…"
+        meta["progress"] = 70
+        meta["error"] = None
+        meta["render_profile"] = "final"
+        meta["export_final"] = True
+        meta.pop("finished_at", None)
+        _write_meta(d, meta)
+        start_render_plan_async(d)
         return get_job(job_id)
 
     @app.put("/api/jobs/{job_id}/transcript")

@@ -275,7 +275,10 @@ def process_job_dir(job_dir: Path) -> None:
                 _write_meta(job_dir, meta)
 
                 if render:
-                    _set_progress(job_dir, "render", 80, f"按 LLM 逻辑反剪渲染（{len(plan_llm.golden)}段）")
+                    _set_progress(job_dir, "render", 80, f"按 LLM 逻辑反剪渲染（{len(plan_llm.golden)}段 · draft）")
+                    meta = _read_meta(job_dir)
+                    meta["render_profile"] = "draft"
+                    _write_meta(job_dir, meta)
                     render_from_plan_only(job_dir)
                     # render_from_plan_only writes final status; reload
                     meta = _read_meta(job_dir)
@@ -665,25 +668,27 @@ def render_from_plan_only(job_dir: Path) -> None:
             raise RuntimeError("plan 无有效片段")
 
         speed = float(meta.get("playback_speed") or os.environ.get("CLIPPER_PLAYBACK_SPEED") or 1.4)
-        _set_progress(job_dir, "render", 75, f"按调整后的结构渲染（{len(segs)}段）")
+        profile = str(meta.get("render_profile") or "draft").strip().lower()
+        if profile not in {"draft", "final"}:
+            profile = "draft"
+        _set_progress(
+            job_dir,
+            "render",
+            75,
+            f"按结构调整渲染（{len(segs)}段 · {profile}）",
+        )
         from clipper.media import probe_duration_ms, render_plan
+        import shutil
 
-        # clean old render artifacts so browser/file size always changes
+        # Keep previous draft parts for P3 reuse; only wipe finals when exporting final.
+        preview_path = job_dir / "preview.mp4"
         final_path = job_dir / "final.mp4"
-        parts_dir = job_dir / "_parts"
-        if final_path.exists():
+        parts_dir = job_dir / (f"_parts_{profile}")
+        if profile == "final" and final_path.exists():
             try:
                 final_path.unlink()
             except OSError:
                 pass
-        if parts_dir.exists():
-            for old in parts_dir.glob("*"):
-                try:
-                    if old.is_file():
-                        old.unlink()
-                except OSError:
-                    pass
-        # also clear joined temp if any
         for extra in ("_joined_1x.mp4", "final.retime.mp4"):
             p = job_dir / extra
             if p.exists():
@@ -702,38 +707,48 @@ def render_from_plan_only(job_dir: Path) -> None:
             encoding="utf-8",
         )
 
+        out_target = preview_path if profile == "draft" else final_path
         render_plan(
             video,
             segs,
-            final_path,
+            out_target,
             work_dir=parts_dir,
             smooth=True,
             crossfade_s=0.0,
-            edge_fade_s=0.10,
             playback_speed=speed if speed > 0 else 1.4,
+            profile=profile,
+            reuse_parts=True,
         )
+        if profile == "draft" and preview_path.exists():
+            # UI historically loads final.mp4 — mirror draft for fast preview loop
+            try:
+                shutil.copy2(preview_path, final_path)
+            except Exception:
+                pass
+        has_preview = preview_path.exists()
         has_final = final_path.exists()
         meta = _read_meta(job_dir)
         meta.update(
             {
-                "status": "success" if has_final else "success_partial",
+                "status": "success" if (has_preview or has_final) else "success_partial",
                 "stage": "done",
                 "progress": 100,
                 "finished_at": _utc_now(),
                 "has_final": has_final,
-                "output_mp4": has_final,
+                "has_preview": has_preview,
+                "output_mp4": has_final or has_preview,
                 "worker": "manual_plan_render",
-                "error": None if has_final else "渲染未生成 final.mp4",
+                "error": None if (has_preview or has_final) else "渲染未生成预览/成片",
                 "render_token": _utc_now(),
                 "render_segments": len(segs),
+                "render_profile": profile,
             }
         )
-        if has_final:
+        play_path = preview_path if has_preview else final_path
+        if play_path.exists():
             try:
-                meta["final_duration_s"] = round(
-                    probe_duration_ms(final_path) / 1000.0, 2
-                )
-                meta["final_size"] = final_path.stat().st_size
+                meta["final_duration_s"] = round(probe_duration_ms(play_path) / 1000.0, 2)
+                meta["final_size"] = play_path.stat().st_size
             except Exception:
                 pass
         # refresh review snippet

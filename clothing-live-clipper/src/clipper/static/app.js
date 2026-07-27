@@ -1136,12 +1136,13 @@ function renderJob(data) {
     }
   }
 
-  // video: refresh final when re-render finished; avoid thrash while editing
+  // video: prefer draft preview for fast loop; export upgrades to final
   const video = $("preview");
   const files = data.files || {};
-  if (files.final) {
+  const playFile = files.preview ? "preview.mp4" : files.final ? "final.mp4" : "";
+  if (playFile) {
     const token = data.render_token || data.finished_at || data.final_size || Date.now();
-    const url = `/api/jobs/${encodeURIComponent(data.job_id)}/files/final.mp4?v=${encodeURIComponent(token)}`;
+    const url = `/api/jobs/${encodeURIComponent(data.job_id)}/files/${playFile}?v=${encodeURIComponent(token)}`;
     const shouldRefresh =
       jobChanged ||
       !video.src ||
@@ -1164,8 +1165,18 @@ function renderJob(data) {
       }
     }
     $("export-btn").disabled = false;
-    $("export-btn").onclick = () => {
-      window.open(url, "_blank");
+    $("export-btn").onclick = async () => {
+      // request final-quality re-render then open download when ready
+      try {
+        await fetch(`/api/jobs/${encodeURIComponent(data.job_id)}/export-final`, {
+          method: "POST",
+        });
+        const finalUrl = `/api/jobs/${encodeURIComponent(data.job_id)}/files/final.mp4?v=${Date.now()}`;
+        // open current best immediately; poll briefly for final upgrade
+        window.open(files.final ? finalUrl : url, "_blank");
+      } catch (_) {
+        window.open(url, "_blank");
+      }
     };
   } else if (jobChanged) {
     video.removeAttribute("src");
@@ -1187,8 +1198,20 @@ function renderJob(data) {
 
   // actions
   const actions = [];
+  if (files.preview) {
+    actions.push(
+      `<a class="jy-btn" href="/api/jobs/${encodeURIComponent(data.job_id)}/files/preview.mp4" download>下载预览</a>`
+    );
+  }
   if (files.final) {
-    actions.push(`<a class="jy-btn primary" href="/api/jobs/${encodeURIComponent(data.job_id)}/files/final.mp4" download>下载 final.mp4</a>`);
+    actions.push(
+      `<a class="jy-btn primary" href="/api/jobs/${encodeURIComponent(data.job_id)}/files/final.mp4" download>下载成片</a>`
+    );
+  }
+  if (files.plan || files.final || files.preview) {
+    actions.push(
+      `<button type="button" class="jy-btn" id="export-final-btn">导出终稿</button>`
+    );
   }
   if (files.plan) {
     actions.push(`<a class="jy-btn" href="/api/jobs/${encodeURIComponent(data.job_id)}/files/plan.json" target="_blank">plan.json</a>`);
@@ -1203,6 +1226,20 @@ function renderJob(data) {
     actions.push(`<button type="button" class="jy-btn" id="open-tr-inline">编辑口播稿</button>`);
   }
   $("actions").innerHTML = actions.join("") || '<span class="muted">暂无导出</span>';
+  const exportFinalBtn = $("export-final-btn");
+  if (exportFinalBtn) {
+    exportFinalBtn.onclick = async () => {
+      exportFinalBtn.disabled = true;
+      exportFinalBtn.textContent = "导出中…";
+      try {
+        await fetch(`/api/jobs/${encodeURIComponent(data.job_id)}/export-final`, {
+          method: "POST",
+        });
+      } finally {
+        // status poll will refresh buttons
+      }
+    };
+  }
   const retry = $("retry-btn");
   if (retry) {
     retry.onclick = async () => {

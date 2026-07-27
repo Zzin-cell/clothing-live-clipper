@@ -1,15 +1,236 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 import shutil
 import subprocess
 import tempfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 
 class FFmpegError(RuntimeError):
     pass
+
+
+@dataclass(frozen=True)
+class RenderProfile:
+    name: str
+    max_edge: int | None  # None = keep source size
+    fps: int
+    edge_fade_s: float
+    smooth_handle_ms: int
+    crf: int
+    x264_preset: str
+    nvenc_preset: str
+    nvenc_cq: int
+    audio_bitrate: str
+
+
+def get_render_profile(name: str = "final") -> RenderProfile:
+    n = (name or "final").strip().lower()
+    if n in {"draft", "preview", "fast"}:
+        return RenderProfile(
+            name="draft",
+            max_edge=720,
+            fps=25,
+            edge_fade_s=0.04,
+            smooth_handle_ms=40,
+            crf=28,
+            x264_preset="ultrafast",
+            nvenc_preset="p1",
+            nvenc_cq=28,
+            audio_bitrate="96k",
+        )
+    return RenderProfile(
+        name="final",
+        max_edge=None,
+        fps=30,
+        edge_fade_s=0.10,
+        smooth_handle_ms=120,
+        crf=23,
+        x264_preset="ultrafast",
+        nvenc_preset="p4",
+        nvenc_cq=23,
+        audio_bitrate="128k",
+    )
+
+
+_ENCODER_CACHE: dict[str, bool] = {}
+
+
+def _ffmpeg_has_encoder(name: str) -> bool:
+    key = name.lower()
+    if key in _ENCODER_CACHE:
+        return _ENCODER_CACHE[key]
+    try:
+        ffmpeg = require_ffmpeg()
+        proc = subprocess.run(
+            [ffmpeg, "-hide_banner", "-encoders"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=8,
+        )
+        ok = key in (proc.stdout or "").lower()
+    except Exception:
+        ok = False
+    _ENCODER_CACHE[key] = ok
+    return ok
+
+
+def pick_video_encoder(*, profile: RenderProfile) -> tuple[str, list[str]]:
+    """
+    Return (codec_name, extra_args_before_pix_fmt).
+    CLIPPER_RENDER_HW=auto|off|nvenc
+    """
+    mode = (os.environ.get("CLIPPER_RENDER_HW") or "auto").strip().lower()
+    if mode in {"off", "0", "false", "cpu", "libx264"}:
+        return "libx264", ["-preset", profile.x264_preset, "-crf", str(profile.crf)]
+    want_nvenc = mode in {"auto", "nvenc", "gpu", "h264_nvenc", "1", "true", "on"}
+    if want_nvenc and _ffmpeg_has_encoder("h264_nvenc"):
+        return (
+            "h264_nvenc",
+            [
+                "-preset",
+                profile.nvenc_preset,
+                "-rc",
+                "vbr",
+                "-cq",
+                str(profile.nvenc_cq),
+                "-b:v",
+                "0",
+            ],
+        )
+    return "libx264", ["-preset", profile.x264_preset, "-crf", str(profile.crf)]
+
+
+def _atempo_chain(speed: float) -> str:
+    filters: list[str] = []
+    rest = float(speed)
+    while rest > 2.0 + 1e-6:
+        filters.append("atempo=2.0")
+        rest /= 2.0
+    while rest < 0.5 - 1e-6:
+        filters.append("atempo=0.5")
+        rest /= 0.5
+    filters.append(f"atempo={rest:.5f}")
+    return ",".join(filters)
+
+
+def _fit_target_size(
+    src_w: int,
+    src_h: int,
+    *,
+    max_edge: int | None,
+    force_w: int | None = None,
+    force_h: int | None = None,
+) -> tuple[int, int]:
+    if force_w and force_h:
+        w, h = force_w, force_h
+    else:
+        w, h = src_w, src_h
+    if max_edge and max(w, h) > max_edge:
+        if h >= w:
+            h = max_edge
+            w = max(2, int(round(src_w * (max_edge / float(src_h)))))
+        else:
+            w = max_edge
+            h = max(2, int(round(src_h * (max_edge / float(src_w)))))
+    w = max(2, w - (w % 2))
+    h = max(2, h - (h % 2))
+    return w, h
+
+
+def build_cut_cmd(
+    *,
+    ffmpeg: str,
+    video: Path,
+    t0_ms: int,
+    t1_ms: int,
+    out_path: Path,
+    target_w: int,
+    target_h: int,
+    fps: int,
+    edge_fade_s: float,
+    playback_speed: float,
+    vcodec: str,
+    v_extra: list[str],
+    threads: int,
+    audio_bitrate: str = "96k",
+) -> list[str]:
+    """Build ffmpeg argv for one cut. Speed is applied in the same pass when != 1."""
+    ss = max(0.0, t0_ms / 1000.0)
+    # Source duration before speed
+    src_dur = max(0.12, (t1_ms - t0_ms) / 1000.0)
+    speed = float(playback_speed) if playback_speed and playback_speed > 0 else 1.0
+    if abs(speed - 1.0) < 0.01:
+        speed = 1.0
+
+    # Fade on output timeline (after speed), so UX fade length stays consistent
+    out_dur = src_dur / speed if speed != 1.0 else src_dur
+    if edge_fade_s and edge_fade_s > 0:
+        fade = min(max(0.02, float(edge_fade_s)), max(0.02, min(0.16, out_dur / 5.5)))
+    else:
+        fade = 0.0
+    fade_out_st = max(0.0, out_dur - fade) if fade > 0 else 0.0
+
+    w = target_w - (target_w % 2)
+    h = target_h - (target_h % 2)
+
+    vf_parts = [
+        f"scale={w}:{h}:force_original_aspect_ratio=decrease",
+        f"pad={w}:{h}:(ow-iw)/2:(oh-ih)/2:black",
+        f"fps={int(fps)}",
+    ]
+    af_parts: list[str] = []
+    if speed != 1.0:
+        vf_parts.append(f"setpts=PTS/{speed:.5f}")
+        af_parts.append(_atempo_chain(speed))
+    if fade > 0:
+        vf_parts.append(f"fade=t=in:st=0:d={fade:.3f}")
+        vf_parts.append(f"fade=t=out:st={fade_out_st:.3f}:d={fade:.3f}")
+        af_parts.append(f"afade=t=in:st=0:d={fade:.3f}")
+        af_parts.append(f"afade=t=out:st={fade_out_st:.3f}:d={fade:.3f}")
+    af_parts.append("aresample=async=1:first_pts=0")
+
+    cmd = [
+        ffmpeg,
+        "-y",
+        "-ss",
+        f"{ss:.3f}",
+        "-i",
+        str(video),
+        "-t",
+        f"{src_dur:.3f}",
+        "-vf",
+        ",".join(vf_parts),
+        "-af",
+        ",".join(af_parts),
+        "-c:v",
+        vcodec,
+        *v_extra,
+        "-threads",
+        str(max(1, int(threads))),
+        "-pix_fmt",
+        "yuv420p",
+        "-c:a",
+        "aac",
+        "-b:a",
+        audio_bitrate,
+        "-ar",
+        "44100",
+        "-ac",
+        "1",
+        "-movflags",
+        "+faststart",
+        str(out_path),
+    ]
+    return cmd
 
 
 def which_ffmpeg() -> str | None:
@@ -129,78 +350,46 @@ def cut_segment(
     target_h: int | None = None,
     fps: int = 30,
     zoom_style: str = "none",
+    playback_speed: float = 1.0,
+    profile: str | RenderProfile | None = None,
+    vcodec: str | None = None,
+    v_extra: list[str] | None = None,
 ) -> Path:
     """
     Invisible-edit style cut:
     - unify size/fps/audio so joins don't glitch
-    - only micro audio/video edge fades (~30ms) to kill pops — not visible transitions
-    - no zoom / no flashy effects
+    - optional micro fades
+    - optional in-cut playback_speed (single-pass, no second full-file retime)
     """
-    del zoom_style  # reserved; always none for invisible edit
+    del zoom_style, reencode  # reserved
+    prof = profile if isinstance(profile, RenderProfile) else get_render_profile(profile or "final")
     ffmpeg = require_ffmpeg()
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    ss = max(0.0, t0_ms / 1000.0)
-    dur = max(0.12, (t1_ms - t0_ms) / 1000.0)
-
-    # Soft natural edge (avoid abrupt stop). Still short enough not to look like a transition.
-    # Prefer ~80–140ms; clamp by clip duration.
-    fade = min(max(0.06, edge_fade_s), max(0.05, min(0.16, dur / 5.5)))
-    fade_out_st = max(0.0, dur - fade)
 
     w = (target_w or 1080) - ((target_w or 1080) % 2)
     h = (target_h or 1920) - ((target_h or 1920) % 2)
+    if vcodec is None or v_extra is None:
+        enc, extra = pick_video_encoder(profile=prof)
+        vcodec = vcodec or enc
+        v_extra = list(v_extra or extra)
 
-    # Light video fade + audio ease-in/out so modules don't hard-stop
-    vf = (
-        f"scale={w}:{h}:force_original_aspect_ratio=decrease,"
-        f"pad={w}:{h}:(ow-iw)/2:(oh-ih)/2:black,"
-        f"fps={fps},"
-        f"fade=t=in:st=0:d={fade:.3f},"
-        f"fade=t=out:st={fade_out_st:.3f}:d={fade:.3f}"
+    cmd = build_cut_cmd(
+        ffmpeg=ffmpeg,
+        video=Path(video),
+        t0_ms=int(t0_ms),
+        t1_ms=int(t1_ms),
+        out_path=out_path,
+        target_w=w,
+        target_h=h,
+        fps=int(fps or prof.fps),
+        edge_fade_s=float(edge_fade_s if edge_fade_s is not None else prof.edge_fade_s),
+        playback_speed=float(playback_speed or 1.0),
+        vcodec=str(vcodec),
+        v_extra=list(v_extra),
+        threads=max(1, min(4, (os.cpu_count() or 4))),
+        audio_bitrate=prof.audio_bitrate,
     )
-    af = (
-        f"afade=t=in:st=0:d={fade:.3f},"
-        f"afade=t=out:st={fade_out_st:.3f}:d={fade:.3f},"
-        f"aresample=async=1:first_pts=0"
-    )
-
-    threads = str(max(1, min(4, (os.cpu_count() or 4))))
-    cmd = [
-        ffmpeg,
-        "-y",
-        "-ss",
-        f"{ss:.3f}",
-        "-i",
-        str(video),
-        "-t",
-        f"{dur:.3f}",
-        "-vf",
-        vf,
-        "-af",
-        af,
-        "-c:v",
-        "libx264",
-        "-preset",
-        "ultrafast",
-        "-crf",
-        "26",
-        "-threads",
-        threads,
-        "-pix_fmt",
-        "yuv420p",
-        "-c:a",
-        "aac",
-        "-b:a",
-        "96k",
-        "-ar",
-        "44100",
-        "-ac",
-        "1",
-        "-movflags",
-        "+faststart",
-        str(out_path),
-    ]
     run_cmd(cmd)
     return out_path
 
@@ -301,6 +490,7 @@ def apply_playback_speed(
     out_mp4: str | Path,
     speed: float = 1.3,
 ) -> Path:
+    """Legacy whole-file retime (kept for rare pad/retime). Prefer in-cut speed."""
     ffmpeg = require_ffmpeg()
     src_mp4 = Path(src_mp4)
     out_mp4 = Path(out_mp4)
@@ -311,21 +501,10 @@ def apply_playback_speed(
             shutil.copy2(src_mp4, out_mp4)
         return out_mp4
 
-    def atempo_chain(sp: float) -> str:
-        filters: list[str] = []
-        rest = sp
-        while rest > 2.0 + 1e-6:
-            filters.append("atempo=2.0")
-            rest /= 2.0
-        while rest < 0.5 - 1e-6:
-            filters.append("atempo=0.5")
-            rest /= 0.5
-        filters.append(f"atempo={rest:.5f}")
-        return ",".join(filters)
-
-    # No unsharp — keep natural look
     vf = f"setpts=PTS/{speed:.5f}"
-    af = atempo_chain(speed)
+    af = _atempo_chain(speed)
+    prof = get_render_profile("final")
+    vcodec, v_extra = pick_video_encoder(profile=prof)
     cmd = [
         ffmpeg,
         "-y",
@@ -336,11 +515,8 @@ def apply_playback_speed(
         "-filter:a",
         af,
         "-c:v",
-        "libx264",
-        "-preset",
-        "ultrafast",
-        "-crf",
-        "23",
+        vcodec,
+        *v_extra,
         "-threads",
         str(max(2, min(8, (os.cpu_count() or 4)))),
         "-pix_fmt",
@@ -361,6 +537,22 @@ def apply_playback_speed(
     return out_mp4
 
 
+def _part_fingerprint(
+    *,
+    t0: int,
+    t1: int,
+    speed: float,
+    tw: int,
+    th: int,
+    fps: int,
+    fade: float,
+    profile: str,
+    vcodec: str,
+) -> str:
+    raw = f"{t0}|{t1}|{speed:.5f}|{tw}x{th}|{fps}|{fade:.3f}|{profile}|{vcodec}"
+    return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:16]
+
+
 def render_plan(
     video: str | Path,
     segments: list[tuple[int, int]],
@@ -369,85 +561,158 @@ def render_plan(
     *,
     smooth: bool = True,
     crossfade_s: float = 0.0,
-    edge_fade_s: float = 0.10,
+    edge_fade_s: float | None = None,
     playback_speed: float = 1.0,
+    profile: str | RenderProfile = "final",
+    reuse_parts: bool = True,
 ) -> Path:
     """
-    Natural-module render:
-    - soft edge ease (short) so clips don't hard-stop
-    - tiny handles around segment bounds
-    - optional global playback speed after join
+    Render timeline segments to one mp4.
+
+    P0: playback_speed applied inside each cut (no second full-file speed encode)
+    P1: profile draft|final (resolution/fade/crf)
+    P2: optional h264_nvenc when available
+    P3: reuse unchanged part_*.mp4 via fingerprint cache
     """
     del crossfade_s  # no long dissolve
+    prof = profile if isinstance(profile, RenderProfile) else get_render_profile(str(profile))
     video = Path(video)
     out_mp4 = Path(out_mp4)
     if work_dir is None:
-        work_dir = out_mp4.parent / "_parts"
+        work_dir = out_mp4.parent / f"_parts_{prof.name}"
     work_dir = Path(work_dir)
-    if work_dir.exists():
-        for old in work_dir.glob("*.mp4"):
-            try:
-                old.unlink()
-            except OSError:
-                pass
     work_dir.mkdir(parents=True, exist_ok=True)
 
-    tw, th = _probe_stream_size(video)
-    # prepare segment specs with slightly larger handles for natural ends
-    specs: list[tuple[int, int, int, Path]] = []
-    for i, (t0, t1) in enumerate(segments):
-        if t1 - t0 < 280:
-            t1 = t0 + 280
-        if smooth:
-            # more breathing room at boundaries (was 30ms → 120ms)
-            t0 = max(0, t0 - 120)
-            t1 = t1 + 140
-        part = work_dir / f"part_{i:03d}.mp4"
-        specs.append((i, t0, t1, part))
+    src_w, src_h = _probe_stream_size(video)
+    tw, th = _fit_target_size(src_w, src_h, max_edge=prof.max_edge)
+    speed = float(playback_speed) if playback_speed and playback_speed > 0 else 1.0
+    if abs(speed - 1.0) < 0.01:
+        speed = 1.0
+    fade = float(prof.edge_fade_s if edge_fade_s is None else edge_fade_s)
+    if not smooth:
+        fade = min(fade, 0.04)
+    handle = int(prof.smooth_handle_ms if smooth else 0)
 
-    def _cut_one(spec: tuple[int, int, int, Path]) -> tuple[int, Path]:
-        i, t0, t1, part = spec
+    vcodec, v_extra = pick_video_encoder(profile=prof)
+    cache_path = work_dir / "parts_cache.json"
+    old_cache: dict[str, Any] = {}
+    if reuse_parts and cache_path.exists():
+        try:
+            old_cache = json.loads(cache_path.read_text(encoding="utf-8"))
+            if not isinstance(old_cache, dict):
+                old_cache = {}
+        except Exception:
+            old_cache = {}
+
+    # prepare segment specs
+    specs: list[tuple[int, int, int, Path, str]] = []
+    new_cache: dict[str, Any] = {
+        "profile": prof.name,
+        "speed": speed,
+        "size": f"{tw}x{th}",
+        "fps": prof.fps,
+        "fade": fade,
+        "vcodec": vcodec,
+        "parts": {},
+    }
+    keep_files: set[str] = set()
+    for i, (t0, t1) in enumerate(segments):
+        t0i, t1i = int(t0), int(t1)
+        if t1i - t0i < 280:
+            t1i = t0i + 280
+        if handle > 0:
+            t0i = max(0, t0i - handle)
+            t1i = t1i + int(handle * 1.15)
+        fp = _part_fingerprint(
+            t0=t0i,
+            t1=t1i,
+            speed=speed,
+            tw=tw,
+            th=th,
+            fps=prof.fps,
+            fade=fade,
+            profile=prof.name,
+            vcodec=vcodec,
+        )
+        # Name by content fingerprint only so unchanged windows reuse across reorders.
+        part = work_dir / f"part_{fp}.mp4"
+        keep_files.add(part.name)
+        specs.append((i, t0i, t1i, part, fp))
+        new_cache["parts"][str(i)] = {"t0": t0i, "t1": t1i, "fp": fp, "file": part.name}
+
+    def _needs_cut(part: Path, fp: str) -> bool:
+        """Reuse when the fingerprint-named file already exists (content key)."""
+        if not reuse_parts:
+            return True
+        try:
+            if part.exists() and part.stat().st_size >= 1:
+                return False
+        except OSError:
+            pass
+        return True
+
+    to_cut = [sp for sp in specs if _needs_cut(sp[3], sp[4])]
+
+    def _cut_one(spec: tuple[int, int, int, Path, str]) -> tuple[int, Path]:
+        i, t0, t1, part, _fp = spec
         cut_segment(
             video,
             t0,
             t1,
             part,
             reencode=True,
-            edge_fade_s=edge_fade_s if smooth else 0.04,
+            edge_fade_s=fade,
             target_w=tw,
             target_h=th,
-            fps=30,
+            fps=prof.fps,
             zoom_style="none",
+            playback_speed=speed,
+            profile=prof,
+            vcodec=vcodec,
+            v_extra=v_extra,
         )
         return i, part
 
-    # parallel cuts (I/O + encode bound) — biggest render speedup
     workers = max(2, min(8, (os.cpu_count() or 4)))
-    parts_map: dict[int, Path] = {}
-    with ThreadPoolExecutor(max_workers=workers) as ex:
-        futs = [ex.submit(_cut_one, sp) for sp in specs]
-        for fut in as_completed(futs):
-            i, part = fut.result()
-            parts_map[i] = part
+    if vcodec == "h264_nvenc":
+        # avoid flooding NVENC sessions
+        workers = max(1, min(2, workers))
+    parts_map: dict[int, Path] = {
+        i: p for i, _a, _b, p, _f in specs if p.exists() and p.stat().st_size >= 1
+    }
+    if to_cut:
+        with ThreadPoolExecutor(max_workers=workers) as ex:
+            futs = [ex.submit(_cut_one, sp) for sp in to_cut]
+            for fut in as_completed(futs):
+                i, part = fut.result()
+                parts_map[i] = part
+    for i, _a, _b, part, _f in specs:
+        if i not in parts_map:
+            # forced cut if cache miss slipped through
+            _, part2 = _cut_one((i, _a, _b, part, _f))
+            parts_map[i] = part2
+
     parts = [parts_map[i] for i in range(len(specs))]
+    # cleanup obsolete part files (keep cache json)
+    if reuse_parts:
+        for old in work_dir.glob("part_*.mp4"):
+            if old.name not in keep_files:
+                try:
+                    old.unlink()
+                except OSError:
+                    pass
+    try:
+        cache_path.write_text(json.dumps(new_cache, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception:
+        pass
 
-    joined = out_mp4
-    speed = playback_speed if playback_speed and playback_speed > 0 else 1.0
-    if abs(speed - 1.0) > 0.01:
-        joined = work_dir / "_joined_1x.mp4"
+    # single concat — speed already in parts
+    concat_segments(parts, out_mp4, crossfade_s=0.0)
 
-    # Always direct connect (no dissolve)
-    concat_segments(parts, joined, crossfade_s=0.0)
-
-    if abs(speed - 1.0) > 0.01:
-        apply_playback_speed(joined, out_mp4, speed=speed)
-    elif joined != out_mp4:
-        shutil.copy2(joined, out_mp4)
-
-    # If still short after speed (material shortage), slight retime toward ~58s
+    # Optional short pad only if material shortage (rare)
     try:
         final_ms = probe_duration_ms(out_mp4)
-        if final_ms > 0 and final_ms < 56_500:
+        if final_ms > 0 and final_ms < 56_500 and prof.name == "final":
             target_ms = 58_500
             factor = min(1.12, max(1.01, target_ms / final_ms))
             tmp = out_mp4.with_suffix(".retime.mp4")

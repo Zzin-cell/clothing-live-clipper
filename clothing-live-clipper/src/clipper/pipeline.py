@@ -96,20 +96,32 @@ def run_pipeline(
         else:
             segs = [(s.t0_ms, s.t1_ms) for s in plan.all_slots()]
             speed = getattr(settings, "playback_speed", 1.4) or 1.0
-            output_mp4 = str(
-                render_plan(
-                    video,
-                    segs,
-                    out_dir / "final.mp4",
-                    work_dir=out_dir / "_parts",
-                    smooth=True,
-                    crossfade_s=0.0,
-                    edge_fade_s=0.10,  # soft natural module edges
-                    playback_speed=float(speed),
-                )
+            # Default auto path = draft (fast preview). Export can re-render final.
+            import shutil
+
+            preview_path = out_dir / "preview.mp4"
+            final_path = out_dir / "final.mp4"
+            render_plan(
+                video,
+                segs,
+                preview_path,
+                work_dir=out_dir / "_parts_draft",
+                smooth=True,
+                crossfade_s=0.0,
+                playback_speed=float(speed),
+                profile="draft",
+                reuse_parts=True,
             )
+            # Back-compat: UI/download still use final.mp4 until export upgrades quality
+            try:
+                shutil.copy2(preview_path, final_path)
+            except Exception:
+                final_path = preview_path
+            output_mp4 = str(final_path)
             meta["playback_speed"] = float(speed)
             meta["source_plan_ms"] = int(plan.total_duration_ms)
+            meta["render_profile"] = "draft"
+            meta["has_preview"] = preview_path.exists()
     elif render and not video:
         meta["render_skipped"] = True
         meta["render_error"] = "no video provided (plan-only mode)"

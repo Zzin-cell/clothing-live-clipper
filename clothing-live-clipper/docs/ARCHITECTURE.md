@@ -50,6 +50,12 @@ LLM 调用走 `openai_compat.py` 完整兼容客户端（类似 Agent 接入）�
 - 有 last_route 时 `fast` 单次请求；无缓存时 1 端点 × 1 鉴权 × ≤2 payload
 - HTTP 401 Token invalid：快速失败并提示更新 Key，避免兼容层穷举重试
 
+### 渲染加速（P0–P3）
+- **P0 单遍出片**：`playback_speed` 合进每段 cut（`setpts`/`atempo`），取消「先 1x 再 1.4x」二次全片编码
+- **P1 Draft/Final**：默认 `preview.mp4`（≤720 长边 draft）；导出终稿走 `POST /api/jobs/{id}/export-final` → `final.mp4`
+- **P2 硬件编码**：`CLIPPER_RENDER_HW=auto` 时优先 `h264_nvenc`，否则 `libx264`
+- **P3 增量反剪**：`_parts_draft/part_{fingerprint}.mp4` 复用未改时间窗；只重切变更段
+
 ## 3. 反剪链路（人工）
 
 1. 前端编辑 `planEdit`（时间/删小段/删整段/替换/重排）  

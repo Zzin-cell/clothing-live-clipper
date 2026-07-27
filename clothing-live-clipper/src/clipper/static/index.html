@@ -150,7 +150,7 @@
             <span class="muted" id="llm-cfg-status">未配置</span>
           </div>
           <form id="llm-config-form" class="jy-form llm-form">
-            <p class="jy-hint llm-intro">自行填写并调用，不读环境变量。兼容 OpenAI 协议（自动补 /v1、多鉴权/多端点回退）。</p>
+            <p class="jy-hint llm-intro">OpenAI 兼容。推荐 https://api.siliconflow.cn/v1 + Qwen/Qwen2.5-7B-Instruct。配置仅存本机用户文件，不读环境变量。</p>
 
             <label class="jy-switch llm-enable">
               <input type="checkbox" id="llm_plan" checked />
@@ -159,18 +159,18 @@
 
             <label class="jy-field">
               <span>Base URL（OpenAI 兼容）</span>
-              <input type="text" id="llm_base_url" placeholder="https://api.openai.com/v1 或中转站 /v1" />
+              <input type="text" id="llm_base_url" placeholder="https://api.siliconflow.cn/v1" />
             </label>
 
             <label class="jy-field">
               <span>API Key</span>
-              <input type="password" id="llm_api_key" placeholder="粘贴你的 Key（sk-... 或中转 key）" autocomplete="off" />
+              <input type="password" id="llm_api_key" placeholder="硅基流动 API Key（sk-...）" autocomplete="off" />
             </label>
 
             <label class="jy-field">
               <span>模型 Model（可自动匹配）</span>
               <div class="jy-row llm-model-row">
-                <input type="text" id="llm_model" placeholder="点右侧自动匹配，或手动填写" list="llm-model-list" />
+                <input type="text" id="llm_model" placeholder="Qwen/Qwen2.5-7B-Instruct（可自动匹配）" list="llm-model-list" />
                 <button type="button" class="jy-btn tiny" id="llm-fetch-models" title="从 Base URL 拉取 /models 并自动选择">自动匹配</button>
               </div>
               <datalist id="llm-model-list"></datalist>
@@ -186,7 +186,7 @@
               <button type="submit" class="jy-btn tiny primary" id="llm-save">保存并启用</button>
             </div>
 
-            <p class="jy-hint" id="llm-cfg-msg">填 Base URL + Key + Model 后点「测试连通」（会显示延迟）。模型可点「自动匹配」。</p>
+            <p class="jy-hint" id="llm-cfg-msg">推荐 SiliconFlow 轻量模型。填 Base URL + Key + Model 后点「测试连通」。Token 无效时请重新复制 Key。</p>
           </form>
         </div>
 

@@ -596,9 +596,13 @@ def ping(
         }
     except Exception as e:
         total_ms = int((time.perf_counter() - t_all) * 1000)
+        raw = str(e)[:500]
+        info = classify_llm_error(raw, base_url=base_url or "")
+        err = info["message"] if info["error_class"] == "auth_invalid" else raw
         return {
             "ok": False,
-            "error": str(e)[:500],
+            "error": err,
+            "error_class": info["error_class"],
             "source": "user_ui",
             "models": [],
             "model_count": 0,

@@ -1608,6 +1608,20 @@ function fillModelDatalist(models) {
     .join("");
 }
 
+function formatLlmProbeError(probe, data) {
+  const raw = String((probe && (probe.error || probe.detail)) || data.detail || "unknown");
+  if (
+    /auth_invalid|Token is invalid|30014|API Key 无效|Token 无效/i.test(raw)
+  ) {
+    return "Token 无效：请到 SiliconFlow 控制台重新复制 API Key 后保存并重试";
+  }
+  if (/missing_api_key|missing_llm/i.test(raw)) {
+    return "请先填写并保存 API Key";
+  }
+  // keep short
+  return raw.length > 220 ? raw.slice(0, 220) + "…" : raw;
+}
+
 function setupLlmConfig() {
   const form = $("llm-config-form");
   if (!form) return;
@@ -1722,7 +1736,7 @@ function setupLlmConfig() {
       if (msg) {
         msg.textContent = ok
           ? `连通成功 · ${modelName} · API延迟 ${total}ms${endpoint ? ` · ${endpoint}` : ""}`
-          : `连通失败 · ${total}ms：${(probe && (probe.error || probe.detail)) || data.detail || "unknown"}`;
+          : `连通失败 · ${total}ms：${formatLlmProbeError(probe, data)}`;
       }
       if (st) st.textContent = ok ? `连通OK · ${total}ms` : "连通失败";
       if (!ok && String((probe && probe.error) || "").includes("API Key 填成网址")) {

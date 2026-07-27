@@ -23,6 +23,20 @@ def test_pick_default_model_prefers_available_chat_models():
     assert pick_default_model(["a", "b"], preferred=None) in {"a", "b"}
 
 
+def test_pick_default_model_prefers_light_qwen():
+    models = [
+        "Qwen/Qwen2.5-72B-Instruct",
+        "Qwen/Qwen2.5-7B-Instruct",
+        "deepseek-ai/DeepSeek-R1",
+        "THUDM/glm-4-9b-chat",
+    ]
+    picked = pick_default_model(models, preferred=None)
+    assert picked == "Qwen/Qwen2.5-7B-Instruct"
+
+    picked2 = pick_default_model(models, preferred="THUDM/glm-4-9b-chat")
+    assert picked2 == "THUDM/glm-4-9b-chat"
+
+
 def test_extract_chat_text_standard_and_parts():
     t1 = extract_chat_text({"choices": [{"message": {"content": '{"a":1}'}}]})
     assert t1.startswith("{")

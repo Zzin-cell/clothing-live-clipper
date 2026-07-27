@@ -429,20 +429,21 @@ def pick_default_model(models: list[str], preferred: str | None = None) -> str |
     pref = (preferred or "").strip()
     if pref and pref in models:
         return pref
-    # exact-ish preferred aliases
+    lower_map = {m.lower(): m for m in models}
+    if pref and pref.lower() in lower_map:
+        return lower_map[pref.lower()]
+
     aliases = [
         pref,
-        "grok-4.5",
+        "Qwen/Qwen2.5-7B-Instruct",
+        "THUDM/glm-4-9b-chat",
+        "Qwen/Qwen2.5-14B-Instruct",
         "gpt-4o-mini",
-        "gpt-4o",
-        "gpt-4.1-mini",
-        "gpt-4.1",
         "deepseek-chat",
-        "deepseek-v3",
-        "qwen-plus",
-        "qwen2.5-72b-instruct",
+        "qwen-turbo",
+        "grok-4.5",
+        "gpt-4o",
     ]
-    lower_map = {m.lower(): m for m in models}
     for a in aliases:
         if not a:
             continue
@@ -450,22 +451,39 @@ def pick_default_model(models: list[str], preferred: str | None = None) -> str |
             return a
         if a.lower() in lower_map:
             return lower_map[a.lower()]
-    # fuzzy contains rank
+
+    # Prefer smaller instruct/chat before huge reasoning models
     rank_keys = [
-        "gpt-4o-mini",
+        "7b-instruct",
+        "7b",
+        "9b-chat",
+        "9b",
+        "14b-instruct",
         "4o-mini",
+        "turbo",
+        "mini",
+        "glm-4-9b",
+        "qwen2.5-7b",
+        "deepseek-chat",
+        "instruct",
+        "chat",
         "gpt-4o",
         "grok",
-        "deepseek",
         "qwen",
-        "gpt-4.1",
-        "gpt-3.5",
-        "chat",
     ]
     for k in rank_keys:
         for m in models:
-            if k in m.lower():
+            ml = m.lower()
+            if k in ml and "whisper" not in ml and "embed" not in ml:
+                # skip obvious heavy reasoning if lighter exists later in rank — first match is light-first
+                if "deepseek-r1" in ml or "72b" in ml or "671b" in ml:
+                    continue
                 return m
+    for m in models:
+        ml = m.lower()
+        if "whisper" in ml or "embed" in ml:
+            continue
+        return m
     return models[0]
 
 

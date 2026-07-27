@@ -27,6 +27,9 @@ class RenderProfile:
     video_fade_s: float
     audio_fade_s: float
     smooth_handle_ms: int
+    # Adjacent cuts expand into each other by N *output* frames so the join
+    # briefly shares continuous motion (micro-stutter) instead of a hard pop.
+    join_overlap_frames: int
     crf: int
     x264_preset: str
     nvenc_preset: str
@@ -45,6 +48,7 @@ def get_render_profile(name: str = "final") -> RenderProfile:
             video_fade_s=0.0,
             audio_fade_s=0.03,
             smooth_handle_ms=40,
+            join_overlap_frames=2,
             crf=28,
             x264_preset="ultrafast",
             nvenc_preset="p1",
@@ -59,12 +63,54 @@ def get_render_profile(name: str = "final") -> RenderProfile:
         video_fade_s=0.0,
         audio_fade_s=0.04,
         smooth_handle_ms=80,
+        join_overlap_frames=2,
         crf=23,
         x264_preset="ultrafast",
         nvenc_preset="p4",
         nvenc_cq=23,
         audio_bitrate="128k",
     )
+
+
+def join_overlap_source_ms(
+    *,
+    frames: int,
+    fps: int,
+    playback_speed: float = 1.0,
+) -> int:
+    """How many source ms to expand a cut so ~N output frames of content are shared."""
+    n = max(0, int(frames))
+    if n <= 0:
+        return 0
+    fp = max(1, int(fps or 30))
+    sp = float(playback_speed) if playback_speed and playback_speed > 0 else 1.0
+    # After setpts=PTS/sp, 1 output frame ≈ (1000/fps)*sp source ms
+    return max(1, int(round(n * (1000.0 / fp) * sp)))
+
+
+def apply_join_overlaps(
+    segments: list[tuple[int, int]],
+    *,
+    overlap_ms: int,
+) -> list[tuple[int, int]]:
+    """
+    Expand each segment into its neighbors by overlap_ms so adjacent cuts share
+    1–2 frames of continuous source (no dissolve / no black).
+    """
+    if not segments or overlap_ms <= 0:
+        return [(int(a), int(b)) for a, b in segments]
+    n = len(segments)
+    out: list[tuple[int, int]] = []
+    for i, (t0, t1) in enumerate(segments):
+        a, b = int(t0), int(t1)
+        if i > 0:
+            a = max(0, a - overlap_ms)
+        if i < n - 1:
+            b = b + overlap_ms
+        if b <= a:
+            b = a + 280
+        out.append((a, b))
+    return out
 
 
 _ENCODER_CACHE: dict[str, bool] = {}
@@ -578,11 +624,13 @@ def _part_fingerprint(
     video_fade: float = 0.0,
     audio_fade: float = 0.0,
     crop_mode: str = "cover",
+    join_overlap_ms: int = 0,
 ) -> str:
-    # bump crop_mode so old black-pad parts are not reused after seamless cut fix
+    # include join_overlap so caches invalidate when cut windows expand
     raw = (
         f"{t0}|{t1}|{speed:.5f}|{tw}x{th}|{fps}|{fade:.3f}|"
-        f"vf{video_fade:.3f}|af{audio_fade:.3f}|{profile}|{vcodec}|{crop_mode}"
+        f"vf{video_fade:.3f}|af{audio_fade:.3f}|ov{join_overlap_ms}|"
+        f"{profile}|{vcodec}|{crop_mode}"
     )
     return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:16]
 
@@ -630,6 +678,12 @@ def render_plan(
         a_fade = min(a_fade, 0.03)
     v_fade = float(prof.video_fade_s)  # expected 0
     handle = int(prof.smooth_handle_ms if smooth else 0)
+    # 1–2 frame micro-overlap between adjacent cuts (source ms, speed-aware)
+    overlap_ms = join_overlap_source_ms(
+        frames=int(getattr(prof, "join_overlap_frames", 0) or 0),
+        fps=int(prof.fps),
+        playback_speed=speed,
+    )
 
     vcodec, v_extra = pick_video_encoder(profile=prof)
     cache_path = work_dir / "parts_cache.json"
@@ -642,7 +696,18 @@ def render_plan(
         except Exception:
             old_cache = {}
 
-    # prepare segment specs
+    # prepare segment specs (handle pad + 1–2 frame join overlap)
+    raw_handles: list[tuple[int, int]] = []
+    for t0, t1 in segments:
+        t0i, t1i = int(t0), int(t1)
+        if t1i - t0i < 280:
+            t1i = t0i + 280
+        if handle > 0:
+            t0i = max(0, t0i - handle)
+            t1i = t1i + int(handle * 1.15)
+        raw_handles.append((t0i, t1i))
+    segs_out = apply_join_overlaps(raw_handles, overlap_ms=overlap_ms)
+
     specs: list[tuple[int, int, int, Path, str]] = []
     new_cache: dict[str, Any] = {
         "profile": prof.name,
@@ -651,18 +716,13 @@ def render_plan(
         "fps": prof.fps,
         "video_fade": v_fade,
         "audio_fade": a_fade,
+        "join_overlap_ms": overlap_ms,
         "crop": "cover",
         "vcodec": vcodec,
         "parts": {},
     }
     keep_files: set[str] = set()
-    for i, (t0, t1) in enumerate(segments):
-        t0i, t1i = int(t0), int(t1)
-        if t1i - t0i < 280:
-            t1i = t0i + 280
-        if handle > 0:
-            t0i = max(0, t0i - handle)
-            t1i = t1i + int(handle * 1.15)
+    for i, (t0i, t1i) in enumerate(segs_out):
         fp = _part_fingerprint(
             t0=t0i,
             t1=t1i,
@@ -676,6 +736,7 @@ def render_plan(
             video_fade=v_fade,
             audio_fade=a_fade,
             crop_mode="cover",
+            join_overlap_ms=overlap_ms,
         )
         # Name by content fingerprint only so unchanged windows reuse across reorders.
         part = work_dir / f"part_{fp}.mp4"

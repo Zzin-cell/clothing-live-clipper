@@ -5,8 +5,10 @@ from unittest.mock import MagicMock, patch
 
 from clipper.media import (
     RenderProfile,
+    apply_join_overlaps,
     build_cut_cmd,
     get_render_profile,
+    join_overlap_source_ms,
     pick_video_encoder,
     render_plan,
 )
@@ -20,6 +22,24 @@ def test_get_render_profile_draft_smaller_and_no_handles():
     assert d.edge_fade_s <= f.edge_fade_s
     assert d.smooth_handle_ms <= f.smooth_handle_ms
     assert d.crf >= f.crf
+    assert d.join_overlap_frames >= 1
+    assert f.join_overlap_frames >= 1
+
+
+def test_join_overlap_source_ms_two_frames():
+    # 2 frames @ 30fps @ 1x ≈ 67ms; @ 1.4x ≈ 93ms
+    assert join_overlap_source_ms(frames=2, fps=30, playback_speed=1.0) in {66, 67}
+    assert join_overlap_source_ms(frames=2, fps=30, playback_speed=1.4) >= 90
+    assert join_overlap_source_ms(frames=0, fps=30, playback_speed=1.0) == 0
+
+
+def test_apply_join_overlaps_expands_neighbors():
+    segs = [(1000, 3000), (5000, 8000), (10000, 12000)]
+    out = apply_join_overlaps(segs, overlap_ms=67)
+    assert out[0] == (1000, 3067)  # only expand end into next
+    assert out[1][0] == 5000 - 67 and out[1][1] == 8000 + 67
+    assert out[2] == (10000 - 67, 12000)  # only expand start
+    assert apply_join_overlaps(segs, overlap_ms=0) == segs
 
 
 def test_build_cut_cmd_includes_speed_in_one_pass():

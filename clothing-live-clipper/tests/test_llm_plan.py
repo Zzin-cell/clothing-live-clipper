@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from clipper import llm_plan as lp
 from clipper.llm_plan import LIGHT_MAX_CLAUSES, expand_lines_to_clauses, llm_obj_to_timeline, select_clauses_for_llm
 from clipper.models import TimelinePlan
 
@@ -144,3 +145,56 @@ def test_llm_completes_incomplete_tail_instead_of_hard_cutoff():
     assert any("complete_logic_no_cutoff" in w for w in plan.warnings)
     # ending should not be an empty/incomplete crumb only
     assert len(plan.golden[-1].text.strip()) >= 4
+
+
+def test_system_prompt_light_is_much_shorter():
+    assert hasattr(lp, "SYSTEM_PROMPT_LIGHT")
+    assert len(lp.SYSTEM_PROMPT_LIGHT) < len(lp.SYSTEM_PROMPT)
+    assert len(lp.SYSTEM_PROMPT_LIGHT) < 2200
+    assert "JSON" in lp.SYSTEM_PROMPT_LIGHT or "json" in lp.SYSTEM_PROMPT_LIGHT.lower()
+    assert "尺码" in lp.SYSTEM_PROMPT_LIGHT
+
+
+def test_call_llm_for_plan_uses_trim_and_lower_tokens(monkeypatch):
+    captured = {}
+
+    def fake_chat(**kwargs):
+        captured.update(kwargs)
+        return {
+            "content": '{"product_summary":"x","hook_type":"pain","main_points":["a"],"logic":["钩子"],"keep":[],"drop_ids":[],"notes":""}',
+            "model": kwargs.get("model") or "m",
+            "base_url": kwargs.get("base_url") or "https://api.siliconflow.cn/v1",
+            "endpoint": "https://api.siliconflow.cn/v1/chat/completions",
+            "auth_variant": 0,
+            "payload_variant": 0,
+            "latency_ms": 1,
+        }
+
+    monkeypatch.setattr(lp, "chat_completions", fake_chat)
+    monkeypatch.setattr(
+        lp,
+        "runtime_llm",
+        lambda: {
+            "enabled": True,
+            "plan_enabled": True,
+            "api_key": "sk-test-key-xxxxxxxx",
+            "base_url": "https://api.siliconflow.cn/v1",
+            "model": "Qwen/Qwen2.5-7B-Instruct",
+            "extra_headers": {},
+            "organization": "",
+            "last_endpoint": "",
+            "last_auth_variant": 0,
+            "last_payload_variant": 0,
+        },
+    )
+    lines = _many_lines(60)
+    obj = lp.call_llm_for_plan(lines, target_seconds=60, playback_speed=1.4)
+    assert captured.get("max_tokens") == 2048
+    assert captured.get("timeout") == 60
+    assert captured.get("force_json") is True
+    assert captured.get("fast") is True
+    # system should be light
+    msgs = captured.get("messages") or []
+    assert msgs and msgs[0]["role"] == "system"
+    assert len(msgs[0]["content"]) < len(lp.SYSTEM_PROMPT)
+    assert obj.get("_meta", {}).get("clauses_sent", 10**9) <= 150

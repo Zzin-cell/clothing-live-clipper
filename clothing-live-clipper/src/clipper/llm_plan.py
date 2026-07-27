@@ -112,6 +112,22 @@ SYSTEM_PROMPT = """你是服装带货短视频剪辑导演（抖音/快手完播
 """
 
 
+SYSTEM_PROMPT_LIGHT = """你是服装带货短视频剪辑导演。输入为口播小句(id+时间戳+text)。
+任务：先提炼 main_points，再从输入中选 keep 并按成片顺序重排。只使用输入 id，禁止编造时间。
+
+硬规则：
+1) 开场 0-3s 仅 1 句最强钩子：视觉冲击/痛点/福利悬念 三选一
+2) 删除：打招呼/控场/扣1/闲聊/调试、尺码建议、长段讲价、重复话术只留最优一句
+3) 优先：上身效果>面料>价格(价格最多开场一句)
+4) 顺序：钩子→版型上身→细节→对比/体验→自然收束；句子必须语义完整，禁止半截
+5) 总源片时长接近 target_source_ms；宁可略短也要完整
+6) 只输出严格 JSON，不要 markdown
+
+JSON:
+{"product_summary":"...","hook_type":"visual|pain|welfare","main_points":["..."],"logic":["钩子","版型上身","细节","对比体验","收束"],"keep":[{"id":"c00012","t0_ms":0,"t1_ms":1,"text":"...","why":"...","point":"...","complete":true}],"drop_ids":["c00001"],"notes":"..."}
+"""
+
+
 def _http_json(url: str, headers: dict[str, str], payload: dict[str, Any], timeout: int = 90) -> dict[str, Any]:
     data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     req = urllib.request.Request(url, data=data, headers=headers, method="POST")
@@ -340,10 +356,11 @@ def call_llm_for_plan(
     sp = playback_speed if playback_speed and playback_speed > 0 else 1.4
     target_source_ms = int(round(target_seconds * 1000 * sp))
 
-    # Full ASR -> 小句 units (all content for main-point extraction)
-    clauses = expand_lines_to_clauses(lines, max_clauses=420)
-    if not clauses:
+    # Full ASR -> 小句 units, then select a light subset for the LLM
+    clauses_all = expand_lines_to_clauses(lines, max_clauses=420)
+    if not clauses_all:
         raise RuntimeError("empty_transcript")
+    clauses, trim_stats = select_clauses_for_llm(clauses_all, max_clauses=LIGHT_MAX_CLAUSES)
 
     compact = [
         {
@@ -351,7 +368,7 @@ def call_llm_for_plan(
             "parent_id": u.get("parent_id"),
             "t0_ms": u["t0_ms"],
             "t1_ms": u["t1_ms"],
-            "text": str(u["text"])[:160],
+            "text": str(u["text"])[:CLAUSE_TEXT_MAX],
         }
         for u in clauses
     ]
@@ -362,7 +379,7 @@ def call_llm_for_plan(
         "target_source_ms": target_source_ms,
         "clause_count": len(compact),
         "policy": {
-            "submit_mode": "full_asr_all_clauses",
+            "submit_mode": "light_asr_selected_clauses",
             "extract_first": True,
             "no_size": True,
             "no_live_room_filler": True,
@@ -401,7 +418,7 @@ def call_llm_for_plan(
         + json.dumps(user_payload, ensure_ascii=False)
     )
     messages = [
-        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "system", "content": SYSTEM_PROMPT_LIGHT},
         {"role": "user", "content": user_text},
     ]
 
@@ -412,11 +429,11 @@ def call_llm_for_plan(
             base_url=base,
             api_key=key,
             temperature=0.2,
-            max_tokens=4096,
+            max_tokens=2048,
             force_json=True,
-            timeout=120,
+            timeout=60,
             cfg=cfg,
-            fast=False,  # first success route is cached; subsequent calls become fast
+            fast=True,  # prefer last_route; still falls back within tightened auth rules
         )
     except OpenAICompatError as e:
         raise RuntimeError(f"llm_request_failed:{e}") from e
@@ -429,8 +446,11 @@ def call_llm_for_plan(
         "endpoint": out.get("endpoint"),
         "target_source_ms": target_source_ms,
         "input_lines": len(_normalize_lines(lines)),
+        "input_clauses_raw": trim_stats.get("clauses_raw"),
         "input_clauses": len(clauses),
-        "submit_mode": "full_asr_all_clauses",
+        "clauses_sent": trim_stats.get("clauses_sent"),
+        "trim_stats": trim_stats,
+        "submit_mode": "light_asr_selected_clauses",
         "compat": {
             "auth_variant": out.get("auth_variant"),
             "payload_variant": out.get("payload_variant"),
@@ -439,8 +459,9 @@ def call_llm_for_plan(
         "auth_source": "user_ui",
         "client": "openai_compat_full",
     }
-    # stash clauses for timeline mapping (full ASR units)
+    # selected clauses for id resolution; raw for optional neighbor completion
     obj["_clauses"] = clauses
+    obj["_clauses_raw"] = clauses_all
     return obj
 
 

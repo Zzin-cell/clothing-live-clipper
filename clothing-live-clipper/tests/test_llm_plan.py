@@ -48,10 +48,10 @@ def _many_lines(n: int = 80):
 def test_select_clauses_for_llm_caps_and_drops_bad():
     clauses = expand_lines_to_clauses(_many_lines(160), max_clauses=500)
     assert len(clauses) > LIGHT_MAX_CLAUSES or len(clauses) > 100
-    selected, stats = select_clauses_for_llm(clauses, max_clauses=150)
+    selected, stats = select_clauses_for_llm(clauses, max_clauses=80)
     assert stats["clauses_raw"] == len(clauses)
     assert stats["clauses_sent"] == len(selected)
-    assert len(selected) <= 150
+    assert len(selected) <= 80
     assert stats["clauses_sent"] <= stats["clauses_raw"]
     # no invented ids
     raw_ids = {c["id"] for c in clauses}
@@ -189,12 +189,15 @@ def test_call_llm_for_plan_uses_trim_and_lower_tokens(monkeypatch):
     )
     lines = _many_lines(60)
     obj = lp.call_llm_for_plan(lines, target_seconds=60, playback_speed=1.4)
-    assert captured.get("max_tokens") == 2048
-    assert captured.get("timeout") == 60
+    assert captured.get("max_tokens") == lp.PLAN_MAX_TOKENS
+    assert captured.get("timeout") == lp.PLAN_TIMEOUT_S
     assert captured.get("force_json") is True
     assert captured.get("fast") is True
     # system should be light
     msgs = captured.get("messages") or []
     assert msgs and msgs[0]["role"] == "system"
     assert len(msgs[0]["content"]) < len(lp.SYSTEM_PROMPT)
-    assert obj.get("_meta", {}).get("clauses_sent", 10**9) <= 150
+    user_content = msgs[1]["content"]
+    assert "已筛选" in user_content
+    assert "all_clauses" not in user_content
+    assert obj.get("_meta", {}).get("clauses_sent", 10**9) <= lp.LIGHT_MAX_CLAUSES

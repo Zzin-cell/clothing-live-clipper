@@ -305,12 +305,21 @@ def chat_completions(
             p for i, p in enumerate(payloads) if i != last_payload
         ]
 
-    # Fast mode: only first endpoint + first 2 auth + first 2 payloads
+    # Fast mode for latency:
+    # - if we already know a working route: single-shot (no multi-retry matrix)
+    # - otherwise: one endpoint + 1 auth + 2 payloads, short timeout
+    has_last_route = bool(last_ep)
     if fast:
         endpoints = endpoints[:1]
-        headers_list = headers_list[:2]
-        payloads = payloads[:2]
-        timeout = min(timeout, 25)
+        if has_last_route:
+            headers_list = headers_list[:1]
+            payloads = payloads[:1]
+            # single-shot budget; fail fast to rules rather than thrash retries
+            timeout = min(timeout, 30)
+        else:
+            headers_list = headers_list[:1]
+            payloads = payloads[:2]
+            timeout = min(timeout, 20)
 
     errors: list[str] = []
     t0 = time.perf_counter()

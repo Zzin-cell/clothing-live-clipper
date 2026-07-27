@@ -115,3 +115,39 @@ def test_chat_completions_401_stops_quickly():
 
     # Must not run full endpoint x auth x payload Cartesian product
     assert calls["n"] <= 4, f"too many HTTP attempts on 401: {calls['n']}"
+
+
+def test_chat_completions_fast_with_last_route_is_single_shot():
+    calls = {"n": 0}
+
+    def fake_http(url, headers, payload=None, method="POST", timeout=180):
+        calls["n"] += 1
+        calls["timeout"] = timeout
+        return {
+            "choices": [{"message": {"role": "assistant", "content": '{"ok":true}'}}]
+        }
+
+    with patch("clipper.openai_compat._http_json", side_effect=fake_http):
+        with patch("clipper.user_llm.remember_successful_route"):
+            out = chat_completions(
+                messages=[{"role": "user", "content": "1"}],
+                model="Qwen/Qwen2.5-7B-Instruct",
+                base_url="https://api.siliconflow.cn/v1",
+                api_key="sk-test-key-xxxxxxxx",
+                force_json=True,
+                timeout=35,
+                fast=True,
+                cfg={
+                    "api_key": "sk-test-key-xxxxxxxx",
+                    "base_url": "https://api.siliconflow.cn/v1",
+                    "model": "Qwen/Qwen2.5-7B-Instruct",
+                    "last_endpoint": "https://api.siliconflow.cn/v1/chat/completions",
+                    "last_auth_variant": 0,
+                    "last_payload_variant": 0,
+                    "extra_headers": {},
+                    "organization": "",
+                },
+            )
+    assert out.get("content")
+    assert calls["n"] == 1
+    assert calls["timeout"] <= 30

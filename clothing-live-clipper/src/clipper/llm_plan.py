@@ -223,8 +223,11 @@ def expand_lines_to_clauses(
     return out
 
 
-LIGHT_MAX_CLAUSES = 150
-CLAUSE_TEXT_MAX = 120
+# Latency-first caps (SiliconFlow lightweight path)
+LIGHT_MAX_CLAUSES = 80
+CLAUSE_TEXT_MAX = 80
+PLAN_MAX_TOKENS = 1024
+PLAN_TIMEOUT_S = 35
 
 _CONTROL_MARKERS = (
     "家人们", "扣1", "点关注", "晚上好", "欢迎", "公屏", "调试", "对焦", "链接", "小黄车", "加购",
@@ -323,14 +326,15 @@ def select_clauses_for_llm(
     return selected, stats
 
 
-def _learning_hints(limit: int = 12) -> dict[str, Any]:
+def _learning_hints(limit: int = 4) -> dict[str, Any]:
+    """Tiny preference hints only — keep payload small for latency."""
     try:
         st = learning_status()
-        return {
-            "events": st.get("events"),
-            "top_keep_or_hook": (st.get("top_hook") or [])[:limit],
-            "top_drop": (st.get("top_drop") or [])[:limit],
-        }
+        keep = (st.get("top_hook") or [])[:limit]
+        drop = (st.get("top_drop") or [])[:limit]
+        if not keep and not drop:
+            return {}
+        return {"keep": keep, "drop": drop}
     except Exception:
         return {}
 
@@ -362,60 +366,31 @@ def call_llm_for_plan(
         raise RuntimeError("empty_transcript")
     clauses, trim_stats = select_clauses_for_llm(clauses_all, max_clauses=LIGHT_MAX_CLAUSES)
 
+    # Minimal clause fields → fewer input tokens
     compact = [
         {
             "id": u["id"],
-            "parent_id": u.get("parent_id"),
-            "t0_ms": u["t0_ms"],
-            "t1_ms": u["t1_ms"],
+            "t0": u["t0_ms"],
+            "t1": u["t1_ms"],
             "text": str(u["text"])[:CLAUSE_TEXT_MAX],
         }
         for u in clauses
     ]
-    user_payload = {
-        "task": "read_all_clauses_extract_main_points_then_reorder",
-        "target_final_seconds": target_seconds,
-        "playback_speed": sp,
-        "target_source_ms": target_source_ms,
-        "clause_count": len(compact),
-        "policy": {
-            "submit_mode": "light_asr_selected_clauses",
-            "extract_first": True,
-            "no_size": True,
-            "no_live_room_filler": True,
-            "clothing_only": True,
-            "price_only_as_opening_hook": True,
-            "priority": "上身效果 > 面料 > 价格",
-            "pacing": "快节奏无冗余，重复试穿/重复话术只留最优一次",
-            "opening_hook_types": [
-                "visual: 全身成品/显瘦对比/面料特写/色差对比",
-                "pain: 微胖显壮/小个子压身高/显廉价/夏天闷汗",
-                "welfare: 低价/限时限量/现货清仓/专柜平替（仅开场一句）",
-            ],
-            "sequence": "3秒钩子 → 版型上身 → 细节特写 → 对比/体验 → 自然收束",
-            "complete_logic_required": True,
-            "no_mid_sentence_cutoff": True,
-            "prefer_complete_under_duration": True,
-            "drop_always": [
-                "打招呼",
-                "调试镜头",
-                "闲聊",
-                "重复开场白",
-                "无关弹幕",
-                "整理衣服",
-                "喝水",
-                "对对对/xy幻觉",
-                "话说一半的半截句",
-            ],
-        },
-        "learning_hints": _learning_hints(),
-        "all_clauses": compact,
+    user_payload: dict[str, Any] = {
+        "target_s": target_seconds,
+        "speed": sp,
+        "target_src_ms": target_source_ms,
+        "n": len(compact),
+        "rules": "去控场/尺码; 钩子→版型→细节→体验→收束; 只用输入id; 完整句",
+        "clauses": compact,
     }
+    hints = _learning_hints()
+    if hints:
+        user_payload["hints"] = hints
 
     user_text = (
-        "下面是该视频 ASR 全量口播小句。请先提取主要内容 main_points，"
-        "再从全部小句中挑选并重新排列 keep，只输出JSON：\n"
-        + json.dumps(user_payload, ensure_ascii=False)
+        "已筛选口播小句。提取 main_points 并选/排 keep，只输出JSON：\n"
+        + json.dumps(user_payload, ensure_ascii=False, separators=(",", ":"))
     )
     messages = [
         {"role": "system", "content": SYSTEM_PROMPT_LIGHT},
@@ -429,11 +404,11 @@ def call_llm_for_plan(
             base_url=base,
             api_key=key,
             temperature=0.2,
-            max_tokens=2048,
+            max_tokens=PLAN_MAX_TOKENS,
             force_json=True,
-            timeout=60,
+            timeout=PLAN_TIMEOUT_S,
             cfg=cfg,
-            fast=True,  # prefer last_route; still falls back within tightened auth rules
+            fast=True,  # prefer last_route; tight retries for speed
         )
     except OpenAICompatError as e:
         raise RuntimeError(f"llm_request_failed:{e}") from e

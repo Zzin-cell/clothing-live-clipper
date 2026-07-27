@@ -46,7 +46,8 @@ LLM 调用走 `openai_compat.py` 完整兼容客户端（类似 Agent 接入）�
 
 轻量模式（SiliconFlow 推荐）：
 - 默认示例 Base：`https://api.siliconflow.cn/v1`，优先轻量 Instruct（如 Qwen2.5-7B）
-- 规划请求裁剪小句（约 ≤150）+ 短 system；`max_tokens=2048`、timeout≈60s
+- 规划请求裁剪小句（约 ≤80）+ 极简 user payload + 短 system；`max_tokens=1024`、timeout≈35s
+- 有 last_route 时 `fast` 单次请求；无缓存时 1 端点 × 1 鉴权 × ≤2 payload
 - HTTP 401 Token invalid：快速失败并提示更新 Key，避免兼容层穷举重试
 
 ## 3. 反剪链路（人工）

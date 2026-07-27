@@ -979,16 +979,11 @@ def build_timeline_plan(
             warnings.append("dropped_incomplete_tail")
 
     total = sum(s.t1_ms - s.t0_ms for s in story)
+    # Do NOT stretch t1_ms past real speech just to hit target duration.
+    # Extending tails pulls in silence / blank stage and looks like 1–2s black gaps
+    # between "segments" after concat (especially at 1.4x playback).
     if total < min_plan and story:
-        # prefer complete under-duration over forced pad into nonsense
-        need = min_plan - total
-        if not (story[-1].text or "").endswith(("然后", "因为", "所以", "而且", "但是", "的话")):
-            story[-1].t1_ms += min(need, 1800)
-            total = sum(s.t1_ms - s.t0_ms for s in story)
-            warnings.append("duration_edge_padded")
-        else:
-            warnings.append(f"short_but_complete_ms={total}")
-    if total < min_plan:
+        warnings.append(f"short_but_complete_ms={total}")
         warnings.append(f"short_content_ms={total}")
     warnings.append("policy:complete_logic_no_cutoff")
 

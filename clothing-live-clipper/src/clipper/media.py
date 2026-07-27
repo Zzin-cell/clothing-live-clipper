@@ -30,6 +30,8 @@ class RenderProfile:
     # Adjacent cuts expand into each other by N *output* frames so the join
     # briefly shares continuous motion (micro-stutter) instead of a hard pop.
     join_overlap_frames: int
+    # tiny safety trim from each cut tail to drop trailing silence/hold frames
+    tail_trim_ms: int
     crf: int
     x264_preset: str
     nvenc_preset: str
@@ -46,9 +48,10 @@ def get_render_profile(name: str = "final") -> RenderProfile:
             fps=25,
             edge_fade_s=0.0,
             video_fade_s=0.0,
-            audio_fade_s=0.03,
-            smooth_handle_ms=40,
-            join_overlap_frames=2,
+            audio_fade_s=0.02,
+            smooth_handle_ms=20,
+            join_overlap_frames=1,
+            tail_trim_ms=80,
             crf=28,
             x264_preset="ultrafast",
             nvenc_preset="p1",
@@ -61,9 +64,10 @@ def get_render_profile(name: str = "final") -> RenderProfile:
         fps=30,
         edge_fade_s=0.0,
         video_fade_s=0.0,
-        audio_fade_s=0.04,
-        smooth_handle_ms=80,
-        join_overlap_frames=2,
+        audio_fade_s=0.025,
+        smooth_handle_ms=40,
+        join_overlap_frames=1,
+        tail_trim_ms=100,
         crf=23,
         x264_preset="ultrafast",
         nvenc_preset="p4",
@@ -710,15 +714,20 @@ def render_plan(
         except Exception:
             old_cache = {}
 
-    # prepare segment specs (handle pad + 1–2 frame join overlap)
+    # prepare segment specs (tiny handles + micro join overlap + tail trim)
     raw_handles: list[tuple[int, int]] = []
+    tail_trim = max(0, int(getattr(prof, "tail_trim_ms", 0) or 0))
     for t0, t1 in segments:
         t0i, t1i = int(t0), int(t1)
         if t1i - t0i < 280:
             t1i = t0i + 280
+        # Nibble trailing hold/silence that ASR often overshoots by 50–150ms
+        if tail_trim > 0 and (t1i - t0i) > tail_trim + 400:
+            t1i = t1i - tail_trim
         if handle > 0:
+            # Prefer slight pre-roll only; avoid large post-roll (creates blackish holds)
             t0i = max(0, t0i - handle)
-            t1i = t1i + int(handle * 1.15)
+            t1i = t1i + max(0, handle // 3)
         raw_handles.append((t0i, t1i))
     segs_out = apply_join_overlaps(raw_handles, overlap_ms=overlap_ms)
 

@@ -24,6 +24,8 @@ def test_get_render_profile_draft_smaller_and_no_handles():
     assert d.crf >= f.crf
     assert d.join_overlap_frames >= 1
     assert f.join_overlap_frames >= 1
+    assert d.video_fade_s == 0.0 and f.video_fade_s == 0.0
+    assert d.tail_trim_ms >= 0 and f.tail_trim_ms >= 0
 
 
 def test_join_overlap_source_ms_two_frames():

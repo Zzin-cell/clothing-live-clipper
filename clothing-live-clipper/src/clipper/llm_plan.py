@@ -662,10 +662,8 @@ def llm_obj_to_timeline(
         warnings.append("llm_empty_keep")
     tot = total_ms()
     if tot < min_ms:
+        # Prefer shorter complete cut over padding into silence/black after speech.
         warnings.append(f"short_but_complete_ms={tot}")
-        # mild pad only on last complete slot
-        if slots and not _looks_incomplete_text(slots[-1].text):
-            slots[-1].t1_ms += min(1800, min_ms - tot)
 
     # final guard: never end with incomplete text
     if slots and _looks_incomplete_text(slots[-1].text) and len(slots) > 1:

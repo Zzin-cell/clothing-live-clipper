@@ -155,6 +155,20 @@ def test_system_prompt_light_is_much_shorter():
     assert "尺码" in lp.SYSTEM_PROMPT_LIGHT
 
 
+def test_extract_json_obj_strips_think_and_fences():
+    raw = """
+    <think>
+    我先分析一下……
+    </think>
+    ```json
+    {"product_summary":"软","hook_type":"pain","main_points":["面料"],"logic":["钩子"],"keep":[],"drop_ids":[],"notes":""}
+    ```
+    """
+    obj = lp._extract_json_obj(raw)
+    assert obj["product_summary"] == "软"
+    assert obj["keep"] == []
+
+
 def test_call_llm_for_plan_uses_trim_and_lower_tokens(monkeypatch):
     captured = {}
 

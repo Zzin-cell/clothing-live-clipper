@@ -55,6 +55,54 @@ def test_payload_variants_include_json_and_minimal():
     assert any(set(v.keys()) == {"model", "messages"} for v in vars)
 
 
+def test_payload_variants_disable_thinking_for_qwen3():
+    msgs = [{"role": "user", "content": "hi"}]
+    vars = build_payload_variants(
+        model="Qwen/Qwen3.5-9B", messages=msgs, force_json=True, max_tokens=1024
+    )
+    assert any(v.get("enable_thinking") is False for v in vars)
+    assert any(
+        isinstance(v.get("chat_template_kwargs"), dict)
+        and v["chat_template_kwargs"].get("enable_thinking") is False
+        for v in vars
+    )
+
+
+def test_extract_chat_text_prefers_content_json_over_reasoning():
+    t = extract_chat_text(
+        {
+            "choices": [
+                {
+                    "message": {
+                        "role": "assistant",
+                        "content": '{"keep":[]}',
+                        "reasoning_content": "长篇思考过程……没有json",
+                    }
+                }
+            ]
+        }
+    )
+    assert t.startswith("{")
+    assert "keep" in t
+
+
+def test_extract_chat_text_falls_back_to_reasoning_json():
+    t = extract_chat_text(
+        {
+            "choices": [
+                {
+                    "message": {
+                        "role": "assistant",
+                        "content": "",
+                        "reasoning_content": '分析后输出 {"product_summary":"x","keep":[]}',
+                    }
+                }
+            ]
+        }
+    )
+    assert "product_summary" in t or t.strip().startswith("{")
+
+
 from unittest.mock import patch
 
 from clipper.openai_compat import (

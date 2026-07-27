@@ -127,6 +127,34 @@ def normalize_base_url(url: str) -> str:
     return u
 
 
+def _join_content_parts(content: Any) -> str:
+    if isinstance(content, str):
+        return content
+    if not isinstance(content, list):
+        return ""
+    parts: list[str] = []
+    for p in content:
+        if isinstance(p, str):
+            parts.append(p)
+        elif isinstance(p, dict):
+            if isinstance(p.get("text"), str):
+                parts.append(p["text"])
+            elif isinstance(p.get("content"), str):
+                parts.append(p["content"])
+    return "".join(parts)
+
+
+def _prefer_jsonish(*candidates: str) -> str:
+    """Prefer a candidate that looks like JSON over plain reasoning prose."""
+    nonempty = [c.strip() for c in candidates if isinstance(c, str) and c.strip()]
+    if not nonempty:
+        return ""
+    for c in nonempty:
+        if "{" in c and "}" in c:
+            return c
+    return nonempty[0]
+
+
 def extract_chat_text(resp: dict[str, Any]) -> str:
     """Extract assistant text from many OpenAI-compatible response shapes."""
     if not isinstance(resp, dict):
@@ -139,31 +167,24 @@ def extract_chat_text(resp: dict[str, Any]) -> str:
             c0 = choices[0] or {}
             msg = c0.get("message") or {}
             content = msg.get("content")
-            if isinstance(content, str) and content.strip():
-                return content
-            # deepseek-reasoner / some flash models put text in reasoning_content
+            content_s = _join_content_parts(content).strip() if content is not None else ""
+            # Prefer real answer content over reasoning_content (Qwen3 / reasoners).
+            reasoning_bits: list[str] = []
             for rk in ("reasoning_content", "reasoning", "refusal"):
                 rv = msg.get(rk)
                 if isinstance(rv, str) and rv.strip():
-                    # for probe, any non-empty assistant field counts as success
-                    return rv.strip()[:200]
-            # content as list of parts
-            if isinstance(content, list):
-                parts = []
-                for p in content:
-                    if isinstance(p, str):
-                        parts.append(p)
-                    elif isinstance(p, dict):
-                        if isinstance(p.get("text"), str):
-                            parts.append(p["text"])
-                        elif isinstance(p.get("content"), str):
-                            parts.append(p["content"])
-                joined = "".join(parts).strip()
-                if joined:
-                    return joined
-            # empty string content but HTTP 200 with message object => treat as ok
-            if isinstance(content, str) and "message" in c0:
-                return content  # may be empty; caller decides
+                    reasoning_bits.append(rv.strip())
+            if content_s:
+                # If content itself is empty-looking but reasoning has JSON, prefer JSON later.
+                if "{" in content_s and "}" in content_s:
+                    return content_s
+                if not reasoning_bits:
+                    return content_s
+                return _prefer_jsonish(content_s, *reasoning_bits)
+            if reasoning_bits:
+                # Keep full reasoning when it may embed JSON (plan path needs it);
+                # probe callers only display a short preview anyway.
+                return _prefer_jsonish(*reasoning_bits)
             # some providers put text at choice level
             if isinstance(c0.get("text"), str) and c0["text"].strip():
                 return c0["text"]
@@ -190,6 +211,21 @@ def extract_chat_text(resp: dict[str, Any]) -> str:
     raise OpenAICompatError(f"cannot extract chat text: {str(resp)[:400]}")
 
 
+def _thinking_off_fields(model: str) -> dict[str, Any]:
+    """
+    Disable chain-of-thought / reasoning for models that default to thinking.
+    Qwen3.x on SiliconFlow often spends tokens in reasoning_content and returns
+    empty or non-JSON content unless thinking is turned off.
+    """
+    m = (model or "").lower()
+    if any(k in m for k in ("qwen3", "qwen/qwen3", "deepseek-r1", "reasoner")):
+        return {
+            "enable_thinking": False,
+            "chat_template_kwargs": {"enable_thinking": False},
+        }
+    return {}
+
+
 def build_payload_variants(
     *,
     model: str,
@@ -199,13 +235,24 @@ def build_payload_variants(
     force_json: bool = True,
 ) -> list[dict[str, Any]]:
     """Request bodies ordered from preferred -> more compatible."""
-    base_msg = {"model": model, "messages": messages}
+    think_off = _thinking_off_fields(model)
+    base_msg = {"model": model, "messages": messages, **think_off}
     variants: list[dict[str, Any]] = []
 
     if force_json:
+        # Prefer JSON + max_tokens + thinking off first (speed + parseability)
         variants.append(
             {
                 **base_msg,
+                "temperature": temperature,
+                "response_format": {"type": "json_object"},
+                "max_tokens": max_tokens,
+            }
+        )
+        variants.append(
+            {
+                "model": model,
+                "messages": messages,
                 "temperature": temperature,
                 "response_format": {"type": "json_object"},
                 "max_tokens": max_tokens,
@@ -222,10 +269,16 @@ def build_payload_variants(
     variants.extend(
         [
             {**base_msg, "temperature": temperature, "max_tokens": max_tokens},
+            {
+                "model": model,
+                "messages": messages,
+                "temperature": temperature,
+                "max_tokens": max_tokens,
+            },
             {**base_msg, "temperature": temperature},
             {**base_msg, "top_p": 0.9, "max_tokens": max_tokens},
             {**base_msg, "max_tokens": max_tokens},
-            dict(base_msg),  # minimal
+            {"model": model, "messages": messages},  # minimal
         ]
     )
 
@@ -463,21 +516,25 @@ def pick_default_model(models: list[str], preferred: str | None = None) -> str |
 
     # Prefer smaller instruct/chat before huge reasoning models
     rank_keys = [
+        "qwen2.5-7b-instruct",
         "7b-instruct",
+        "qwen2.5-7b",
         "7b",
         "9b-chat",
-        "9b",
+        "9b-instruct",
+        "glm-4-9b",
         "14b-instruct",
         "4o-mini",
         "turbo",
         "mini",
-        "glm-4-9b",
-        "qwen2.5-7b",
+        "qwen2.5",
         "deepseek-chat",
         "instruct",
         "chat",
         "gpt-4o",
         "grok",
+        # keep qwen3 lower than qwen2.5; thinking models are slower by default
+        "qwen3",
         "qwen",
     ]
     for k in rank_keys:

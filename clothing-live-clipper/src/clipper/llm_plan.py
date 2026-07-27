@@ -140,22 +140,40 @@ def _extract_json_obj(text: str) -> dict[str, Any]:
     t = (text or "").strip()
     if not t:
         raise ValueError("empty llm content")
+    # strip think / reasoning wrappers some Qwen3 builds emit
+    t = re.sub(r"<think>[\s\S]*?</think>", "", t, flags=re.I)
+    t = re.sub(r"<thinking>[\s\S]*?</thinking>", "", t, flags=re.I)
     # strip ```json fences
-    t = re.sub(r"^```(?:json)?\s*", "", t)
+    t = re.sub(r"^```(?:json)?\s*", "", t.strip())
     t = re.sub(r"\s*```$", "", t)
+    t = t.strip()
     try:
         obj = json.loads(t)
         if isinstance(obj, dict):
             return obj
     except Exception:
         pass
+    # Prefer object that contains plan keys if multiple JSON blobs appear
+    candidates = re.findall(r"\{[\s\S]*?\}", t)
+    # greedy fallback for nested keep arrays
     m = re.search(r"\{[\s\S]*\}", t)
-    if not m:
-        raise ValueError("no json object in llm content")
-    obj = json.loads(m.group(0))
-    if not isinstance(obj, dict):
-        raise ValueError("llm json is not object")
-    return obj
+    if m:
+        candidates.append(m.group(0))
+    best: dict[str, Any] | None = None
+    for raw in candidates:
+        try:
+            obj = json.loads(raw)
+        except Exception:
+            continue
+        if not isinstance(obj, dict):
+            continue
+        if "keep" in obj or "main_points" in obj or "product_summary" in obj:
+            return obj
+        if best is None:
+            best = obj
+    if best is not None:
+        return best
+    raise ValueError("no json object in llm content")
 
 
 def _normalize_lines(raw_lines: list[dict[str, Any]]) -> list[dict[str, Any]]:

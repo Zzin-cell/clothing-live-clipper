@@ -66,6 +66,10 @@ def test_build_cut_cmd_includes_speed_in_one_pass():
     joined = " ".join(cmd)
     assert "setpts=PTS/1.40000" in joined or "setpts=PTS/1.4" in joined
     assert "atempo=" in joined
+    # after speed-up, hard-trim output so container has no black tail
+    assert "trim=duration=" in joined
+    assert "atrim=duration=" in joined
+    assert "-shortest" in cmd
     # must not leave raw speed for a second full-file pass
     assert "-c:v" in cmd
     # no video black fade between cuts (afade is OK; bare video fade is not)

@@ -257,8 +257,14 @@ def build_cut_cmd(
     ]
     af_parts: list[str] = []
     if speed != 1.0:
+        # Critical: setpts alone can leave a longer container timeline padded with black.
+        # Always trim BOTH streams to the real output duration after speed.
         vf_parts.append(f"setpts=PTS/{speed:.5f}")
+        vf_parts.append(f"trim=duration={out_dur:.5f}")
+        vf_parts.append("setpts=PTS-STARTPTS")
         af_parts.append(_atempo_chain(speed))
+        af_parts.append(f"atrim=duration={out_dur:.5f}")
+        af_parts.append("asetpts=PTS-STARTPTS")
     # Video fade intentionally off by default (v_fade==0)
     if v_fade > 0:
         v_out_st = max(0.0, out_dur - v_fade)
@@ -297,6 +303,10 @@ def build_cut_cmd(
         "44100",
         "-ac",
         "1",
+        # Never pad video/audio to mismatch with black/silence
+        "-shortest",
+        "-avoid_negative_ts",
+        "make_zero",
         "-movflags",
         "+faststart",
         str(out_path),
@@ -510,10 +520,13 @@ def _concat_pairwise_hard(segment_paths: list[Path], out_mp4: Path) -> Path:
             "concat",
             "-safe",
             "0",
+            "-fflags",
+            "+genpts",
             "-i",
             str(list_file),
             "-c",
             "copy",
+            # drop any accidental trailing empty edit lists / pad
             "-movflags",
             "+faststart",
             str(out_mp4),
@@ -623,10 +636,11 @@ def _part_fingerprint(
     vcodec: str,
     video_fade: float = 0.0,
     audio_fade: float = 0.0,
-    crop_mode: str = "cover",
+    crop_mode: str = "cover_trim",
     join_overlap_ms: int = 0,
 ) -> str:
     # include join_overlap so caches invalidate when cut windows expand
+    # crop_mode cover_trim = cover crop + post-speed duration trim (no black pad)
     raw = (
         f"{t0}|{t1}|{speed:.5f}|{tw}x{th}|{fps}|{fade:.3f}|"
         f"vf{video_fade:.3f}|af{audio_fade:.3f}|ov{join_overlap_ms}|"
@@ -717,7 +731,7 @@ def render_plan(
         "video_fade": v_fade,
         "audio_fade": a_fade,
         "join_overlap_ms": overlap_ms,
-        "crop": "cover",
+        "crop": "cover_trim",
         "vcodec": vcodec,
         "parts": {},
     }
@@ -735,7 +749,7 @@ def render_plan(
             vcodec=vcodec,
             video_fade=v_fade,
             audio_fade=a_fade,
-            crop_mode="cover",
+            crop_mode="cover_trim",
             join_overlap_ms=overlap_ms,
         )
         # Name by content fingerprint only so unchanged windows reuse across reorders.

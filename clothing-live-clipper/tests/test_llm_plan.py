@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from clipper.llm_plan import expand_lines_to_clauses, llm_obj_to_timeline
+from clipper.llm_plan import LIGHT_MAX_CLAUSES, expand_lines_to_clauses, llm_obj_to_timeline, select_clauses_for_llm
 from clipper.models import TimelinePlan
 
 
@@ -18,6 +18,48 @@ def _lines():
         {"utt_id": "u5", "text": "建议穿M码偏大", "t0_ms": 20000, "t1_ms": 22000},
         {"utt_id": "u6", "text": "底下蕾丝拼接很精致", "t0_ms": 23000, "t1_ms": 27000},
     ]
+
+
+def _many_lines(n: int = 80):
+    rows = []
+    for i in range(n):
+        if i % 10 == 0:
+            text = "家人们晚上好扣1点关注"
+        elif i % 10 == 1:
+            text = "建议穿M码偏大一码"
+        elif i % 10 == 2:
+            text = "这件面料超级软还不透"
+        elif i % 10 == 3:
+            text = "收腰版型梨形显瘦"
+        else:
+            text = f"补充一句穿着体验很舒服{i}"
+        rows.append(
+            {
+                "utt_id": f"u{i}",
+                "text": text,
+                "t0_ms": i * 2000,
+                "t1_ms": i * 2000 + 1500,
+            }
+        )
+    return rows
+
+
+def test_select_clauses_for_llm_caps_and_drops_bad():
+    clauses = expand_lines_to_clauses(_many_lines(160), max_clauses=500)
+    assert len(clauses) > LIGHT_MAX_CLAUSES or len(clauses) > 100
+    selected, stats = select_clauses_for_llm(clauses, max_clauses=150)
+    assert stats["clauses_raw"] == len(clauses)
+    assert stats["clauses_sent"] == len(selected)
+    assert len(selected) <= 150
+    assert stats["clauses_sent"] <= stats["clauses_raw"]
+    # no invented ids
+    raw_ids = {c["id"] for c in clauses}
+    assert all(c["id"] in raw_ids for c in selected)
+    # size / control should be rare or zero in selection
+    joined = " ".join(c["text"] for c in selected)
+    assert "M码" not in joined
+    assert "扣1" not in joined
+    assert stats.get("dropped_size", 0) >= 1 or stats.get("dropped_control", 0) >= 1
 
 
 def test_expand_lines_to_clauses_splits_full_asr():

@@ -207,6 +207,106 @@ def expand_lines_to_clauses(
     return out
 
 
+LIGHT_MAX_CLAUSES = 150
+CLAUSE_TEXT_MAX = 120
+
+_CONTROL_MARKERS = (
+    "家人们", "扣1", "点关注", "晚上好", "欢迎", "公屏", "调试", "对焦", "链接", "小黄车", "加购",
+)
+_SIZE_MARKERS = ("尺码", "M码", "L码", "m码", "胸围", "腰围", "偏大", "偏小", "建议穿")
+_VALUE_MARKERS = (
+    "面料", "显瘦", "版型", "收腰", "不透", "透气", "舒服", "垂感", "冰凉", "不闷",
+    "细节", "蕾丝", "刺绣", "上身", "遮肉", "梨形", "小个子",
+)
+
+
+def _is_control(text: str) -> bool:
+    return any(x in text for x in _CONTROL_MARKERS)
+
+
+def _is_size(text: str) -> bool:
+    return any(x in text for x in _SIZE_MARKERS)
+
+
+def _value_score(text: str) -> int:
+    t = text or ""
+    s = 0
+    for k in _VALUE_MARKERS:
+        if k in t:
+            s += 3
+    if 4 <= len(t) <= 40:
+        s += 1
+    if _is_control(t) or _is_size(t):
+        s -= 50
+    if len(t) < 2:
+        s -= 20
+    return s
+
+
+def select_clauses_for_llm(
+    clauses: list[dict[str, Any]],
+    *,
+    max_clauses: int = LIGHT_MAX_CLAUSES,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    raw = list(clauses or [])
+    stats = {
+        "clauses_raw": len(raw),
+        "clauses_sent": 0,
+        "dropped_control": 0,
+        "dropped_size": 0,
+        "dropped_dup": 0,
+        "filled_cover": 0,
+    }
+    if not raw:
+        return [], stats
+
+    kept: list[dict[str, Any]] = []
+    seen_norm: set[str] = set()
+    for c in raw:
+        text = str(c.get("text") or "").strip()
+        if not text:
+            continue
+        if _is_control(text):
+            stats["dropped_control"] += 1
+            continue
+        if _is_size(text):
+            stats["dropped_size"] += 1
+            continue
+        norm = re.sub(r"\s+", "", text)[:24]
+        if norm in seen_norm:
+            stats["dropped_dup"] += 1
+            continue
+        seen_norm.add(norm)
+        kept.append(c)
+
+    # score and take best, but preserve chronological order of chosen set
+    ranked = sorted(kept, key=lambda c: _value_score(str(c.get("text") or "")), reverse=True)
+    hard_cap = max(20, int(max_clauses))
+    top = ranked[:hard_cap]
+    top_ids = {str(c.get("id")) for c in top}
+
+    # time-cover fill if too sparse
+    if len(top) < min(hard_cap, max(30, hard_cap // 2)):
+        for c in raw:
+            cid = str(c.get("id"))
+            if cid in top_ids:
+                continue
+            text = str(c.get("text") or "")
+            if _is_control(text) or _is_size(text):
+                continue
+            top.append(c)
+            top_ids.add(cid)
+            stats["filled_cover"] += 1
+            if len(top) >= hard_cap:
+                break
+
+    # chronological order
+    order = {str(c.get("id")): i for i, c in enumerate(raw)}
+    selected = sorted(top, key=lambda c: order.get(str(c.get("id")), 10**12))[:hard_cap]
+    stats["clauses_sent"] = len(selected)
+    return selected, stats
+
+
 def _learning_hints(limit: int = 12) -> dict[str, Any]:
     try:
         st = learning_status()

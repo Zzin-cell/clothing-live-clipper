@@ -286,6 +286,7 @@ def build_cut_cmd(
         f"{ss:.3f}",
         "-i",
         str(video),
+        # input-side: take only source window
         "-t",
         f"{src_dur:.3f}",
         "-vf",
@@ -307,10 +308,15 @@ def build_cut_cmd(
         "44100",
         "-ac",
         "1",
-        # Never pad video/audio to mismatch with black/silence
+        # output-side hard stop: this is the key fix against black gaps after 1.4x
+        # (setpts shortens motion but encoder can still write a longer empty timeline)
+        "-t",
+        f"{out_dur:.5f}",
         "-shortest",
         "-avoid_negative_ts",
         "make_zero",
+        "-fflags",
+        "+genpts",
         "-movflags",
         "+faststart",
         str(out_path),
@@ -497,7 +503,12 @@ def concat_segments(
 
 
 def _concat_pairwise_hard(segment_paths: list[Path], out_mp4: Path) -> Path:
-    """Single-pass concat demuxer (much faster than pairwise re-encode)."""
+    """
+    Concat parts without black pads.
+
+    Prefer re-encode concat (not stream-copy): copy can preserve broken part
+    timelines / edit-list gaps that look like multi-second black flashes.
+    """
     ffmpeg = require_ffmpeg()
     out_mp4 = Path(out_mp4)
     out_mp4.parent.mkdir(parents=True, exist_ok=True)
@@ -516,8 +527,8 @@ def _concat_pairwise_hard(segment_paths: list[Path], out_mp4: Path) -> Path:
             lines.append(f"file '{ap}'")
         list_file.write_text("\n".join(lines), encoding="utf-8")
         threads = str(max(2, min(8, (os.cpu_count() or 4))))
-        # parts already same codec/params → stream copy is fastest & full duration
-        cmd_copy = [
+        # Always re-encode join for clean continuous timestamps (no black gaps).
+        cmd = [
             ffmpeg,
             "-y",
             "-f",
@@ -528,19 +539,38 @@ def _concat_pairwise_hard(segment_paths: list[Path], out_mp4: Path) -> Path:
             "+genpts",
             "-i",
             str(list_file),
-            "-c",
-            "copy",
-            # drop any accidental trailing empty edit lists / pad
+            "-vf",
+            "setpts=PTS-STARTPTS",
+            "-af",
+            "asetpts=PTS-STARTPTS,aresample=async=1:first_pts=0",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "ultrafast",
+            "-crf",
+            "23",
+            "-threads",
+            threads,
+            "-pix_fmt",
+            "yuv420p",
+            "-c:a",
+            "aac",
+            "-b:a",
+            "128k",
+            "-ar",
+            "44100",
+            "-ac",
+            "1",
+            "-shortest",
             "-movflags",
             "+faststart",
             str(out_mp4),
         ]
         try:
-            run_cmd(cmd_copy)
-            return out_mp4
+            run_cmd(cmd)
         except FFmpegError:
-            # fallback re-encode once
-            cmd = [
+            # last resort: copy (may keep gaps — only if reencode fails hard)
+            cmd_copy = [
                 ffmpeg,
                 "-y",
                 "-f",
@@ -549,29 +579,13 @@ def _concat_pairwise_hard(segment_paths: list[Path], out_mp4: Path) -> Path:
                 "0",
                 "-i",
                 str(list_file),
-                "-c:v",
-                "libx264",
-                "-preset",
-                "ultrafast",
-                "-crf",
-                "23",
-                "-threads",
-                threads,
-                "-pix_fmt",
-                "yuv420p",
-                "-c:a",
-                "aac",
-                "-b:a",
-                "128k",
-                "-ar",
-                "44100",
-                "-ac",
-                "2",
+                "-c",
+                "copy",
                 "-movflags",
                 "+faststart",
                 str(out_mp4),
             ]
-            run_cmd(cmd)
+            run_cmd(cmd_copy)
     return out_mp4
 
 
@@ -640,11 +654,11 @@ def _part_fingerprint(
     vcodec: str,
     video_fade: float = 0.0,
     audio_fade: float = 0.0,
-    crop_mode: str = "cover_trim",
+    crop_mode: str = "cover_trim_outt",
     join_overlap_ms: int = 0,
 ) -> str:
     # include join_overlap so caches invalidate when cut windows expand
-    # crop_mode cover_trim = cover crop + post-speed duration trim (no black pad)
+    # cover_trim_outt = cover + post-speed filter trim + output -t hard stop
     raw = (
         f"{t0}|{t1}|{speed:.5f}|{tw}x{th}|{fps}|{fade:.3f}|"
         f"vf{video_fade:.3f}|af{audio_fade:.3f}|ov{join_overlap_ms}|"
@@ -740,7 +754,7 @@ def render_plan(
         "video_fade": v_fade,
         "audio_fade": a_fade,
         "join_overlap_ms": overlap_ms,
-        "crop": "cover_trim",
+        "crop": "cover_trim_outt",
         "vcodec": vcodec,
         "parts": {},
     }
@@ -758,7 +772,7 @@ def render_plan(
             vcodec=vcodec,
             video_fade=v_fade,
             audio_fade=a_fade,
-            crop_mode="cover_trim",
+            crop_mode="cover_trim_outt",
             join_overlap_ms=overlap_ms,
         )
         # Name by content fingerprint only so unchanged windows reuse across reorders.

@@ -72,6 +72,8 @@ def test_build_cut_cmd_includes_speed_in_one_pass():
     assert "trim=duration=" in joined
     assert "atrim=duration=" in joined
     assert "-shortest" in cmd
+    # output-side -t must exist (second -t after filters) to kill black padding
+    assert joined.count(" -t ") >= 2
     # must not leave raw speed for a second full-file pass
     assert "-c:v" in cmd
     # no video black fade between cuts (afade is OK; bare video fade is not)

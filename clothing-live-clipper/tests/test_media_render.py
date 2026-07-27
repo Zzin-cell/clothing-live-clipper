@@ -33,6 +33,8 @@ def test_build_cut_cmd_includes_speed_in_one_pass():
         target_h=1280,
         fps=25,
         edge_fade_s=0.04,
+        video_fade_s=0.0,
+        audio_fade_s=0.04,
         playback_speed=1.4,
         vcodec="libx264",
         v_extra=["-preset", "ultrafast", "-crf", "28"],
@@ -46,6 +48,37 @@ def test_build_cut_cmd_includes_speed_in_one_pass():
     assert "atempo=" in joined
     # must not leave raw speed for a second full-file pass
     assert "-c:v" in cmd
+    # no video black fade between cuts (afade is OK; bare video fade is not)
+    assert ",fade=t=in" not in joined and " fade=t=in" not in joined
+    assert ",fade=t=out" not in joined and " fade=t=out" not in joined
+    # audio ease only
+    assert "afade=" in joined
+    # cover-crop, not black pad
+    assert "force_original_aspect_ratio=increase" in joined
+    assert "pad=" not in joined
+
+
+def test_build_cut_cmd_no_video_black_fade_by_default():
+    cmd = build_cut_cmd(
+        ffmpeg="ffmpeg",
+        video=Path("in.mp4"),
+        t0_ms=0,
+        t1_ms=2000,
+        out_path=Path("part.mp4"),
+        target_w=1080,
+        target_h=1920,
+        fps=30,
+        edge_fade_s=0.10,  # legacy large value must not create video black fade
+        playback_speed=1.0,
+        vcodec="libx264",
+        v_extra=["-preset", "ultrafast", "-crf", "23"],
+        threads=2,
+    )
+    joined = " ".join(cmd)
+    # extract -vf value only
+    vf = joined.split("-vf ", 1)[1].split(" -af ", 1)[0]
+    assert "fade=" not in vf
+    assert "afade=" in joined
 
 
 def test_build_cut_cmd_speed_1_skips_setpts():

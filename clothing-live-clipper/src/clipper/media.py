@@ -21,7 +21,11 @@ class RenderProfile:
     name: str
     max_edge: int | None  # None = keep source size
     fps: int
-    edge_fade_s: float
+    # Video must NOT fade to black between cuts (looks like black flashes).
+    # Keep only a tiny audio ease to avoid pops; video is hard-cut.
+    edge_fade_s: float  # legacy alias → audio fade only
+    video_fade_s: float
+    audio_fade_s: float
     smooth_handle_ms: int
     crf: int
     x264_preset: str
@@ -37,7 +41,9 @@ def get_render_profile(name: str = "final") -> RenderProfile:
             name="draft",
             max_edge=720,
             fps=25,
-            edge_fade_s=0.04,
+            edge_fade_s=0.0,
+            video_fade_s=0.0,
+            audio_fade_s=0.03,
             smooth_handle_ms=40,
             crf=28,
             x264_preset="ultrafast",
@@ -49,8 +55,10 @@ def get_render_profile(name: str = "final") -> RenderProfile:
         name="final",
         max_edge=None,
         fps=30,
-        edge_fade_s=0.10,
-        smooth_handle_ms=120,
+        edge_fade_s=0.0,
+        video_fade_s=0.0,
+        audio_fade_s=0.04,
+        smooth_handle_ms=80,
         crf=23,
         x264_preset="ultrafast",
         nvenc_preset="p4",
@@ -156,14 +164,20 @@ def build_cut_cmd(
     target_w: int,
     target_h: int,
     fps: int,
-    edge_fade_s: float,
+    edge_fade_s: float = 0.0,
+    video_fade_s: float | None = None,
+    audio_fade_s: float | None = None,
     playback_speed: float,
     vcodec: str,
     v_extra: list[str],
     threads: int,
     audio_bitrate: str = "96k",
 ) -> list[str]:
-    """Build ffmpeg argv for one cut. Speed is applied in the same pass when != 1."""
+    """Build ffmpeg argv for one cut. Speed is applied in the same pass when != 1.
+
+    Policy: hard video cuts between segments (no black flashes). Optional tiny
+    audio fades only, to avoid pop clicks at joins.
+    """
     ss = max(0.0, t0_ms / 1000.0)
     # Source duration before speed
     src_dur = max(0.12, (t1_ms - t0_ms) / 1000.0)
@@ -171,31 +185,42 @@ def build_cut_cmd(
     if abs(speed - 1.0) < 0.01:
         speed = 1.0
 
-    # Fade on output timeline (after speed), so UX fade length stays consistent
     out_dur = src_dur / speed if speed != 1.0 else src_dur
-    if edge_fade_s and edge_fade_s > 0:
-        fade = min(max(0.02, float(edge_fade_s)), max(0.02, min(0.16, out_dur / 5.5)))
+    # Default: no video fade. Legacy edge_fade_s used to darken to black — broken for cuts.
+    v_fade = 0.0 if video_fade_s is None else max(0.0, float(video_fade_s))
+    if audio_fade_s is None:
+        # interpret legacy edge_fade_s as audio-only when positive but small
+        a_fade = max(0.0, float(edge_fade_s or 0.0))
+        if a_fade > 0.06:
+            # old profiles used 0.10 for video black fade — clamp to short audio ease
+            a_fade = 0.04
     else:
-        fade = 0.0
-    fade_out_st = max(0.0, out_dur - fade) if fade > 0 else 0.0
+        a_fade = max(0.0, float(audio_fade_s))
+    if a_fade > 0:
+        a_fade = min(a_fade, max(0.02, min(0.08, out_dur / 8.0)))
+    a_fade_out_st = max(0.0, out_dur - a_fade) if a_fade > 0 else 0.0
 
     w = target_w - (target_w % 2)
     h = target_h - (target_h % 2)
 
+    # Cover-crop instead of black pad when aspect differs (avoids black bars + "black seam" look)
     vf_parts = [
-        f"scale={w}:{h}:force_original_aspect_ratio=decrease",
-        f"pad={w}:{h}:(ow-iw)/2:(oh-ih)/2:black",
+        f"scale={w}:{h}:force_original_aspect_ratio=increase",
+        f"crop={w}:{h}",
         f"fps={int(fps)}",
     ]
     af_parts: list[str] = []
     if speed != 1.0:
         vf_parts.append(f"setpts=PTS/{speed:.5f}")
         af_parts.append(_atempo_chain(speed))
-    if fade > 0:
-        vf_parts.append(f"fade=t=in:st=0:d={fade:.3f}")
-        vf_parts.append(f"fade=t=out:st={fade_out_st:.3f}:d={fade:.3f}")
-        af_parts.append(f"afade=t=in:st=0:d={fade:.3f}")
-        af_parts.append(f"afade=t=out:st={fade_out_st:.3f}:d={fade:.3f}")
+    # Video fade intentionally off by default (v_fade==0)
+    if v_fade > 0:
+        v_out_st = max(0.0, out_dur - v_fade)
+        vf_parts.append(f"fade=t=in:st=0:d={v_fade:.3f}")
+        vf_parts.append(f"fade=t=out:st={v_out_st:.3f}:d={v_fade:.3f}")
+    if a_fade > 0:
+        af_parts.append(f"afade=t=in:st=0:d={a_fade:.3f}")
+        af_parts.append(f"afade=t=out:st={a_fade_out_st:.3f}:d={a_fade:.3f}")
     af_parts.append("aresample=async=1:first_pts=0")
 
     cmd = [
@@ -384,6 +409,8 @@ def cut_segment(
         target_h=h,
         fps=int(fps or prof.fps),
         edge_fade_s=float(edge_fade_s if edge_fade_s is not None else prof.edge_fade_s),
+        video_fade_s=float(prof.video_fade_s),
+        audio_fade_s=float(prof.audio_fade_s),
         playback_speed=float(playback_speed or 1.0),
         vcodec=str(vcodec),
         v_extra=list(v_extra),
@@ -548,8 +575,15 @@ def _part_fingerprint(
     fade: float,
     profile: str,
     vcodec: str,
+    video_fade: float = 0.0,
+    audio_fade: float = 0.0,
+    crop_mode: str = "cover",
 ) -> str:
-    raw = f"{t0}|{t1}|{speed:.5f}|{tw}x{th}|{fps}|{fade:.3f}|{profile}|{vcodec}"
+    # bump crop_mode so old black-pad parts are not reused after seamless cut fix
+    raw = (
+        f"{t0}|{t1}|{speed:.5f}|{tw}x{th}|{fps}|{fade:.3f}|"
+        f"vf{video_fade:.3f}|af{audio_fade:.3f}|{profile}|{vcodec}|{crop_mode}"
+    )
     return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:16]
 
 
@@ -588,9 +622,13 @@ def render_plan(
     speed = float(playback_speed) if playback_speed and playback_speed > 0 else 1.0
     if abs(speed - 1.0) < 0.01:
         speed = 1.0
-    fade = float(prof.edge_fade_s if edge_fade_s is None else edge_fade_s)
+    # edge_fade_s legacy arg: audio-only; never applies video black fade
+    a_fade = float(prof.audio_fade_s if edge_fade_s is None else edge_fade_s)
+    if a_fade > 0.06:
+        a_fade = 0.04
     if not smooth:
-        fade = min(fade, 0.04)
+        a_fade = min(a_fade, 0.03)
+    v_fade = float(prof.video_fade_s)  # expected 0
     handle = int(prof.smooth_handle_ms if smooth else 0)
 
     vcodec, v_extra = pick_video_encoder(profile=prof)
@@ -611,7 +649,9 @@ def render_plan(
         "speed": speed,
         "size": f"{tw}x{th}",
         "fps": prof.fps,
-        "fade": fade,
+        "video_fade": v_fade,
+        "audio_fade": a_fade,
+        "crop": "cover",
         "vcodec": vcodec,
         "parts": {},
     }
@@ -630,9 +670,12 @@ def render_plan(
             tw=tw,
             th=th,
             fps=prof.fps,
-            fade=fade,
+            fade=a_fade,
             profile=prof.name,
             vcodec=vcodec,
+            video_fade=v_fade,
+            audio_fade=a_fade,
+            crop_mode="cover",
         )
         # Name by content fingerprint only so unchanged windows reuse across reorders.
         part = work_dir / f"part_{fp}.mp4"
@@ -661,7 +704,7 @@ def render_plan(
             t1,
             part,
             reencode=True,
-            edge_fade_s=fade,
+            edge_fade_s=a_fade,
             target_w=tw,
             target_h=th,
             fps=prof.fps,

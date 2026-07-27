@@ -39,3 +39,65 @@ def test_payload_variants_include_json_and_minimal():
     vars = build_payload_variants(model="m", messages=msgs, force_json=True)
     assert any("response_format" in v for v in vars)
     assert any(set(v.keys()) == {"model", "messages"} for v in vars)
+
+
+from unittest.mock import patch
+
+from clipper.openai_compat import (
+    OpenAICompatError,
+    chat_completions,
+    classify_llm_error,
+    is_auth_invalid_error,
+)
+
+
+def test_classify_llm_error_siliconflow_token_invalid():
+    raw = (
+        'HTTP 401 https://api.siliconflow.cn/v1/chat/completions: '
+        '{"code":30014,"data":null,"message":"Token is invalid."}'
+    )
+    info = classify_llm_error(raw, base_url="https://api.siliconflow.cn/v1")
+    assert info["error_class"] == "auth_invalid"
+    assert "Token" in info["message"] or "无效" in info["message"]
+    assert info.get("provider_hint") == "siliconflow"
+    assert is_auth_invalid_error(raw) is True
+
+
+def test_chat_completions_401_stops_quickly():
+    calls = {"n": 0}
+
+    def fake_http(url, headers, payload=None, method="POST", timeout=180):
+        calls["n"] += 1
+        raise OpenAICompatError(
+            'HTTP 401 https://api.siliconflow.cn/v1/chat/completions: '
+            '{"code":30014,"message":"Token is invalid."}'
+        )
+
+    with patch("clipper.openai_compat._http_json", side_effect=fake_http):
+        try:
+            chat_completions(
+                messages=[{"role": "user", "content": "1"}],
+                model="Qwen/Qwen2.5-7B-Instruct",
+                base_url="https://api.siliconflow.cn/v1",
+                api_key="sk-invalid-key-for-test",
+                force_json=False,
+                timeout=10,
+                fast=False,
+                cfg={
+                    "api_key": "sk-invalid-key-for-test",
+                    "base_url": "https://api.siliconflow.cn/v1",
+                    "model": "Qwen/Qwen2.5-7B-Instruct",
+                    "last_endpoint": "",
+                    "last_auth_variant": 0,
+                    "last_payload_variant": 0,
+                    "extra_headers": {},
+                    "organization": "",
+                },
+            )
+            assert False, "expected OpenAICompatError"
+        except OpenAICompatError as e:
+            msg = str(e)
+            assert "401" in msg or "auth_invalid" in msg or "Token" in msg or "无效" in msg
+
+    # Must not run full endpoint x auth x payload Cartesian product
+    assert calls["n"] <= 4, f"too many HTTP attempts on 401: {calls['n']}"

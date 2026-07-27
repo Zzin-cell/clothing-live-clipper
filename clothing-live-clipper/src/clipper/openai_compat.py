@@ -32,6 +32,53 @@ class OpenAICompatError(RuntimeError):
     pass
 
 
+def is_auth_invalid_error(message: str) -> bool:
+    m = (message or "").lower()
+    if "http 401" in m or "http 403" in m:
+        if any(
+            k in m
+            for k in (
+                "token is invalid",
+                "invalid api key",
+                "incorrect api key",
+                "unauthorized",
+                "30014",
+                "authentication",
+                "invalid_api_key",
+            )
+        ):
+            return True
+        # bare 401/403 still counts as auth for stop purposes
+        return "http 401" in m
+    return False
+
+
+def classify_llm_error(message: str, *, base_url: str = "") -> dict[str, str]:
+    msg = message or ""
+    base = (base_url or "").lower()
+    provider = "siliconflow" if "siliconflow" in base or "siliconflow" in msg.lower() else ""
+    if is_auth_invalid_error(msg) or "token is invalid" in msg.lower() or "30014" in msg:
+        user = (
+            "Token 无效：请到 SiliconFlow 控制台重新复制 API Key 后保存并重试"
+            if provider == "siliconflow"
+            else "API Key 无效或无权限，请检查 Key 后重试"
+        )
+        return {"error_class": "auth_invalid", "message": user, "provider_hint": provider}
+    if "http 404" in msg.lower() or "http 405" in msg.lower():
+        return {
+            "error_class": "endpoint",
+            "message": "接口地址不可用，请检查 Base URL",
+            "provider_hint": provider,
+        }
+    if "timeout" in msg.lower() or "timed out" in msg.lower():
+        return {
+            "error_class": "timeout",
+            "message": "LLM 请求超时，将回退规则排片",
+            "provider_hint": provider,
+        }
+    return {"error_class": "request_failed", "message": msg[:300], "provider_hint": provider}
+
+
 def _http_json(
     url: str,
     headers: dict[str, str],
@@ -301,20 +348,26 @@ def chat_completions(
                 except OpenAICompatError as e:
                     msg = str(e)
                     errors.append(msg)
-                    # auth issues -> next auth style
+                    # Auth invalid: try at most one alternate auth on this endpoint, then abort ALL retries
                     if "HTTP 401" in msg or "HTTP 403" in msg:
-                        break
-                    # endpoint missing -> next endpoint
+                        # if this is already the second auth attempt (hi>=1) or message clearly invalid token → stop hard
+                        if hi >= 1 or is_auth_invalid_error(msg):
+                            info = classify_llm_error(msg, base_url=base)
+                            raise OpenAICompatError(
+                                f"auth_invalid: {info['message']} | {msg[:200]}"
+                            ) from e
+                        break  # next auth variant only
                     if "HTTP 404" in msg or "HTTP 405" in msg:
-                        # force next url
                         hi = len(headers_list)
                         break
-                    # bad request due to response_format etc -> next payload
                     continue
                 except Exception as e:
                     errors.append(f"{type(e).__name__}:{e}")
                     continue
     detail = " | ".join(errors[-6:]) if errors else "unknown"
+    info = classify_llm_error(detail, base_url=base)
+    if info["error_class"] == "auth_invalid":
+        raise OpenAICompatError(f"auth_invalid: {info['message']} | {detail}")
     raise OpenAICompatError(f"all_compat_attempts_failed: {detail}")
 
 

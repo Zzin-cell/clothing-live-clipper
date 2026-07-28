@@ -91,8 +91,13 @@ def _http_json(
     if payload is not None:
         data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     req = urllib.request.Request(url, data=data, headers=headers, method=method)
+    # tuple timeout: (connect, read). Cloud plan generation can be slow; read must
+    # not die too early or jobs keep showing "connected but always timeout".
+    to = timeout
+    if not isinstance(to, tuple):
+        to = (min(15, max(5, int(timeout))), max(int(timeout), 1))
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        with urllib.request.urlopen(req, timeout=to) as resp:
             raw = resp.read().decode("utf-8", errors="replace")
             if not raw.strip():
                 return {}

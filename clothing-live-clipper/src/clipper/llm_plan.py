@@ -975,6 +975,50 @@ def llm_obj_to_timeline(
     )
 
 
+def plan_from_local_clauses(
+    lines: list[dict[str, Any]],
+    *,
+    target_seconds: int = 60,
+    playback_speed: float = 1.4,
+) -> tuple[TimelinePlan, dict[str, Any]]:
+    """Offline clothing-taste plan (no network). Used when cloud LLM times out."""
+    sp = playback_speed if playback_speed and playback_speed > 0 else 1.4
+    clauses_all = expand_lines_to_clauses(lines, max_clauses=420)
+    clauses, trim_stats = select_clauses_for_llm(clauses_all, max_clauses=LIGHT_MAX_CLAUSES)
+    obj = _repair_keep_ids(
+        {
+            "product_summary": "本地卖点排片（云端LLM不可用时）",
+            "hook_type": "effect",
+            "main_points": ["版型", "面料", "适用人群"],
+            "logic": ["钩子", "版型", "面料", "人群", "收束"],
+            "keep": [],
+            "drop_ids": [],
+            "notes": "cloud_timeout_local_fill",
+        },
+        clauses,
+    )
+    obj["_clauses"] = clauses
+    obj["_clauses_raw"] = clauses_all
+    obj["_meta"] = {
+        "model": "local_clause_rank",
+        "submit_mode": "local_after_llm_fail",
+        "target_source_ms": int(round(target_seconds * 1000 * sp)),
+        "input_clauses_raw": trim_stats.get("clauses_raw"),
+        "clauses_sent": trim_stats.get("clauses_sent"),
+        "trim_stats": trim_stats,
+    }
+    plan = llm_obj_to_timeline(
+        obj,
+        lines,
+        target_seconds=target_seconds,
+        playback_speed=sp,
+    )
+    if not plan.golden:
+        raise RuntimeError("local_clause_plan_empty")
+    plan.warnings = list(plan.warnings or []) + ["policy:local_fill_after_llm_fail"]
+    return plan, obj
+
+
 def plan_from_asr_with_llm(
     lines: list[dict[str, Any]],
     *,
@@ -983,32 +1027,47 @@ def plan_from_asr_with_llm(
     settings: Settings | None = None,
 ) -> tuple[TimelinePlan, dict[str, Any]]:
     """
-    Returns (plan, debug_obj). Raises on hard failure so caller can fallback.
+    Returns (plan, debug_obj). On cloud failure, falls back to local clause plan
+    (still clothing-focused) instead of immediately dying for rules path only.
     """
-    obj = call_llm_for_plan(
-        lines,
-        target_seconds=target_seconds,
-        playback_speed=playback_speed,
-        settings=settings,
+    cloud_err: str | None = None
+    try:
+        obj = call_llm_for_plan(
+            lines,
+            target_seconds=target_seconds,
+            playback_speed=playback_speed,
+            settings=settings,
+        )
+        plan = llm_obj_to_timeline(
+            obj,
+            lines,
+            target_seconds=target_seconds,
+            playback_speed=playback_speed,
+        )
+        if not plan.golden:
+            # last chance: force local keep from selected clauses already attached
+            clauses = obj.get("_clauses") if isinstance(obj.get("_clauses"), list) else []
+            if clauses:
+                obj2 = _repair_keep_ids({"keep": []}, clauses)
+                obj2["_clauses"] = clauses
+                plan = llm_obj_to_timeline(
+                    obj2,
+                    lines,
+                    target_seconds=target_seconds,
+                    playback_speed=playback_speed,
+                )
+                obj = obj2
+        if plan.golden:
+            return plan, obj
+        cloud_err = "llm_plan_has_no_slots"
+    except Exception as e:
+        cloud_err = str(e)[:300]
+
+    # Cloud timed out / bad JSON / empty keep → local clothing plan (better than plain rules default)
+    plan, obj = plan_from_local_clauses(
+        lines, target_seconds=target_seconds, playback_speed=playback_speed
     )
-    plan = llm_obj_to_timeline(
-        obj,
-        lines,
-        target_seconds=target_seconds,
-        playback_speed=playback_speed,
-    )
-    if not plan.golden:
-        # last chance: force local keep from selected clauses already attached
-        clauses = obj.get("_clauses") if isinstance(obj.get("_clauses"), list) else []
-        if clauses:
-            obj = _repair_keep_ids({"keep": []}, clauses)
-            obj["_clauses"] = clauses
-            plan = llm_obj_to_timeline(
-                obj,
-                lines,
-                target_seconds=target_seconds,
-                playback_speed=playback_speed,
-            )
-    if not plan.golden:
-        raise RuntimeError("llm_plan_has_no_slots")
+    meta = dict(obj.get("_meta") or {})
+    meta["cloud_error"] = cloud_err
+    obj["_meta"] = meta
     return plan, obj

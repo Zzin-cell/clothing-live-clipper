@@ -71,6 +71,14 @@ def test_select_clauses_for_llm_caps_and_drops_bad():
     assert ("面料" in joined) or ("显瘦" in joined) or ("适合" in joined)
 
 
+def test_plan_from_local_clauses_not_empty():
+    lines = _many_lines(40)
+    plan, obj = lp.plan_from_local_clauses(lines, target_seconds=60, playback_speed=1.4)
+    assert plan.golden
+    assert plan.total_duration_ms > 0
+    assert obj.get("_meta", {}).get("model") == "local_clause_rank"
+
+
 def test_repair_keep_ids_from_mangled_model_output():
     lines = [
         {"utt_id": "u1", "text": "收腰版型显瘦遮肉", "t0_ms": 0, "t1_ms": 2000},

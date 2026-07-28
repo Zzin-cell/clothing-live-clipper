@@ -27,6 +27,9 @@ _lock = threading.Lock()
 _running: set[str] = set()
 # Whisper/CUDA model load+infer is safest serialized; other stages can run concurrent.
 _asr_lock = threading.Lock()
+# SiliconFlow plan calls also need serialization — parallel plan requests often
+# time out even when single-thread ping/plan works.
+_llm_lock = threading.Lock()
 # allow many jobs in parallel (non-ASR stages overlap)
 _MAX_CONCURRENT_JOBS = int(os.environ.get("CLIPPER_MAX_CONCURRENT_JOBS") or "4")
 
@@ -226,12 +229,14 @@ def process_job_dir(job_dir: Path) -> None:
                     58,
                     f"LLM 读取全量口播小句并提取主要内容（{len(llm_input)}句）…",
                 )
-                plan_llm, llm_obj = plan_from_asr_with_llm(
-                    llm_input,
-                    target_seconds=target,
-                    playback_speed=sp,
-                    settings=settings,
-                )
+                # Serialize cloud plan calls so concurrent jobs don't all timeout.
+                with _llm_lock:
+                    plan_llm, llm_obj = plan_from_asr_with_llm(
+                        llm_input,
+                        target_seconds=target,
+                        playback_speed=sp,
+                        settings=settings,
+                    )
                 llm_debug = {
                     "product_summary": llm_obj.get("product_summary"),
                     "main_points": llm_obj.get("main_points"),

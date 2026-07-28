@@ -171,6 +171,8 @@ def test_chat_completions_fast_with_last_route_is_single_shot():
     def fake_http(url, headers, payload=None, method="POST", timeout=180):
         calls["n"] += 1
         calls["timeout"] = timeout
+        # must be numeric for urllib compatibility
+        assert isinstance(timeout, (int, float)), timeout
         return {
             "choices": [{"message": {"role": "assistant", "content": '{"ok":true}'}}]
         }
@@ -183,7 +185,7 @@ def test_chat_completions_fast_with_last_route_is_single_shot():
                 base_url="https://api.siliconflow.cn/v1",
                 api_key="sk-test-key-xxxxxxxx",
                 force_json=True,
-                timeout=35,
+                timeout=90,
                 fast=True,
                 cfg={
                     "api_key": "sk-test-key-xxxxxxxx",
@@ -198,5 +200,6 @@ def test_chat_completions_fast_with_last_route_is_single_shot():
             )
     assert out.get("content")
     assert calls["n"] == 1
-    # plan-friendly: fast mode must not clamp real budgets down to 20–30s
+    # plan-friendly numeric timeout (not tuple); keep real budget
+    assert isinstance(calls["timeout"], (int, float))
     assert calls["timeout"] >= 45

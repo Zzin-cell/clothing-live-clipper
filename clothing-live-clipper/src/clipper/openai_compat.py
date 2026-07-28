@@ -91,11 +91,16 @@ def _http_json(
     if payload is not None:
         data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     req = urllib.request.Request(url, data=data, headers=headers, method=method)
-    # tuple timeout: (connect, read). Cloud plan generation can be slow; read must
-    # not die too early or jobs keep showing "connected but always timeout".
-    to = timeout
-    if not isinstance(to, tuple):
-        to = (min(15, max(5, int(timeout))), max(int(timeout), 1))
+    # IMPORTANT: urllib on this runtime expects a numeric timeout (float/int).
+    # Passing a (connect, read) tuple raised:
+    #   TypeError: 'tuple' object cannot be interpreted as an integer
+    # which made EVERY cloud plan call fail and fall back to short local plans.
+    try:
+        to = float(timeout) if not isinstance(timeout, (int, float)) else float(timeout)
+    except Exception:
+        to = 90.0
+    if to < 5:
+        to = 5.0
     try:
         with urllib.request.urlopen(req, timeout=to) as resp:
             raw = resp.read().decode("utf-8", errors="replace")

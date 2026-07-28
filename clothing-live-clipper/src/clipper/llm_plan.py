@@ -301,7 +301,10 @@ PLAN_TIMEOUT_S = 90
 _CONTROL_MARKERS = (
     "家人们", "扣1", "点关注", "晚上好", "欢迎", "公屏", "调试", "对焦", "链接", "小黄车", "加购",
 )
-_SIZE_MARKERS = ("尺码", "M码", "L码", "m码", "胸围", "腰围", "偏大", "偏小", "建议穿")
+_SIZE_MARKERS = (
+    "尺码", "M码", "L码", "m码", "S码", "s码", "XL", "胸围", "腰围", "偏大", "偏小", "建议穿",
+    "斤穿", "斤", "码穿",
+)
 # 价格/发货/物流：一律剔除（含开场福利话术、ASR 谐音/繁体）
 _PRICE_SHIP_MARKERS = (
     # 价格/促销（简繁 + 口语）
@@ -774,7 +777,18 @@ def _repair_keep_ids(obj: dict[str, Any], clauses: list[dict[str, Any]]) -> dict
             _add_clause(c, why="duration_fill", point=_bucket(tx) if _bucket(tx) != "other" else "卖点")
 
     # Always top-up hard toward ~60s final source budget
-    _fill_duration(min_n=16, target_ms=82_000)
+    # 1.4x playback → need ~78–90s source for ~56–64s final
+    _fill_duration(min_n=12, target_ms=90_000)
+    # Second pass: if still short, accept medium-value clothing lines too
+    if _total_ms() < 78_000:
+        for c in sorted(clauses, key=lambda x: int(x.get("t0_ms") or 0)):
+            if _total_ms() >= 88_000 or len(fixed) >= 28:
+                break
+            tx = str(c.get("text") or "")
+            if _value_score(tx) < 1:
+                continue
+            if any(k in tx for k in ("面料", "版型", "显瘦", "上身", "适合", "软", "垂", "透气", "遮肉", "穿")):
+                _add_clause(c, why="duration_fill_2", point=_bucket(tx) if _bucket(tx) != "other" else "卖点")
 
     # chronological for natural watch order
     fixed.sort(key=lambda x: int(x.get("t0_ms") or 0))

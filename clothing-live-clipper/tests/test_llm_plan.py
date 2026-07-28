@@ -77,6 +77,47 @@ def test_plan_from_local_clauses_not_empty():
     assert plan.golden
     assert plan.total_duration_ms > 0
     assert obj.get("_meta", {}).get("model") == "local_clause_rank"
+    blob = " ".join(s.text for s in plan.golden)
+    # core product focus should surface when present in input
+    assert ("面料" in blob) or ("显瘦" in blob) or ("版型" in blob)
+    assert ("适合" in blob) or ("梨形" in blob) or ("小个子" in blob) or ("微胖" in blob)
+    # ~60s final needs enough source @1.4x (~>42s source preferred when material exists)
+    assert plan.total_duration_ms >= 20_000
+
+
+def test_repair_forces_coverage_and_duration():
+    lines = []
+    samples = [
+        "家人们晚上好扣1点关注",
+        "这件收腰版型上身显瘦",
+        "面料超级软还不透气亲肤",
+        "黄黑皮小个子也能穿显白",
+        "建议穿M码偏大",
+        "今天199块包邮发货",
+        "垂感很好日常通勤合适",
+        "遮肉不显胯梨形友好",
+    ]
+    for i in range(30):
+        lines.append(
+            {
+                "utt_id": f"u{i}",
+                "text": samples[i % len(samples)] if i < 16 else f"补充穿着体验很舒服不闷{i}",
+                "t0_ms": i * 3000,
+                "t1_ms": i * 3000 + 2800,
+            }
+        )
+    clauses = expand_lines_to_clauses(lines)
+    obj = lp._repair_keep_ids({"keep": [{"id": "bad000", "text": "xxx"}]}, clauses)
+    keep_text = " ".join(k["text"] for k in obj["keep"])
+    assert "版型" in keep_text or "显瘦" in keep_text or "收腰" in keep_text
+    assert "面料" in keep_text or "软" in keep_text
+    assert "小个子" in keep_text or "黄黑皮" in keep_text or "梨形" in keep_text or "适合" in keep_text
+    assert "199" not in keep_text and "包邮" not in keep_text and "扣1" not in keep_text
+    total = sum(int(k["t1_ms"]) - int(k["t0_ms"]) for k in obj["keep"])
+    assert total >= 40_000
+    plan = llm_obj_to_timeline({**obj, "_clauses": clauses}, lines, target_seconds=60, playback_speed=1.4)
+    assert plan.golden
+    assert plan.total_duration_ms >= 35_000
 
 
 def test_repair_keep_ids_from_mangled_model_output():
@@ -146,11 +187,13 @@ def test_price_shipping_variants_dropped():
 
 def test_expand_lines_to_clauses_splits_full_asr():
     clauses = expand_lines_to_clauses(_lines())
-    assert len(clauses) >= len(_lines())
-    # multi-clause line becomes multiple units
+    # Keep parent windows when moderate-length — need enough duration for ~60s final
+    assert len(clauses) >= 1
     texts = " ".join(c["text"] for c in clauses)
     assert "超级软" in texts and "不透" in texts
     assert all(c["t1_ms"] > c["t0_ms"] for c in clauses)
+    # short sample should not explode into dozens of crumbs
+    assert len(clauses) <= len(_lines()) + 4
 
 
 def test_llm_obj_to_timeline_orders_and_clamps():
@@ -199,10 +242,12 @@ def test_llm_obj_to_timeline_orders_and_clamps():
     assert any("llm_logic_plan" in w for w in plan.warnings)
 
 
-def test_llm_empty_keep_yields_empty_plan_flag():
+def test_llm_empty_keep_gets_duration_fill_from_lines():
+    # empty keep should no longer hard-fail to zero; timeline fills sell lines toward ~60s
     plan = llm_obj_to_timeline({"keep": []}, _lines(), target_seconds=60, playback_speed=1.4)
-    assert plan.golden == []
-    assert any("llm_empty_keep" in w for w in plan.warnings)
+    assert plan.golden
+    blob = " ".join(s.text for s in plan.golden)
+    assert ("面料" in blob) or ("显瘦" in blob) or ("版型" in blob)
 
 
 def test_llm_completes_incomplete_tail_instead_of_hard_cutoff():

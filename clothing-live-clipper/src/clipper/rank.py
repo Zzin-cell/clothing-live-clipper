@@ -796,7 +796,10 @@ def _logic_order_key(c: Clip) -> tuple:
         stage = 2
     elif any(
         w in text
-        for w in ("适合", "适用", "人群", "微胖", "梨形", "小个子", "大码", "通勤", "日常", "显白")
+        for w in (
+            "适合", "适用", "人群", "微胖", "梨形", "小个子", "大码", "通勤", "日常", "显白",
+            "黄黑皮", "黑皮", "白皮", "皮肤", "姐妹可以穿", "胯宽", "肚子",
+        )
     ):
         stage = 3
     elif ClaimType.DETAIL in c.claim_types or any(
@@ -930,9 +933,13 @@ def build_timeline_plan(
             if not cov["fabric"] and any(w in text for w in ("面料", "布料", "材质", "垂感", "透气", "不透", "软")):
                 cover_boost += 28.0
             if not cov["audience"] and any(
-                w in text for w in ("适合", "适用", "微胖", "梨形", "小个子", "大码", "通勤", "日常", "显白")
+                w in text
+                for w in (
+                    "适合", "适用", "微胖", "梨形", "小个子", "大码", "通勤", "日常", "显白",
+                    "黄黑皮", "黑皮", "白皮", "皮肤", "姐妹可以穿", "胯宽", "肚子",
+                )
             ):
-                cover_boost += 28.0
+                cover_boost += 32.0
             key = (
                 c.score
                 + learn

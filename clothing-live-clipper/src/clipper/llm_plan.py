@@ -217,27 +217,57 @@ def expand_lines_to_clauses(
     max_clauses: int = 400,
 ) -> list[dict[str, Any]]:
     """
-    Expand full ASR transcript into 小句 units for LLM.
-    Each clause keeps proportional time within parent utterance.
+    Expand ASR into planning units.
+
+    Important: do NOT hard-split every comma into ~2s crumbs — that makes it
+    impossible to hit ~60s final even with many keep items. Keep parent windows
+    when reasonably sized; only split very long utterances into chunky pieces.
     """
     parents = _normalize_lines(raw_lines)
     out: list[dict[str, Any]] = []
     cid = 0
     for p in parents:
+        if cid >= max_clauses:
+            break
         text = str(p.get("text") or "").strip()
         t0 = int(p["t0_ms"])
-        t1 = int(p["t1_ms"])
-        clauses = split_clauses(text)
-        if not clauses:
-            # keep original if cannot split
-            clauses = [text]
-        # proportional windows
-        n = max(1, len(clauses))
-        span = max(300, t1 - t0)
-        # ensure each clause has at least ~350ms when possible
-        step = max(350, span // n)
+        t1 = max(t0 + 300, int(p["t1_ms"]))
+        span = t1 - t0
+        # Keep medium windows intact for duration + sell density
+        if span <= 9000 or len(text) <= 42:
+            out.append(
+                {
+                    "id": f"c{cid:05d}",
+                    "utt_id": f"c{cid:05d}",
+                    "parent_id": p["id"],
+                    "text": text,
+                    "t0_ms": t0,
+                    "t1_ms": t1,
+                }
+            )
+            cid += 1
+            continue
+        parts = split_clauses(text) or [text]
+        # merge tiny split parts into larger chunks (~8–12 chars min)
+        merged_parts: list[str] = []
+        buf = ""
+        for part in parts:
+            if not buf:
+                buf = part
+            elif len(buf) < 10:
+                buf = f"{buf}{part}"
+            else:
+                merged_parts.append(buf)
+                buf = part
+        if buf:
+            merged_parts.append(buf)
+        if not merged_parts:
+            merged_parts = [text]
+        n = max(1, len(merged_parts))
+        # each piece at least ~1.2s when possible
+        step = max(1200, span // n)
         cur = t0
-        for j, ctext in enumerate(clauses):
+        for j, ctext in enumerate(merged_parts):
             if cid >= max_clauses:
                 return out
             if j == n - 1:
@@ -245,7 +275,7 @@ def expand_lines_to_clauses(
             else:
                 ct1 = min(t1, cur + step)
             if ct1 <= cur:
-                ct1 = min(t1, cur + 350)
+                ct1 = min(t1, cur + 1200)
             out.append(
                 {
                     "id": f"c{cid:05d}",
@@ -253,7 +283,7 @@ def expand_lines_to_clauses(
                     "parent_id": p["id"],
                     "text": ctext,
                     "t0_ms": cur,
-                    "t1_ms": max(cur + 300, ct1),
+                    "t1_ms": max(cur + 500, ct1),
                 }
             )
             cid += 1
@@ -263,9 +293,9 @@ def expand_lines_to_clauses(
 
 # Latency-first caps (SiliconFlow lightweight path)
 # Smaller selected set → faster/more reliable SiliconFlow responses
-LIGHT_MAX_CLAUSES = 50
-CLAUSE_TEXT_MAX = 64
-PLAN_MAX_TOKENS = 1024
+LIGHT_MAX_CLAUSES = 70
+CLAUSE_TEXT_MAX = 72
+PLAN_MAX_TOKENS = 1200
 PLAN_TIMEOUT_S = 90
 
 _CONTROL_MARKERS = (
@@ -297,7 +327,8 @@ _FABRIC_MARKERS = (
 )
 _AUDIENCE_MARKERS = (
     "适用", "适合", "人群", "微胖", "梨形", "小个子", "大码", "胖妹妹", "通勤",
-    "日常", "上班", "夏天", "秋冬", "显白",
+    "日常", "上班", "夏天", "秋冬", "显白", "黄黑皮", "黑皮", "白皮", "皮肤",
+    "姐妹可以穿", "谁穿", "什么人", "胯宽", "肚子", "比例",
 )
 _VALUE_MARKERS = _FIT_MARKERS + _FABRIC_MARKERS + _AUDIENCE_MARKERS + (
     "细节", "蕾丝", "刺绣", "拼接", "对比", "舒服", "好穿",
@@ -651,50 +682,110 @@ def _repair_keep_ids(obj: dict[str, Any], clauses: list[dict[str, Any]]) -> dict
         )
 
     repaired = False
-    def _fill_from_local(min_n: int = 12, target_ms: int = 70_000) -> None:
-        nonlocal repaired
-        ranked = sorted(clauses, key=lambda c: _value_score(str(c.get("text") or "")), reverse=True)
-        total = sum(max(0, int(x.get("t1_ms") or 0) - int(x.get("t0_ms") or 0)) for x in fixed)
-        for c in ranked:
-            if len(fixed) >= max(min_n, 18) and total >= target_ms:
-                break
-            sid = str(c.get("id"))
-            if sid in used:
-                continue
-            tx = str(c.get("text") or "")
-            if _is_control(tx) or _is_size(tx) or _is_price_or_shipping(tx):
-                continue
-            if _value_score(tx) < 3:
-                continue
-            used.add(sid)
-            fixed.append(
-                {
-                    "id": sid,
-                    "t0_ms": int(c["t0_ms"]),
-                    "t1_ms": int(c["t1_ms"]),
-                    "text": tx,
-                    "why": "local_fill_after_bad_ids",
-                    "point": "卖点",
-                    "complete": True,
-                }
-            )
-            total += max(300, int(c["t1_ms"]) - int(c["t0_ms"]))
-            repaired = True
 
-    if len(fixed) < 3:
-        # auto-fill from local value ranking to avoid empty LLM plan
-        _fill_from_local(min_n=12, target_ms=70_000)
-    else:
-        # LLM returned some keep but often too short for ~60s final — top up
-        _fill_from_local(min_n=14, target_ms=75_000)
+    def _bucket(tx: str) -> str:
+        if any(k in tx for k in _FIT_MARKERS):
+            return "fit"
+        if any(k in tx for k in _FABRIC_MARKERS):
+            return "fabric"
+        if any(k in tx for k in _AUDIENCE_MARKERS):
+            return "audience"
+        return "other"
+
+    def _total_ms() -> int:
+        return sum(max(0, int(x.get("t1_ms") or 0) - int(x.get("t0_ms") or 0)) for x in fixed)
+
+    def _coverage() -> dict[str, bool]:
+        blob = " ".join(str(x.get("text") or "") for x in fixed)
+        return {
+            "fit": any(k in blob for k in _FIT_MARKERS),
+            "fabric": any(k in blob for k in _FABRIC_MARKERS),
+            "audience": any(k in blob for k in _AUDIENCE_MARKERS),
+        }
+
+    def _add_clause(c: dict[str, Any], *, why: str, point: str) -> bool:
+        nonlocal repaired
+        sid = str(c.get("id"))
+        if sid in used:
+            return False
+        tx = str(c.get("text") or "")
+        if not tx or _is_control(tx) or _is_size(tx) or _is_price_or_shipping(tx):
+            return False
+        used.add(sid)
+        fixed.append(
+            {
+                "id": sid,
+                "t0_ms": int(c["t0_ms"]),
+                "t1_ms": int(c["t1_ms"]),
+                "text": tx,
+                "why": why,
+                "point": point,
+                "complete": True,
+            }
+        )
+        repaired = True
+        return True
+
+    # 1) Force-cover fit / fabric / audience whenever ASR has them
+    for need, markers, point in (
+        ("fit", _FIT_MARKERS, "版型"),
+        ("fabric", _FABRIC_MARKERS, "面料"),
+        ("audience", _AUDIENCE_MARKERS, "适用人群"),
+    ):
+        cov = _coverage()
+        if cov.get(need):
+            continue
+        cands = [
+            c
+            for c in clauses
+            if str(c.get("id")) not in used
+            and any(k in str(c.get("text") or "") for k in markers)
+            and not _is_control(str(c.get("text") or ""))
+            and not _is_size(str(c.get("text") or ""))
+            and not _is_price_or_shipping(str(c.get("text") or ""))
+        ]
+        cands.sort(key=lambda c: _value_score(str(c.get("text") or "")), reverse=True)
+        for c in cands[:2]:
+            _add_clause(c, why=f"force_cover_{need}", point=point)
+
+    # 2) Fill duration toward ~60s final (source ≈ 75–84s @1.4x)
+    # Prefer clauses that close coverage gaps; then high-value others.
+    def _fill_duration(min_n: int, target_ms: int) -> None:
+        def rank_key(c: dict[str, Any]) -> tuple:
+            tx = str(c.get("text") or "")
+            b = _bucket(tx)
+            cov = _coverage()
+            gap = 0
+            if b == "fit" and not cov["fit"]:
+                gap = 3
+            elif b == "fabric" and not cov["fabric"]:
+                gap = 3
+            elif b == "audience" and not cov["audience"]:
+                gap = 3
+            return (gap, _value_score(tx))
+
+        ranked = sorted(clauses, key=rank_key, reverse=True)
+        for c in ranked:
+            if len(fixed) >= max(min_n, 24) and _total_ms() >= target_ms:
+                break
+            tx = str(c.get("text") or "")
+            if _value_score(tx) < 2 and _bucket(tx) == "other":
+                continue
+            _add_clause(c, why="duration_fill", point=_bucket(tx) if _bucket(tx) != "other" else "卖点")
+
+    # Always top-up hard toward ~60s final source budget
+    _fill_duration(min_n=16, target_ms=82_000)
 
     # chronological for natural watch order
     fixed.sort(key=lambda x: int(x.get("t0_ms") or 0))
     obj["keep"] = fixed
+    cov_final = _coverage()
+    obj["_coverage"] = cov_final
     if repaired or len(fixed) != len(keep):
         obj["_keep_repaired"] = True
         obj["_keep_raw_n"] = len(keep)
         obj["_keep_fixed_n"] = len(fixed)
+        obj["_keep_total_ms"] = _total_ms()
     return obj
 
 
@@ -833,9 +924,8 @@ def llm_obj_to_timeline(
             return
         # always take full clause window first (avoid mid-clause cutoff)
         t0 = int(src["t0_ms"])
-        t1 = max(t0 + 300, int(src["t1_ms"]))
-        # small natural pad, not truncation
-        t1 = t1 + 120
+        t1 = max(t0 + 500, int(src["t1_ms"]))
+        # do NOT pad tails (padding caused black/silent gaps)
         slots.append(
             PlanSlot(
                 clip_id=f"llm_{uid}_{len(slots)}",
@@ -878,10 +968,11 @@ def llm_obj_to_timeline(
                     if not _looks_incomplete_text(ntext):
                         break
 
-    # duration trim/pad toward target source length, but NEVER drop the closing complete clause first
+    # duration trim toward target source length for ~60s final after speed
     sp = playback_speed if playback_speed and playback_speed > 0 else 1.4
     aim = int(round(target_seconds * 1000 * sp))
-    min_ms = int(aim * 0.82)  # allow shorter if complete
+    # Prefer filling near aim; only allow mildly short when content truly insufficient
+    min_ms = int(aim * 0.90)
     max_ms = int(aim * 1.12)
 
     def total_ms() -> int:
@@ -953,16 +1044,38 @@ def llm_obj_to_timeline(
         warnings.append("policy:main_points_first")
     if not slots:
         warnings.append("llm_empty_keep")
-    tot = total_ms()
-    if tot < min_ms:
-        # Prefer shorter complete cut over padding into silence/black after speech.
-        warnings.append(f"short_but_complete_ms={tot}")
+    # If still short, pull more sell clauses (no silent pad)
+    guard = 0
+    while total_ms() < min_ms and guard < 30:
+        guard += 1
+        added = False
+        for u in ordered:
+            uid = str(u.get("id"))
+            if uid in used_ids:
+                continue
+            tx = str(u.get("text") or "")
+            if _is_control(tx) or _is_size(tx) or _is_price_or_shipping(tx):
+                continue
+            if _value_score(tx) < 2:
+                continue
+            before = total_ms()
+            _append_from_src(uid, u, why="timeline_duration_fill", score=35)
+            if total_ms() > before:
+                added = True
+                break
+        if not added:
+            break
+    if total_ms() < min_ms:
+        warnings.append(f"short_but_complete_ms={total_ms()}")
+    if llm_obj.get("_coverage"):
+        warnings.append(f"coverage:{llm_obj.get('_coverage')}")
 
     # final guard: never end with incomplete text
     if slots and _looks_incomplete_text(slots[-1].text) and len(slots) > 1:
         slots.pop()
         warnings.append("dropped_incomplete_tail")
 
+    # Keep rough narrative order preference: fit/fabric/audience mixed but opener first already from keep
     return TimelinePlan(
         target_duration_s=target_seconds,
         golden=slots,

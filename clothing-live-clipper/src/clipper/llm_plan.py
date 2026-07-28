@@ -37,11 +37,12 @@ SYSTEM_PROMPT = """你是服装带货短视频剪辑导演（抖音/快手完播
 ====================
 1) 视觉冲击型：全身穿搭成品、显瘦对比、面料特写、色差/黑白对比
 2) 痛点直击型：一句话戳穿搭痛点（微胖显壮、小个子压身高、显廉价、夏天闷汗、遮肉遮胯）
-3) 福利悬念型：开场极短低价/限时限量/现货清仓/专柜平替（最多 1 句，禁止后面反复讲价）
+3) 效果悬念型：一句点出穿上效果/适用感（禁止谈价格/发货）
 
 开场避雷（一律 drop）：
 - 主播打招呼、晚上好、家人们、调试镜头、对焦、收音
 - 闲聊、重复开场白、欢迎语、扣1、点关注、公屏互动
+- 价格/发货/物流/促销（任何优惠、包邮、几天发货、现货预售等）
 
 ====================
 二、快节奏无冗余（提升完播）
@@ -54,23 +55,26 @@ SYSTEM_PROMPT = """你是服装带货短视频剪辑导演（抖音/快手完播
 ====================
 三、内容优先级（从高到低）
 ====================
-上身效果 ＞ 面料 ＞ 价格
-- 上身效果：显瘦、收腰、版型、长短、遮肉、适配小个子/梨形
-- 面料：软、垂感、透气、不闷、冰凉、抗皱、不透
-- 价格：仅可作开场悬念，正文少讲或不讲；禁止尺码报数长段
+上身效果 ＞ 细节(含面料/适用人群) ＞ 对比体验
+- 上身效果：显瘦、收腰、版型、长短、遮肉、梨形/小个子友好
+- 细节可包含：
+  · 面料：软、垂感、透气、不闷、冰凉、抗皱、不透、亲肤
+  · 适用人群：微胖/梨形/小个子/大码友好/通勤/日常/季节场景
+  · 工艺细点：肌理、刺绣、扣子、拉链、走线、领口、腰线
+- 严禁：价格、发货、物流、包邮、预售、尺码报数
 
 口播若提到画面类型，优先保留对应信息：
-- 全身/全景：版型、长短、显瘦、适配
+- 全身/全景：版型、长短、显瘦、适配人群
 - 半身/近景：领口、肩线、腰线、遮副乳
-- 细节特写：肌理、刺绣、扣子、拉链、走线、透气网眼
+- 细节特写：面料肌理、刺绣、扣子、拉链、走线、透气网眼
 - 对比：穿前穿后、宽松显瘦、两色上身
 
 ====================
 四、成片顺序（严格按此组织 keep 顺序）
 ====================
-1) 0–3s 钩子（视觉冲击 / 痛点 / 福利悬念 三选一）
+1) 0–3s 钩子（视觉冲击 / 痛点 / 效果悬念 三选一；禁止价格福利）
 2) 版型/上身效果讲解
-3) 细节特写对应口播
+3) 细节（面料/适用人群/工艺）
 4) 对比效果 / 穿着体验证明
 5) 必要时极短收束（不再寒暄）
 
@@ -93,21 +97,21 @@ SYSTEM_PROMPT = """你是服装带货短视频剪辑导演（抖音/快手完播
 1) 输入是全量小句；先提炼 main_points，再从中选 keep 并重排
 2) 只能使用输入小句 id；优先整句采用该小句完整 t0~t1，不要随意砍半句
 3) 总源片时长尽量接近 target_source_ms；若无法完整讲完，宁可少 5–8 秒，也要完整
-4) 删除：尺码建议、长段砍价、直播控场、幻觉垃圾（对对对、xy）
+4) 删除：尺码建议、任何价格/发货/物流、直播控场、幻觉垃圾（对对对、xy）
 5) keep 按成片播放顺序；每条写 why 与 point；最后 1–2 条必须是收束，不能是未完成句
 6) 只输出严格 JSON，不要 markdown
 
 输出 JSON schema:
 {
   "product_summary": "一句话主卖点",
-  "hook_type": "visual|pain|welfare",
-  "main_points": ["主卖点1","版型点","体验点","细节点"],
+  "hook_type": "visual|pain|effect",
+  "main_points": ["主卖点1","版型点","面料/适用人群","细节点"],
   "logic": ["钩子","版型上身","细节","对比体验","收束"],
   "keep": [
     {"id":"c00012","t0_ms":12300,"t1_ms":15800,"text":"...","why":"3秒痛点钩子","point":"显瘦","complete":true}
   ],
   "drop_ids": ["c00001","c00002"],
-  "notes": "如何保证完整逻辑、删了哪些半句/重复"
+  "notes": "如何保证完整逻辑、删了哪些半句/价格发货"
 }
 """
 
@@ -116,15 +120,15 @@ SYSTEM_PROMPT_LIGHT = """你是服装带货短视频剪辑导演。输入为口�
 任务：先提炼 main_points，再从输入中选 keep 并按成片顺序重排。只使用输入 id，禁止编造时间。
 
 硬规则：
-1) 开场 0-3s 仅 1 句最强钩子：视觉冲击/痛点/福利悬念 三选一
-2) 删除：打招呼/控场/扣1/闲聊/调试、尺码建议、长段讲价、重复话术只留最优一句
-3) 优先：上身效果>面料>价格(价格最多开场一句)
-4) 顺序：钩子→版型上身→细节→对比/体验→自然收束；句子必须语义完整，禁止半截
-5) 总源片时长接近 target_source_ms；宁可略短也要完整
+1) 开场 0-3s 仅 1 句最强钩子：视觉冲击/痛点/效果悬念（禁止价格福利）
+2) 删除：打招呼/控场/扣1/闲聊/调试、尺码建议、任何价格/发货/物流/促销、重复话术只留最优一句
+3) 优先：上身效果 > 细节；细节可含面料、适用人群、工艺细点
+4) 顺序：钩子→版型上身→细节(面料/适用人群)→对比/体验→自然收束；句子必须语义完整
+5) 总源片时长接近 target_source_ms；宁可略短也要完整，禁止凑静音尾巴
 6) 只输出严格 JSON，不要 markdown
 
 JSON:
-{"product_summary":"...","hook_type":"visual|pain|welfare","main_points":["..."],"logic":["钩子","版型上身","细节","对比体验","收束"],"keep":[{"id":"c00012","t0_ms":0,"t1_ms":1,"text":"...","why":"...","point":"...","complete":true}],"drop_ids":["c00001"],"notes":"..."}
+{"product_summary":"...","hook_type":"visual|pain|effect","main_points":["..."],"logic":["钩子","版型上身","细节","对比体验","收束"],"keep":[{"id":"c00012","t0_ms":0,"t1_ms":1,"text":"...","why":"...","point":"...","complete":true}],"drop_ids":["c00001"],"notes":"..."}
 """
 
 
@@ -251,9 +255,17 @@ _CONTROL_MARKERS = (
     "家人们", "扣1", "点关注", "晚上好", "欢迎", "公屏", "调试", "对焦", "链接", "小黄车", "加购",
 )
 _SIZE_MARKERS = ("尺码", "M码", "L码", "m码", "胸围", "腰围", "偏大", "偏小", "建议穿")
+# 价格/发货/物流：一律剔除（含开场福利话术）
+_PRICE_SHIP_MARKERS = (
+    "价格", "价钱", "多少钱", "块钱", "元", "券后", "只要", "包邮", "秒杀", "活动价",
+    "原价", "现价", "折扣", "满减", "优惠", "特价", "划算", "便宜", "性价比",
+    "发货", "现货", "预售", "几天发", "今日发", "次日达", "物流", "快递", "顺丰",
+    "补货", "断码", "拍下", "下单", "付款",
+)
 _VALUE_MARKERS = (
     "面料", "显瘦", "版型", "收腰", "不透", "透气", "舒服", "垂感", "冰凉", "不闷",
-    "细节", "蕾丝", "刺绣", "上身", "遮肉", "梨形", "小个子",
+    "细节", "蕾丝", "刺绣", "上身", "遮肉", "梨形", "小个子", "微胖", "大码",
+    "通勤", "日常", "亲肤", "适用", "适合", "人群",
 )
 
 
@@ -265,6 +277,18 @@ def _is_size(text: str) -> bool:
     return any(x in text for x in _SIZE_MARKERS)
 
 
+def _is_price_or_shipping(text: str) -> bool:
+    t = text or ""
+    if any(x in t for x in _PRICE_SHIP_MARKERS):
+        return True
+    # bare price numbers like 199 / 99块 / ¥59
+    if re.search(r"(¥|￥)\s*\d+", t):
+        return True
+    if re.search(r"\d+\s*(块|元|块钱)", t):
+        return True
+    return False
+
+
 def _value_score(text: str) -> int:
     t = text or ""
     s = 0
@@ -273,7 +297,7 @@ def _value_score(text: str) -> int:
             s += 3
     if 4 <= len(t) <= 40:
         s += 1
-    if _is_control(t) or _is_size(t):
+    if _is_control(t) or _is_size(t) or _is_price_or_shipping(t):
         s -= 50
     if len(t) < 2:
         s -= 20
@@ -291,6 +315,7 @@ def select_clauses_for_llm(
         "clauses_sent": 0,
         "dropped_control": 0,
         "dropped_size": 0,
+        "dropped_price_ship": 0,
         "dropped_dup": 0,
         "filled_cover": 0,
     }
@@ -308,6 +333,9 @@ def select_clauses_for_llm(
             continue
         if _is_size(text):
             stats["dropped_size"] += 1
+            continue
+        if _is_price_or_shipping(text):
+            stats["dropped_price_ship"] += 1
             continue
         norm = re.sub(r"\s+", "", text)[:24]
         if norm in seen_norm:
@@ -329,7 +357,7 @@ def select_clauses_for_llm(
             if cid in top_ids:
                 continue
             text = str(c.get("text") or "")
-            if _is_control(text) or _is_size(text):
+            if _is_control(text) or _is_size(text) or _is_price_or_shipping(text):
                 continue
             top.append(c)
             top_ids.add(cid)
@@ -399,7 +427,12 @@ def call_llm_for_plan(
         "speed": sp,
         "target_src_ms": target_source_ms,
         "n": len(compact),
-        "rules": "去控场/尺码; 钩子→版型→细节→体验→收束; 只用输入id; 完整句",
+        "rules": (
+            "去控场/尺码/价格/发货;"
+            "细节可含面料与适用人群;"
+            "钩子→版型→细节→体验→收束;"
+            "只用输入id;完整句;禁止价格福利开场"
+        ),
         "clauses": compact,
     }
     hints = _learning_hints()
@@ -537,6 +570,9 @@ def llm_obj_to_timeline(
         if any(x in text for x in ("尺码", "M码", "L码", "m码", "胸围", "腰围", "偏大", "偏小")):
             return
         if any(x in text for x in ("加购", "小黄车", "上链接", "点链接")):
+            return
+        # hard drop price / shipping even if LLM kept them
+        if _is_price_or_shipping(text):
             return
         # always take full clause window first (avoid mid-clause cutoff)
         t0 = int(src["t0_ms"])

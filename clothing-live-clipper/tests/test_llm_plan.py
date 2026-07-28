@@ -32,6 +32,10 @@ def _many_lines(n: int = 80):
             text = "这件面料超级软还不透"
         elif i % 10 == 3:
             text = "收腰版型梨形显瘦"
+        elif i % 10 == 4:
+            text = "今天199块包邮当天发货"
+        elif i % 10 == 5:
+            text = "微胖小个子也适合通勤日常"
         else:
             text = f"补充一句穿着体验很舒服{i}"
         rows.append(
@@ -56,11 +60,15 @@ def test_select_clauses_for_llm_caps_and_drops_bad():
     # no invented ids
     raw_ids = {c["id"] for c in clauses}
     assert all(c["id"] in raw_ids for c in selected)
-    # size / control should be rare or zero in selection
+    # size / control / price-ship should be rare or zero in selection
     joined = " ".join(c["text"] for c in selected)
     assert "M码" not in joined
     assert "扣1" not in joined
+    assert "包邮" not in joined and "发货" not in joined
     assert stats.get("dropped_size", 0) >= 1 or stats.get("dropped_control", 0) >= 1
+    assert stats.get("dropped_price_ship", 0) >= 1
+    # audience / fabric details may be kept
+    assert ("面料" in joined) or ("显瘦" in joined) or ("适合" in joined)
 
 
 def test_expand_lines_to_clauses_splits_full_asr():
@@ -153,6 +161,10 @@ def test_system_prompt_light_is_much_shorter():
     assert len(lp.SYSTEM_PROMPT_LIGHT) < 2200
     assert "JSON" in lp.SYSTEM_PROMPT_LIGHT or "json" in lp.SYSTEM_PROMPT_LIGHT.lower()
     assert "尺码" in lp.SYSTEM_PROMPT_LIGHT
+    # price/shipping removed; fabric/audience detail allowed
+    assert "发货" in lp.SYSTEM_PROMPT_LIGHT or "价格" in lp.SYSTEM_PROMPT_LIGHT
+    assert "适用人群" in lp.SYSTEM_PROMPT_LIGHT or "面料" in lp.SYSTEM_PROMPT_LIGHT
+    assert "禁止价格" in lp.SYSTEM_PROMPT_LIGHT or "价格" in lp.SYSTEM_PROMPT_LIGHT
 
 
 def test_extract_json_obj_strips_think_and_fences():
@@ -214,4 +226,6 @@ def test_call_llm_for_plan_uses_trim_and_lower_tokens(monkeypatch):
     user_content = msgs[1]["content"]
     assert "已筛选" in user_content
     assert "all_clauses" not in user_content
+    assert "价格" in user_content or "发货" in user_content
+    assert "适用人群" in user_content or "面料" in user_content
     assert obj.get("_meta", {}).get("clauses_sent", 10**9) <= lp.LIGHT_MAX_CLAUSES

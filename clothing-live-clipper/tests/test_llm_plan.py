@@ -71,6 +71,33 @@ def test_select_clauses_for_llm_caps_and_drops_bad():
     assert ("面料" in joined) or ("显瘦" in joined) or ("适合" in joined)
 
 
+def test_repair_keep_ids_from_mangled_model_output():
+    lines = [
+        {"utt_id": "u1", "text": "收腰版型显瘦遮肉", "t0_ms": 0, "t1_ms": 2000},
+        {"utt_id": "u2", "text": "面料超级软还不透", "t0_ms": 2000, "t1_ms": 4000},
+        {"utt_id": "u3", "text": "小个子梨形都适合", "t0_ms": 4000, "t1_ms": 6000},
+    ]
+    clauses = expand_lines_to_clauses(lines)
+    bad = {
+        "main_points": ["版型", "面料", "适用人群"],
+        "keep": [
+            {
+                "id": "c0000000000000000000000000000001",
+                "text": "收腰版型显瘦遮肉",
+            },
+            {"id": "xxx", "text": "面料超级软还不透"},
+            {"id": "nope", "text": "完全对不上的句子"},
+        ],
+    }
+    fixed = lp._repair_keep_ids(bad, clauses)
+    ids = [k["id"] for k in fixed["keep"]]
+    assert ids
+    assert all(i in {c["id"] for c in clauses} for i in ids)
+    assert any("面料" in k["text"] or "版型" in k["text"] for k in fixed["keep"])
+    plan = llm_obj_to_timeline({**fixed, "_clauses": clauses}, lines, target_seconds=60, playback_speed=1.0)
+    assert plan.golden
+
+
 def test_price_shipping_variants_dropped():
     from clipper.llm_plan import _is_price_or_shipping, llm_obj_to_timeline
 

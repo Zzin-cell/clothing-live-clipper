@@ -143,7 +143,7 @@ SYSTEM_PROMPT_LIGHT = """你是服装短视频剪辑导演（成品要像短视�
 顺序：0–3s 钩子(视觉/痛点/效果，禁价格) → 版型上身 → 面料/细节 → 适用人群 → 体验对比 → 自然收束
 信息密度要高，像成片口播；完整表达优先于硬凑时长（可短 3–8 秒，禁静音尾巴）
 
-JSON:
+JSON（id 必须逐字复制输入 clauses 的 id，形如 c00012，禁止乱造长串数字）：
 {"product_summary":"...","hook_type":"visual|pain|effect","main_points":["版型…","面料…","适用人群…"],"logic":["钩子","版型上身","面料细节","适用人群","体验收束"],"keep":[{"id":"c00012","t0_ms":0,"t1_ms":1,"text":"...","why":"...","point":"版型|面料|人群|细节|体验","complete":true}],"drop_ids":["c00001"],"notes":"..."}
 """
 
@@ -521,6 +521,7 @@ def call_llm_for_plan(
 
     content = out.get("content") or ""
     obj = _extract_json_obj(content)
+    obj = _repair_keep_ids(obj, clauses)
     obj["_meta"] = {
         "model": out.get("model") or model,
         "base_url": out.get("base_url") or base,
@@ -539,10 +540,126 @@ def call_llm_for_plan(
         },
         "auth_source": "user_ui",
         "client": "openai_compat_full",
+        "latency_ms": out.get("latency_ms"),
     }
     # selected clauses for id resolution; raw for optional neighbor completion
     obj["_clauses"] = clauses
     obj["_clauses_raw"] = clauses_all
+    return obj
+
+
+def _repair_keep_ids(obj: dict[str, Any], clauses: list[dict[str, Any]]) -> dict[str, Any]:
+    """
+    Small models often invent broken keep ids (e.g. c0000000...1).
+    Remap by text/time; if still empty, build a safe keep from top clothing clauses
+    so we don't fall back to pure rules with a "connected" LLM.
+    """
+    if not isinstance(obj, dict):
+        obj = {}
+    keep = obj.get("keep")
+    if not isinstance(keep, list):
+        keep = []
+    by_id = {str(c.get("id")): c for c in clauses}
+    fixed: list[dict[str, Any]] = []
+    used: set[str] = set()
+
+    def match_clause(item: dict[str, Any]) -> dict[str, Any] | None:
+        uid = str(item.get("id") or item.get("utt_id") or "").strip()
+        if uid in by_id:
+            return by_id[uid]
+        m = re.search(r"c0*(\d{1,5})", uid, flags=re.I)
+        if m:
+            cand = f"c{int(m.group(1)):05d}"
+            if cand in by_id:
+                return by_id[cand]
+        text_i = re.sub(r"\s+", "", str(item.get("text") or ""))
+        if text_i:
+            for n in (14, 10, 8, 6):
+                if len(text_i) < n:
+                    continue
+                needle = text_i[:n]
+                for c in clauses:
+                    ut = re.sub(r"\s+", "", str(c.get("text") or ""))
+                    if needle in ut or ut[:n] in text_i:
+                        return c
+        try:
+            t0 = int(item.get("t0_ms") or item.get("t0") or -1)
+            t1 = int(item.get("t1_ms") or item.get("t1") or -1)
+        except Exception:
+            t0, t1 = -1, -1
+        if t0 >= 0 and t1 > t0:
+            best, best_ov = None, 0
+            for c in clauses:
+                u0, u1 = int(c["t0_ms"]), int(c["t1_ms"])
+                ov = max(0, min(t1, u1) - max(t0, u0))
+                if ov > best_ov:
+                    best, best_ov = c, ov
+            if best is not None and best_ov >= 250:
+                return best
+        return None
+
+    for item in keep:
+        if not isinstance(item, dict):
+            continue
+        src = match_clause(item)
+        if not src:
+            continue
+        sid = str(src.get("id"))
+        if sid in used:
+            continue
+        if _is_price_or_shipping(str(src.get("text") or "")) or _is_size(str(src.get("text") or "")) or _is_control(
+            str(src.get("text") or "")
+        ):
+            continue
+        used.add(sid)
+        fixed.append(
+            {
+                "id": sid,
+                "t0_ms": int(src["t0_ms"]),
+                "t1_ms": int(src["t1_ms"]),
+                "text": str(src.get("text") or ""),
+                "why": str(item.get("why") or "remap_keep"),
+                "point": str(item.get("point") or ""),
+                "complete": True,
+            }
+        )
+
+    repaired = False
+    if len(fixed) < 3:
+        # auto-fill from local value ranking to avoid empty LLM plan
+        ranked = sorted(clauses, key=lambda c: _value_score(str(c.get("text") or "")), reverse=True)
+        for c in ranked:
+            sid = str(c.get("id"))
+            if sid in used:
+                continue
+            tx = str(c.get("text") or "")
+            if _is_control(tx) or _is_size(tx) or _is_price_or_shipping(tx):
+                continue
+            if _value_score(tx) < 4:
+                continue
+            used.add(sid)
+            fixed.append(
+                {
+                    "id": sid,
+                    "t0_ms": int(c["t0_ms"]),
+                    "t1_ms": int(c["t1_ms"]),
+                    "text": tx,
+                    "why": "local_fill_after_bad_ids",
+                    "point": "卖点",
+                    "complete": True,
+                }
+            )
+            repaired = True
+            if len(fixed) >= 12:
+                break
+
+    # chronological for natural watch order
+    fixed.sort(key=lambda x: int(x.get("t0_ms") or 0))
+    obj["keep"] = fixed
+    if repaired or len(fixed) != len(keep):
+        obj["_keep_repaired"] = True
+        obj["_keep_raw_n"] = len(keep)
+        obj["_keep_fixed_n"] = len(fixed)
     return obj
 
 
@@ -601,19 +718,69 @@ def llm_obj_to_timeline(
 
     used_ids: set[str] = set()
 
+    def _norm_id(raw: str) -> str:
+        """Normalize model-mangled ids: c1 / C00001 / c0001 → c00001 when possible."""
+        s = str(raw or "").strip()
+        if not s:
+            return ""
+        if s in by_id or s in parents:
+            return s
+        m = re.search(r"c0*(\d{1,5})", s, flags=re.I)
+        if m:
+            cand = f"c{int(m.group(1)):05d}"
+            if cand in by_id or cand in parents:
+                return cand
+        # pure digits
+        if s.isdigit():
+            cand = f"c{int(s):05d}"
+            if cand in by_id or cand in parents:
+                return cand
+        return s
+
     def _resolve_src(item: dict[str, Any]) -> tuple[str, dict[str, Any] | None]:
-        uid = str(item.get("id") or item.get("utt_id") or "")
+        uid = _norm_id(str(item.get("id") or item.get("utt_id") or ""))
         src = by_id.get(uid) or parents.get(uid)
         if src:
-            return uid, src
-        text_i = str(item.get("text") or "").strip()
+            return str(src.get("id") or uid), src
+        text_i = re.sub(r"\s+", "", str(item.get("text") or "").strip())
         if text_i:
+            # longer prefix match first; tolerate short model paraphrases
+            for n in (16, 12, 10, 8, 6):
+                if len(text_i) < n:
+                    continue
+                needle = text_i[:n]
+                for u in by_id.values():
+                    ut = re.sub(r"\s+", "", str(u.get("text") or ""))
+                    if needle and (needle in ut or ut[:n] in text_i):
+                        return str(u.get("id")), u
+            # token overlap fallback (Chinese 2-grams)
+            if len(text_i) >= 6:
+                grams = {text_i[i : i + 2] for i in range(0, min(len(text_i) - 1, 24))}
+                best_u = None
+                best_hit = 0
+                for u in by_id.values():
+                    ut = re.sub(r"\s+", "", str(u.get("text") or ""))
+                    hit = sum(1 for g in grams if g in ut)
+                    if hit > best_hit:
+                        best_hit, best_u = hit, u
+                if best_u is not None and best_hit >= 3:
+                    return str(best_u.get("id")), best_u
+        # time-window fallback if model invents ids but keeps t0/t1
+        try:
+            t0 = int(item.get("t0_ms") or item.get("t0") or -1)
+            t1 = int(item.get("t1_ms") or item.get("t1") or -1)
+        except Exception:
+            t0, t1 = -1, -1
+        if t0 >= 0 and t1 > t0:
+            best_u = None
+            best_overlap = 0
             for u in by_id.values():
-                ut = str(u.get("text") or "")
-                if text_i[:10] and text_i[:10] in ut:
-                    return str(u.get("id")), u
-                if ut[:10] and ut[:10] in text_i:
-                    return str(u.get("id")), u
+                u0, u1 = int(u["t0_ms"]), int(u["t1_ms"])
+                overlap = max(0, min(t1, u1) - max(t0, u0))
+                if overlap > best_overlap:
+                    best_overlap, best_u = overlap, u
+            if best_u is not None and best_overlap >= 300:
+                return str(best_u.get("id")), best_u
         return uid, None
 
     def _append_from_src(uid: str, src: dict[str, Any], *, why: str = "", score: float = 50.0) -> None:
@@ -795,6 +962,18 @@ def plan_from_asr_with_llm(
         target_seconds=target_seconds,
         playback_speed=playback_speed,
     )
+    if not plan.golden:
+        # last chance: force local keep from selected clauses already attached
+        clauses = obj.get("_clauses") if isinstance(obj.get("_clauses"), list) else []
+        if clauses:
+            obj = _repair_keep_ids({"keep": []}, clauses)
+            obj["_clauses"] = clauses
+            plan = llm_obj_to_timeline(
+                obj,
+                lines,
+                target_seconds=target_seconds,
+                playback_speed=playback_speed,
+            )
     if not plan.golden:
         raise RuntimeError("llm_plan_has_no_slots")
     return plan, obj

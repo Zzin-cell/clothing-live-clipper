@@ -299,7 +299,19 @@ PLAN_MAX_TOKENS = 900
 PLAN_TIMEOUT_S = 120
 
 _CONTROL_MARKERS = (
-    "家人们", "扣1", "点关注", "晚上好", "欢迎", "公屏", "调试", "对焦", "链接", "小黄车", "加购",
+    # 称呼/互动
+    "家人们", "老铁", "宝宝", "姐妹们", "宝贝们", "扣1", "扣一", "点关注", "双击",
+    "晚上好", "大家好", "早上好", "欢迎", "公屏", "弹幕", "福袋", "连麦",
+    # 设备/调试
+    "调试", "对焦", "收音", "听得到", "在不在", "来了吗",
+    # 交易入口
+    "链接", "小黄车", "加购", "上链接", "购物车",
+    # 导播/准备口令（截图：准备一下 / 321 / 里面去拍）
+    "准备一下", "来准备", "先准备", "準備一下", "來準備", "备一下", "備一下",
+    "里面去拍", "裏面去拍", "里面拍", "出去拍", "换个机位", "转个机位",
+    "321", "3 2 1", "三二一", "倒计时", "倒數", "倒数",
+    "过一下", "过一遍", "先上", "上脚", "上裤", "来凳", "凳子", "板凳",
+    "用鞋把", "卡一下", "固定一下", "摆一下", "站好", "转一圈给你看一下哦等下",
 )
 _SIZE_MARKERS = (
     "尺码", "M码", "L码", "m码", "S码", "s码", "XL", "胸围", "腰围", "偏大", "偏小", "建议穿",
@@ -340,7 +352,24 @@ _VALUE_MARKERS = _FIT_MARKERS + _FABRIC_MARKERS + _AUDIENCE_MARKERS + (
 
 
 def _is_control(text: str) -> bool:
-    return any(x in text for x in _CONTROL_MARKERS)
+    t = text or ""
+    if any(x in t for x in _CONTROL_MARKERS):
+        return True
+    # 3 2 1 / 321 倒计时口令
+    if re.search(r"(?<!\d)3\s*2\s*1(?!\d)", t):
+        return True
+    if re.search(r"(准备|準備|备一下|備一下).{0,6}(一下|下)", t):
+        return True
+    if re.search(r"(里面|裏面|外头|外面).{0,4}(拍|去拍)", t):
+        return True
+    # 纯控场短句：几乎没有服装卖点
+    if re.search(r"(好不好|来吧|走起|开始了|开始播)", t) and not any(
+        k in t for k in ("面料", "版型", "显瘦", "上身", "适合", "遮肉", "垂感", "不透")
+    ):
+        # 含准备/拍摄口令时更坚决
+        if any(k in t for k in ("准备", "準備", "拍", "321", "倒计")):
+            return True
+    return False
 
 
 def _is_size(text: str) -> bool:
@@ -934,8 +963,8 @@ def llm_obj_to_timeline(
             return
         if any(x in text for x in ("加购", "小黄车", "上链接", "点链接")):
             return
-        # hard drop price / shipping even if LLM kept them
-        if _is_price_or_shipping(text):
+        # hard drop price / shipping / live-control even if LLM kept them
+        if _is_price_or_shipping(text) or _is_control(text):
             return
         # always take full clause window first (avoid mid-clause cutoff)
         t0 = int(src["t0_ms"])

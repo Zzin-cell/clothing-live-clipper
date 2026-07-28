@@ -196,13 +196,16 @@ def test_llm_completes_incomplete_tail_instead_of_hard_cutoff():
 def test_system_prompt_light_is_much_shorter():
     assert hasattr(lp, "SYSTEM_PROMPT_LIGHT")
     assert len(lp.SYSTEM_PROMPT_LIGHT) < len(lp.SYSTEM_PROMPT)
-    assert len(lp.SYSTEM_PROMPT_LIGHT) < 2200
+    assert len(lp.SYSTEM_PROMPT_LIGHT) < 2800
     assert "JSON" in lp.SYSTEM_PROMPT_LIGHT or "json" in lp.SYSTEM_PROMPT_LIGHT.lower()
     assert "尺码" in lp.SYSTEM_PROMPT_LIGHT
-    # price/shipping removed; fabric/audience detail allowed
-    assert "发货" in lp.SYSTEM_PROMPT_LIGHT or "价格" in lp.SYSTEM_PROMPT_LIGHT
-    assert "适用人群" in lp.SYSTEM_PROMPT_LIGHT or "面料" in lp.SYSTEM_PROMPT_LIGHT
-    assert "禁止价格" in lp.SYSTEM_PROMPT_LIGHT or "价格" in lp.SYSTEM_PROMPT_LIGHT
+    # product focus + de-live + ~60s
+    assert "版型" in lp.SYSTEM_PROMPT_LIGHT
+    assert "面料" in lp.SYSTEM_PROMPT_LIGHT
+    assert "适用人群" in lp.SYSTEM_PROMPT_LIGHT
+    assert "直播" in lp.SYSTEM_PROMPT_LIGHT or "控场" in lp.SYSTEM_PROMPT_LIGHT
+    assert "60" in lp.SYSTEM_PROMPT_LIGHT or "55" in lp.SYSTEM_PROMPT_LIGHT
+    assert "价格" in lp.SYSTEM_PROMPT_LIGHT or "发货" in lp.SYSTEM_PROMPT_LIGHT
 
 
 def test_extract_json_obj_strips_think_and_fences():
@@ -264,6 +267,7 @@ def test_call_llm_for_plan_uses_trim_and_lower_tokens(monkeypatch):
     user_content = msgs[1]["content"]
     assert "已筛选" in user_content
     assert "all_clauses" not in user_content
-    assert "价格" in user_content or "发货" in user_content
-    assert "适用人群" in user_content or "面料" in user_content
+    assert "must_cover" in user_content
+    assert "版型" in user_content and "面料" in user_content and "适用人群" in user_content
+    assert "60" in user_content or "target_s" in user_content
     assert obj.get("_meta", {}).get("clauses_sent", 10**9) <= lp.LIGHT_MAX_CLAUSES

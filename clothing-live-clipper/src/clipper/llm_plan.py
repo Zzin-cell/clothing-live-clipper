@@ -293,10 +293,10 @@ def expand_lines_to_clauses(
 
 # Latency-first caps (SiliconFlow lightweight path)
 # Smaller selected set → faster/more reliable SiliconFlow responses
-LIGHT_MAX_CLAUSES = 70
-CLAUSE_TEXT_MAX = 72
-PLAN_MAX_TOKENS = 1200
-PLAN_TIMEOUT_S = 90
+LIGHT_MAX_CLAUSES = 36
+CLAUSE_TEXT_MAX = 56
+PLAN_MAX_TOKENS = 900
+PLAN_TIMEOUT_S = 120
 
 _CONTROL_MARKERS = (
     "家人们", "扣1", "点关注", "晚上好", "欢迎", "公屏", "调试", "对焦", "链接", "小黄车", "加购",
@@ -327,6 +327,7 @@ _FIT_MARKERS = (
 _FABRIC_MARKERS = (
     "面料", "布料", "材质", "软", "超软", "垂感", "透气", "不闷", "冰凉", "不透",
     "亲肤", "抗皱", "不起球", "弹力", "天丝", "醋酸", "雪纺", "纯棉", "凉感",
+    "吸湿", "干爽", "不热", "凉快", "丝丝", "冰冰", "薄", "保护款", "高密", "高质",
 )
 _AUDIENCE_MARKERS = (
     "适用", "适合", "人群", "微胖", "梨形", "小个子", "大码", "胖妹妹", "通勤",
@@ -1154,10 +1155,20 @@ def plan_from_asr_with_llm(
     settings: Settings | None = None,
 ) -> tuple[TimelinePlan, dict[str, Any]]:
     """
-    Returns (plan, debug_obj). On cloud failure, falls back to local clause plan
-    (still clothing-focused) instead of immediately dying for rules path only.
+    Returns (plan, debug_obj).
+
+    Priority:
+    1) cloud LLM keep (repaired)
+    2) if too short / missing fit-fabric-audience and rules can do better duration → hybrid
+    3) local clause fill
     """
+    sp = playback_speed if playback_speed and playback_speed > 0 else 1.4
+    aim_src = int(round(target_seconds * 1000 * sp))  # ~84s for 60s@1.4x
+    min_ok_src = int(aim_src * 0.72)  # ~60s source => ~43s final; still short but better floor
+
     cloud_err: str | None = None
+    plan: TimelinePlan | None = None
+    obj: dict[str, Any] = {}
     try:
         obj = call_llm_for_plan(
             lines,
@@ -1172,7 +1183,6 @@ def plan_from_asr_with_llm(
             playback_speed=playback_speed,
         )
         if not plan.golden:
-            # last chance: force local keep from selected clauses already attached
             clauses = obj.get("_clauses") if isinstance(obj.get("_clauses"), list) else []
             if clauses:
                 obj2 = _repair_keep_ids({"keep": []}, clauses)
@@ -1184,17 +1194,127 @@ def plan_from_asr_with_llm(
                     playback_speed=playback_speed,
                 )
                 obj = obj2
-        if plan.golden:
-            return plan, obj
-        cloud_err = "llm_plan_has_no_slots"
+        if not plan.golden:
+            cloud_err = "llm_plan_has_no_slots"
+            plan = None
     except Exception as e:
         cloud_err = str(e)[:300]
+        plan = None
 
-    # Cloud timed out / bad JSON / empty keep → local clothing plan (better than plain rules default)
-    plan, obj = plan_from_local_clauses(
+    # Always have a local clothing plan as baseline
+    local_plan, local_obj = plan_from_local_clauses(
         lines, target_seconds=target_seconds, playback_speed=playback_speed
     )
-    meta = dict(obj.get("_meta") or {})
+
+    # Rules plan for duration when ASR is sparse on keywords
+    rules_plan = None
+    try:
+        from clipper.config import Settings as _Settings
+        from clipper.models import TranscriptUtterance
+        from clipper.extract import extract_claims, split_long_utterance, utterances_to_clips
+        from clipper.rank import build_timeline_plan, score_all
+
+        utts: list[TranscriptUtterance] = []
+        for i, u in enumerate(lines or []):
+            if not isinstance(u, dict):
+                continue
+            tx = str(u.get("text") or "").strip()
+            if not tx:
+                continue
+            t0 = int(u.get("t0_ms") or 0)
+            t1 = max(t0 + 300, int(u.get("t1_ms") or 0))
+            utts.append(
+                TranscriptUtterance(
+                    utt_id=str(u.get("utt_id") or u.get("id") or f"u{i}"),
+                    text=tx,
+                    t0_ms=t0,
+                    t1_ms=t1,
+                )
+            )
+        transcript: list[TranscriptUtterance] = []
+        for u in utts:
+            transcript.extend(split_long_utterance(u))
+        claims = extract_claims(transcript)
+        clips = score_all(
+            utterances_to_clips(
+                transcript,
+                claims=claims,
+                min_clip_ms=500,
+                max_clip_ms=15_000,
+            )
+        )
+        st = settings if isinstance(settings, _Settings) else _Settings(
+            target_duration_s=target_seconds,
+            playback_speed=sp,
+        )
+        rules_plan = build_timeline_plan(clips, st)
+    except Exception:
+        rules_plan = None
+
+    def _cov(p: TimelinePlan) -> dict[str, bool]:
+        blob = " ".join(s.text or "" for s in (p.golden or []))
+        return {
+            "fit": any(k in blob for k in _FIT_MARKERS),
+            "fabric": any(k in blob for k in _FABRIC_MARKERS),
+            "audience": any(k in blob for k in _AUDIENCE_MARKERS),
+        }
+
+    def _score(p: TimelinePlan | None) -> tuple:
+        if p is None or not p.golden:
+            return (-1, -1, -1, -1)
+        cov = _cov(p)
+        cov_n = int(cov["fit"]) + int(cov["fabric"]) + int(cov["audience"])
+        # prefer near-target duration without being insanely short
+        dur = int(p.total_duration_ms or 0)
+        dur_score = min(dur, aim_src) - max(0, min_ok_src - dur) * 2
+        return (cov_n, dur_score, len(p.golden), dur)
+
+    candidates: list[tuple[str, TimelinePlan, dict[str, Any]]] = []
+    if plan is not None and plan.golden:
+        candidates.append(("cloud_or_repaired", plan, obj))
+    if local_plan.golden:
+        lo = dict(local_obj)
+        meta = dict(lo.get("_meta") or {})
+        meta["cloud_error"] = cloud_err
+        lo["_meta"] = meta
+        candidates.append(("local_clause_rank", local_plan, lo))
+    if rules_plan is not None and rules_plan.golden:
+        candidates.append(
+            (
+                "rules_duration",
+                rules_plan,
+                {
+                    "product_summary": "规则时长兜底",
+                    "main_points": ["版型", "面料", "适用人群"],
+                    "keep": [],
+                    "_meta": {
+                        "model": "rules_duration_fallback",
+                        "submit_mode": "rules_after_short_llm",
+                        "cloud_error": cloud_err,
+                    },
+                },
+            )
+        )
+
+    if not candidates:
+        raise RuntimeError(cloud_err or "llm_plan_has_no_slots")
+
+    best_name, best_plan, best_obj = max(candidates, key=lambda x: _score(x[1]))
+    meta = dict(best_obj.get("_meta") or {})
+    meta["chosen_path"] = best_name
     meta["cloud_error"] = cloud_err
-    obj["_meta"] = meta
-    return plan, obj
+    meta["candidate_scores"] = {
+        name: {
+            "slots": len(p.golden or []),
+            "ms": int(p.total_duration_ms or 0),
+            "cov": _cov(p),
+            "score": _score(p),
+        }
+        for name, p, _o in candidates
+    }
+    best_obj["_meta"] = meta
+    # ensure warnings mark path
+    best_plan.warnings = list(best_plan.warnings or []) + [f"policy:plan_path:{best_name}"]
+    if cloud_err:
+        best_plan.warnings.append(f"cloud_error:{cloud_err[:120]}")
+    return best_plan, best_obj

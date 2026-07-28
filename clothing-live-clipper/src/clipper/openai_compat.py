@@ -359,20 +359,22 @@ def chat_completions(
         ]
 
     # Fast mode for latency:
-    # - if we already know a working route: single-shot (no multi-retry matrix)
-    # - otherwise: one endpoint + 1 auth + 2 payloads, short timeout
+    # - prefer last route + fewer auth/payload variants
+    # - do NOT brutally clamp long plan timeouts: planning with 60–80 clauses
+    #   routinely needs 15–40s; clamping to 20–30s causes false "LLM failed"
+    #   while ping still succeeds (ping only sends "1").
     has_last_route = bool(last_ep)
     if fast:
         endpoints = endpoints[:1]
         if has_last_route:
             headers_list = headers_list[:1]
             payloads = payloads[:1]
-            # single-shot budget; fail fast to rules rather than thrash retries
-            timeout = min(timeout, 30)
+            # Keep caller budget for real plan jobs; only trim absurd values
+            timeout = min(max(int(timeout), 45), 90)
         else:
             headers_list = headers_list[:1]
             payloads = payloads[:2]
-            timeout = min(timeout, 20)
+            timeout = min(max(int(timeout), 35), 75)
 
     errors: list[str] = []
     t0 = time.perf_counter()

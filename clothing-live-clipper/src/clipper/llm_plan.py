@@ -143,8 +143,8 @@ SYSTEM_PROMPT_LIGHT = """你是服装短视频剪辑导演（成品要像短视�
 顺序：0–3s 钩子(视觉/痛点/效果，禁价格) → 版型上身 → 面料/细节 → 适用人群 → 体验对比 → 自然收束
 信息密度要高，像成片口播；完整表达优先于硬凑时长（可短 3–8 秒，禁静音尾巴）
 
-JSON（id 必须逐字复制输入 clauses 的 id，形如 c00012，禁止乱造长串数字）：
-{"product_summary":"...","hook_type":"visual|pain|effect","main_points":["版型…","面料…","适用人群…"],"logic":["钩子","版型上身","面料细节","适用人群","体验收束"],"keep":[{"id":"c00012","t0_ms":0,"t1_ms":1,"text":"...","why":"...","point":"版型|面料|人群|细节|体验","complete":true}],"drop_ids":["c00001"],"notes":"..."}
+JSON（id 必须原样复制输入里的 id，如 c12 / c00012，禁止乱写长串0）：
+{"product_summary":"...","hook_type":"visual|pain|effect","main_points":["版型","面料","适用人群"],"logic":["钩子","版型","面料","人群","收束"],"keep":[{"id":"c12","t0_ms":0,"t1_ms":1000,"text":"...","why":"...","point":"版型","complete":true}],"drop_ids":["c1"],"notes":"..."}
 """
 
 
@@ -262,10 +262,11 @@ def expand_lines_to_clauses(
 
 
 # Latency-first caps (SiliconFlow lightweight path)
-LIGHT_MAX_CLAUSES = 80
-CLAUSE_TEXT_MAX = 80
-PLAN_MAX_TOKENS = 1536
-PLAN_TIMEOUT_S = 55
+# Smaller selected set → faster/more reliable SiliconFlow responses
+LIGHT_MAX_CLAUSES = 50
+CLAUSE_TEXT_MAX = 64
+PLAN_MAX_TOKENS = 1024
+PLAN_TIMEOUT_S = 90
 
 _CONTROL_MARKERS = (
     "家人们", "扣1", "点关注", "晚上好", "欢迎", "公屏", "调试", "对焦", "链接", "小黄车", "加购",
@@ -461,16 +462,26 @@ def call_llm_for_plan(
         raise RuntimeError("empty_transcript")
     clauses, trim_stats = select_clauses_for_llm(clauses_all, max_clauses=LIGHT_MAX_CLAUSES)
 
-    # Minimal clause fields → fewer input tokens
-    compact = [
-        {
-            "id": u["id"],
-            "t0": u["t0_ms"],
-            "t1": u["t1_ms"],
-            "text": str(u["text"])[:CLAUSE_TEXT_MAX],
-        }
-        for u in clauses
-    ]
+    # Minimal clause fields → fewer input tokens.
+    # Use short stable ids (c12) so small models copy them correctly.
+    id_map: dict[str, str] = {}  # short -> full
+    compact = []
+    for u in clauses:
+        full = str(u["id"])
+        m = re.search(r"(\d+)$", full)
+        short = f"c{int(m.group(1))}" if m else full
+        # avoid collision
+        if short in id_map and id_map[short] != full:
+            short = full
+        id_map[short] = full
+        compact.append(
+            {
+                "id": short,
+                "t0": int(u["t0_ms"]),
+                "t1": int(u["t1_ms"]),
+                "text": str(u["text"])[:CLAUSE_TEXT_MAX],
+            }
+        )
     # 成片观感约 60s：源片按倍速反推；给模型明确目标窗
     final_lo, final_hi = 55, 65
     user_payload: dict[str, Any] = {
@@ -521,6 +532,20 @@ def call_llm_for_plan(
 
     content = out.get("content") or ""
     obj = _extract_json_obj(content)
+    # Expand short ids (c12) back to canonical c00012 before repair/timeline
+    keep = obj.get("keep") if isinstance(obj.get("keep"), list) else []
+    for item in keep:
+        if not isinstance(item, dict):
+            continue
+        raw_id = str(item.get("id") or "").strip()
+        if raw_id in id_map:
+            item["id"] = id_map[raw_id]
+        else:
+            m = re.search(r"c?0*(\d{1,5})", raw_id, flags=re.I)
+            if m:
+                full = f"c{int(m.group(1)):05d}"
+                if full in {c["id"] for c in clauses}:
+                    item["id"] = full
     obj = _repair_keep_ids(obj, clauses)
     obj["_meta"] = {
         "model": out.get("model") or model,
@@ -541,6 +566,7 @@ def call_llm_for_plan(
         "auth_source": "user_ui",
         "client": "openai_compat_full",
         "latency_ms": out.get("latency_ms"),
+        "timeout_s": PLAN_TIMEOUT_S,
     }
     # selected clauses for id resolution; raw for optional neighbor completion
     obj["_clauses"] = clauses
@@ -625,17 +651,20 @@ def _repair_keep_ids(obj: dict[str, Any], clauses: list[dict[str, Any]]) -> dict
         )
 
     repaired = False
-    if len(fixed) < 3:
-        # auto-fill from local value ranking to avoid empty LLM plan
+    def _fill_from_local(min_n: int = 12, target_ms: int = 70_000) -> None:
+        nonlocal repaired
         ranked = sorted(clauses, key=lambda c: _value_score(str(c.get("text") or "")), reverse=True)
+        total = sum(max(0, int(x.get("t1_ms") or 0) - int(x.get("t0_ms") or 0)) for x in fixed)
         for c in ranked:
+            if len(fixed) >= max(min_n, 18) and total >= target_ms:
+                break
             sid = str(c.get("id"))
             if sid in used:
                 continue
             tx = str(c.get("text") or "")
             if _is_control(tx) or _is_size(tx) or _is_price_or_shipping(tx):
                 continue
-            if _value_score(tx) < 4:
+            if _value_score(tx) < 3:
                 continue
             used.add(sid)
             fixed.append(
@@ -649,9 +678,15 @@ def _repair_keep_ids(obj: dict[str, Any], clauses: list[dict[str, Any]]) -> dict
                     "complete": True,
                 }
             )
+            total += max(300, int(c["t1_ms"]) - int(c["t0_ms"]))
             repaired = True
-            if len(fixed) >= 12:
-                break
+
+    if len(fixed) < 3:
+        # auto-fill from local value ranking to avoid empty LLM plan
+        _fill_from_local(min_n=12, target_ms=70_000)
+    else:
+        # LLM returned some keep but often too short for ~60s final — top up
+        _fill_from_local(min_n=14, target_ms=75_000)
 
     # chronological for natural watch order
     fixed.sort(key=lambda x: int(x.get("t0_ms") or 0))

@@ -198,4 +198,5 @@ def test_chat_completions_fast_with_last_route_is_single_shot():
             )
     assert out.get("content")
     assert calls["n"] == 1
-    assert calls["timeout"] <= 30
+    # plan-friendly: fast mode must not clamp real budgets down to 20–30s
+    assert calls["timeout"] >= 45

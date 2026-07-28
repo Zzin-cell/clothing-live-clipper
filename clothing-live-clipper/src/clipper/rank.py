@@ -781,8 +781,8 @@ def _hook_open_score(c: Clip) -> float:
 def _logic_order_key(c: Clip) -> tuple:
     """
     Fast-paced clothing short logic (rules fallback for LLM):
-    3s钩子 → 上身/版型 → 面料 → 细节 → 对比/体验 → 搭配后置
-    priority: 上身效果 > 面料 > 价格
+    3s钩子 → 版型/上身 → 面料 → 适用人群 → 细节/体验 → 搭配后置
+    priority: 上身效果 > 面料 > 适用人群 （价格已硬排除）
     """
     text = c.text or ""
     stage = _primary_stage(c)
@@ -791,13 +791,18 @@ def _logic_order_key(c: Clip) -> tuple:
     elif _is_true_feature(c) and stage <= 1:
         stage = 1
     elif ClaimType.FABRIC in c.claim_types or any(
-        w in text for w in ("面料", "布料", "材质", "垂感", "透气", "不透", "凉感")
+        w in text for w in ("面料", "布料", "材质", "垂感", "透气", "不透", "凉感", "亲肤", "不闷")
     ):
         stage = 2
+    elif any(
+        w in text
+        for w in ("适合", "适用", "人群", "微胖", "梨形", "小个子", "大码", "通勤", "日常", "显白")
+    ):
+        stage = 3
     elif ClaimType.DETAIL in c.claim_types or any(
         w in text for w in ("细节", "蕾丝", "走线", "扣子", "拉链", "拼接")
     ):
-        stage = 3
+        stage = 4
     elif _is_wear_experience(c):
         stage = 4
     if _is_outfit_or_change(c):
@@ -839,9 +844,10 @@ def build_timeline_plan(
         warnings.append(f"source_select_for_speed={speed:.2f}x")
 
     pool = [c for c in scored if _eligible(c)]
-    core = [c for c in pool if _is_true_feature(c) or _is_wear_experience(c) or c.score >= 12]
-    if len(core) < 3:
-        core = pool[:]
+    core = [c for c in pool if _is_true_feature(c) or _is_wear_experience(c) or c.score >= 8]
+    if len(core) < 4:
+        # broaden pool so we can still hit ~60s final after speed
+        core = [c for c in pool if c.score > 0] or pool[:]
 
     min_plan = getattr(settings, "source_min_plan_ms", None)
     max_plan = getattr(settings, "source_max_plan_ms", None)
@@ -849,7 +855,10 @@ def build_timeline_plan(
         min_plan = int(round(getattr(settings, "min_plan_ms", 55_000) * speed * 1.05))
     if max_plan is None:
         max_plan = int(round(getattr(settings, "max_plan_ms", 65_000) * speed * 1.10))
+    # Aim closer to 60s final (source ≈ target * speed). Soft-floor so short live
+    # still returns something, but keep selecting while useful content remains.
     aim = max(min_plan, min(max_plan, target_ms))
+    soft_min = max(int(aim * 0.72), int(42_000 * speed))  # try hard for ~>=30s final @1.4x
 
     ordered = sorted(core, key=_logic_order_key)
 
@@ -859,23 +868,35 @@ def build_timeline_plan(
     last_t1: int | None = None
     selected_texts: list[str] = []
 
-    # 3s-style opener: pain / visual / welfare / strongest feature
+    def _coverage(texts: list[str]) -> dict[str, bool]:
+        blob = " ".join(texts)
+        return {
+            "fit": any(w in blob for w in ("版型", "显瘦", "收腰", "遮肉", "上身", "修身")),
+            "fabric": any(w in blob for w in ("面料", "布料", "材质", "垂感", "透气", "不透", "软", "凉感", "亲肤")),
+            "audience": any(
+                w in blob
+                for w in ("适合", "适用", "微胖", "梨形", "小个子", "大码", "姐妹", "通勤", "日常", "显白")
+            ),
+        }
+
+    # 3s-style opener: pain / visual / strongest feature (no price welfare)
     openers = [c for c in ordered if not _is_outfit_or_change(c)]
     openers = sorted(openers, key=_hook_open_score, reverse=True)
     if not openers:
         openers = ordered[:1]
     if openers:
         first = openers[0]
-        # keep opener short if possible (prefer <= 4.5s source for hook feel)
         selected.append(first)
         used.add(first.clip_id)
         total += first.duration_ms
         last_t1 = first.t1_ms
         selected_texts.append(first.text or "")
 
-    while total < aim and len(selected) < 16:
+    max_slots = 28  # more slots so short clips can still sum near 60s final
+    while total < aim and len(selected) < max_slots:
         best = None
         best_key = None
+        cov = _coverage(selected_texts)
         for c in ordered:
             if c.clip_id in used:
                 continue
@@ -896,18 +917,28 @@ def build_timeline_plan(
                 else:
                     chrono = -4.0
             try:
-                # amplify learning so reclip preferences visibly affect new uploads
                 learn = learned_text_score(c.text or "", for_hook=(total < aim * 0.40)) * 1.8
             except Exception:
                 learn = 0.0
             progress = total / max(1, aim)
-            desired = 0 if progress < 0.25 else 1 if progress < 0.45 else 2 if progress < 0.7 else 3
+            desired = 0 if progress < 0.2 else 1 if progress < 0.4 else 2 if progress < 0.55 else 3 if progress < 0.75 else 4
             stage_fit = -abs(stage - desired) * 8.0
+            text = c.text or ""
+            cover_boost = 0.0
+            if not cov["fit"] and any(w in text for w in ("版型", "显瘦", "收腰", "遮肉", "上身")):
+                cover_boost += 28.0
+            if not cov["fabric"] and any(w in text for w in ("面料", "布料", "材质", "垂感", "透气", "不透", "软")):
+                cover_boost += 28.0
+            if not cov["audience"] and any(
+                w in text for w in ("适合", "适用", "微胖", "梨形", "小个子", "大码", "通勤", "日常", "显白")
+            ):
+                cover_boost += 28.0
             key = (
                 c.score
                 + learn
                 + chrono
                 + stage_fit
+                + cover_boost
                 + _hook_strength(c) * (0.35 if total < aim * 0.4 else 0.12)
                 - stage_pen
                 - sim * 20.0
@@ -922,10 +953,27 @@ def build_timeline_plan(
         last_t1 = best.t1_ms
         selected_texts.append(best.text or "")
 
+    # Keep filling until soft_min if we still have clothing-useful leftovers
+    if total < soft_min:
+        leftovers = sorted(
+            [c for c in ordered if c.clip_id not in used],
+            key=lambda c: (-c.score, c.t0_ms),
+        )
+        for c in leftovers:
+            if total >= soft_min or len(selected) >= max_slots:
+                break
+            if any(_similarity(c.text or "", p) >= 0.93 for p in selected_texts) and total > soft_min * 0.75:
+                continue
+            selected.append(c)
+            used.add(c.clip_id)
+            total += c.duration_ms
+            selected_texts.append(c.text or "")
+
     if total < min_plan:
+        warnings.append(f"short_source_ms={total}")
         leftovers = [c for c in ordered if c.clip_id not in used]
         for c in leftovers:
-            if total >= min_plan:
+            if total >= min_plan or len(selected) >= max_slots:
                 break
             if any(_similarity(c.text or "", p) >= 0.93 for p in selected_texts) and total > min_plan * 0.8:
                 continue

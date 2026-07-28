@@ -264,8 +264,8 @@ def expand_lines_to_clauses(
 # Latency-first caps (SiliconFlow lightweight path)
 LIGHT_MAX_CLAUSES = 80
 CLAUSE_TEXT_MAX = 80
-PLAN_MAX_TOKENS = 1024
-PLAN_TIMEOUT_S = 35
+PLAN_MAX_TOKENS = 1536
+PLAN_TIMEOUT_S = 55
 
 _CONTROL_MARKERS = (
     "家人们", "扣1", "点关注", "晚上好", "欢迎", "公屏", "调试", "对焦", "链接", "小黄车", "加购",

@@ -147,18 +147,12 @@ def test_llm_completes_incomplete_tail_instead_of_hard_cutoff():
     assert len(plan.golden[-1].text.strip()) >= 4
 
 
-def test_system_prompt_light_encodes_learning_taste():
+def test_system_prompt_light_is_much_shorter():
     assert hasattr(lp, "SYSTEM_PROMPT_LIGHT")
-    # old full SYSTEM_PROMPT must be gone
-    assert not hasattr(lp, "SYSTEM_PROMPT")
-    assert len(lp.SYSTEM_PROMPT_LIGHT) < 2500
+    assert len(lp.SYSTEM_PROMPT_LIGHT) < len(lp.SYSTEM_PROMPT)
+    assert len(lp.SYSTEM_PROMPT_LIGHT) < 2200
     assert "JSON" in lp.SYSTEM_PROMPT_LIGHT or "json" in lp.SYSTEM_PROMPT_LIGHT.lower()
     assert "尺码" in lp.SYSTEM_PROMPT_LIGHT
-    # taste from 学习2.0 pos/neg pairs
-    assert "正样本" in lp.SYSTEM_PROMPT_LIGHT or "KEEP" in lp.SYSTEM_PROMPT_LIGHT
-    assert "负样本" in lp.SYSTEM_PROMPT_LIGHT or "DROP" in lp.SYSTEM_PROMPT_LIGHT
-    assert "家人们" in lp.SYSTEM_PROMPT_LIGHT or "小黄车" in lp.SYSTEM_PROMPT_LIGHT
-    assert "显瘦" in lp.SYSTEM_PROMPT_LIGHT or "版型" in lp.SYSTEM_PROMPT_LIGHT
 
 
 def test_extract_json_obj_strips_think_and_fences():
@@ -213,14 +207,11 @@ def test_call_llm_for_plan_uses_trim_and_lower_tokens(monkeypatch):
     assert captured.get("timeout") == lp.PLAN_TIMEOUT_S
     assert captured.get("force_json") is True
     assert captured.get("fast") is True
-    # system should be the learning-aware light prompt
+    # system should be light
     msgs = captured.get("messages") or []
     assert msgs and msgs[0]["role"] == "system"
-    assert msgs[0]["content"] == lp.SYSTEM_PROMPT_LIGHT
-    assert "正样本" in msgs[0]["content"] or "KEEP" in msgs[0]["content"]
+    assert len(msgs[0]["content"]) < len(lp.SYSTEM_PROMPT)
     user_content = msgs[1]["content"]
     assert "已筛选" in user_content
-    assert "taste" in user_content
-    assert "pos_like" in user_content or "显瘦" in user_content
     assert "all_clauses" not in user_content
     assert obj.get("_meta", {}).get("clauses_sent", 10**9) <= lp.LIGHT_MAX_CLAUSES

@@ -22,9 +22,17 @@ SCORE_WEIGHTS = {
 }
 
 _PRICE_TEXT = (
-    "券后", "只要", "原价", "秒杀", "限时", "包邮", "拍下", "链接", "库存",
-    "凑单", "满减", "到手", "块钱", "多少钱", "便宜", "加一捕", "加购", "下单",
-    "小黄车", "购物车", "号链接", "弹窗", "福袋", "直播价", "专属价", "到手价",
+    "券后", "券後", "只要", "原价", "原價", "现价", "現價", "秒杀", "秒殺", "限时", "限時",
+    "包邮", "包郵", "拍下", "链接", "鏈接", "库存", "庫存",
+    "凑单", "湊單", "满减", "滿減", "到手", "块钱", "塊錢", "多少钱", "多少錢", "便宜",
+    "加一捕", "加购", "加購", "下单", "下單",
+    "小黄车", "小黃車", "购物车", "購物車", "号链接", "號鏈接", "弹窗", "彈窗", "福袋",
+    "直播价", "直播價", "专属价", "專屬價", "到手价", "到手價",
+    # 口语 / ASR 变体（你截图里的「定价/拨分/发货」）
+    "定价", "定價", "价钱", "價錢", "价格", "價格", "拨分", "撥分",
+    "发货", "發貨", "发貨", "现货", "現貨", "预售", "預售", "物流", "快递", "快遞",
+    "顺丰", "順豐", "几天发", "幾天發", "今日发", "今日發", "补货", "補貨",
+    "付款", "包邮", "邮费", "郵費", "太贵", "太貴", "贵呀", "貴呀",
 )
 
 # Hard size advice — never keep in final cut
@@ -62,11 +70,22 @@ def score_clip(clip: Clip) -> Clip:
     raw = 0.0
     text = clip.text or ""
 
-    # Hard policy: never put price / deal talk into final cut
+    # Hard policy: never put price / deal / shipping talk into final cut
     if ClaimType.PRICE in types or any(p in text for p in _PRICE_TEXT):
         clip.score = 0.0
         clip.weight = 0.0
         clip.score_breakdown = {"price_excluded": 0.0, "raw": 0.0}
+        return clip
+    # numeric / slang price patterns (599拨分、1000多、¥59、发货時間…)
+    if re.search(r"(¥|￥)\s*\d+", text) or re.search(r"\d+\s*(块|塊|元|块钱|塊錢|拨分|撥分)", text):
+        clip.score = 0.0
+        clip.weight = 0.0
+        clip.score_breakdown = {"price_excluded": 0.0, "raw": 0.0}
+        return clip
+    if re.search(r"(发|發).{0,4}(货|貨)", text):
+        clip.score = 0.0
+        clip.weight = 0.0
+        clip.score_breakdown = {"shipping_excluded": 0.0, "raw": 0.0}
         return clip
 
     # Hard policy: never put size chart / sizing advice into final cut

@@ -71,6 +71,44 @@ def test_select_clauses_for_llm_caps_and_drops_bad():
     assert ("面料" in joined) or ("显瘦" in joined) or ("适合" in joined)
 
 
+def test_price_shipping_variants_dropped():
+    from clipper.llm_plan import _is_price_or_shipping, llm_obj_to_timeline
+
+    # exact screenshot-like lines
+    assert _is_price_or_shipping("日常定价，我们爱个599拨分，套装买下来1000多拨")
+    assert _is_price_or_shipping("發貨時間會有點慢，因为是定制面")
+    assert _is_price_or_shipping("发货时间会有点慢")
+    assert not _is_price_or_shipping("这件面料超级软，小个子也适合")
+
+    # timeline hard gate even if llm keeps them
+    lines = [
+        {"utt_id": "u1", "text": "日常定价我们爱个599拨分", "t0_ms": 0, "t1_ms": 2000},
+        {"utt_id": "u2", "text": "這件品牌面料超级软", "t0_ms": 2000, "t1_ms": 4000},
+        {"utt_id": "u3", "text": "發貨時間會有點慢因为是定制", "t0_ms": 4000, "t1_ms": 6000},
+    ]
+    clauses = expand_lines_to_clauses(lines)
+    id_price = next(c["id"] for c in clauses if "定价" in c["text"] or "拨分" in c["text"])
+    id_good = next(c["id"] for c in clauses if "面料" in c["text"] or "软" in c["text"])
+    id_ship = next(c["id"] for c in clauses if "貨" in c["text"] or "发货" in c["text"] or "發貨" in c["text"])
+    plan = llm_obj_to_timeline(
+        {
+            "keep": [
+                {"id": id_price, "text": "日常定价我们爱个599拨分"},
+                {"id": id_good, "text": "这件品牌面料超级软"},
+                {"id": id_ship, "text": "發貨時間會有點慢"},
+            ],
+            "_clauses": clauses,
+        },
+        lines,
+        target_seconds=60,
+        playback_speed=1.0,
+    )
+    texts = " ".join(s.text for s in plan.golden)
+    assert "定价" not in texts and "拨分" not in texts
+    assert "發貨" not in texts and "发货" not in texts
+    assert "面料" in texts or "软" in texts
+
+
 def test_expand_lines_to_clauses_splits_full_asr():
     clauses = expand_lines_to_clauses(_lines())
     assert len(clauses) >= len(_lines())

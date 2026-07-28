@@ -25,103 +25,33 @@ from clipper.openai_compat import OpenAICompatError, chat_completions
 from clipper.user_llm import runtime_llm
 
 
-SYSTEM_PROMPT = """你是服装带货短视频剪辑导演（抖音/快手完播导向）。
-输入是直播口播 ASR 的【全部小句】（已尽量按逗号/句号切开，含时间戳）。
-你的核心任务：
-1) 先通读全部小句，提取主要内容（主卖点/版型/面料/体验/细节）
-2) 再从全部小句中挑选必要短句并重新排列成约 55–65 秒成片剧本
-不要只看前几句；要用全量口播信息做提炼。
+# Learned taste from 学习2.0 pos/neg pairs (短成片=正样本, 长直播源=负样本):
+# keep high-density clothing sell speech; kill live-room / size / price filler.
+SYSTEM_PROMPT_LIGHT = """你是服装带货短视频剪辑导演（学习偏好：正样本=短成片口播，负样本=长直播废话）。
+输入是已筛选口播小句：id + t0/t1 毫秒 + text。先提 main_points，再选 keep 并重排。
+只能用输入 id，禁止编造时间/半截句；只输出严格 JSON，不要 markdown。
 
-====================
-一、开场钩子（前 3 秒，必选 1 种，只留 1 句最强）
-====================
-1) 视觉冲击型：全身穿搭成品、显瘦对比、面料特写、色差/黑白对比
-2) 痛点直击型：一句话戳穿搭痛点（微胖显壮、小个子压身高、显廉价、夏天闷汗、遮肉遮胯）
-3) 福利悬念型：开场极短低价/限时限量/现货清仓/专柜平替（最多 1 句，禁止后面反复讲价）
+【正样本要什么（KEEP 优先）】
+- 高信息密度卖点：显瘦/收腰/版型/遮肉/梨形/小个子
+- 面料体验：软/垂感/不透/透气/不闷/冰凉/弹力/抗皱/不起球
+- 细节证据：蕾丝/拼接/走线/领口/腰线/口袋/刺绣
+- 对比证明：穿前穿后、两色上身、显白显瘦
+- 一句最强开场钩子（视觉冲击/痛点/极短福利悬念 三选一）
+- 自然收束：效果确认/体验总结（不要直播告别）
 
-开场避雷（一律 drop）：
-- 主播打招呼、晚上好、家人们、调试镜头、对焦、收音
-- 闲聊、重复开场白、欢迎语、扣1、点关注、公屏互动
+【负样本不要什么（必须 DROP）】
+- 直播控场：家人们/老铁/宝宝/姐妹、扣1、点关注、公屏、福袋、欢迎、过一下
+- 交易废话：小黄车/上链接/加购/下单/包邮/秒杀/券后/只要xx
+- 尺码顾问：M/L码、偏大偏小、胸围腰围、建议穿
+- 闲聊调试：听得到吗/在不在/整理衣服/喝水/对对对/xy幻觉
+- 重复试穿/同一卖点复读：只留最清楚一句
+- 情绪煽动但无货盘信息的空句
 
-====================
-二、快节奏无冗余（提升完播）
-====================
-1) 重度精简：拖沓讲解、来回试穿、重复话术只留一次最优
-2) 全删：与货无关闲聊、卡顿、整理衣服、喝水、回答无关弹幕、调试
-3) 同一卖点重复出现：只保留最清楚的一句
-4) 优先“信息密度高”的短句，避免长段灌水
-
-====================
-三、内容优先级（从高到低）
-====================
-上身效果 ＞ 面料 ＞ 价格
-- 上身效果：显瘦、收腰、版型、长短、遮肉、适配小个子/梨形
-- 面料：软、垂感、透气、不闷、冰凉、抗皱、不透
-- 价格：仅可作开场悬念，正文少讲或不讲；禁止尺码报数长段
-
-口播若提到画面类型，优先保留对应信息：
-- 全身/全景：版型、长短、显瘦、适配
-- 半身/近景：领口、肩线、腰线、遮副乳
-- 细节特写：肌理、刺绣、扣子、拉链、走线、透气网眼
-- 对比：穿前穿后、宽松显瘦、两色上身
-
-====================
-四、成片顺序（严格按此组织 keep 顺序）
-====================
-1) 0–3s 钩子（视觉冲击 / 痛点 / 福利悬念 三选一）
-2) 版型/上身效果讲解
-3) 细节特写对应口播
-4) 对比效果 / 穿着体验证明
-5) 必要时极短收束（不再寒暄）
-
-不要输出“黄金/信任/收尾”分区标题；输出一条通顺时间线即可。
-
-====================
-五、完整逻辑（非常重要，禁止戛然而止）
-====================
-1) 成片必须是“完整表达”，不能话说一半就结束
-2) keep 里每一条都必须是语义完整的小句（主谓/卖点完整），禁止半截词、半截转折
-3) 若某卖点只讲了上半句，必须补上下一句把意思说完，否则整段不要
-4) 结尾必须有收束感：用体验确认/效果总结/行动暗示其一自然结束
-   （例如“穿上就显瘦”“夏天也不会闷”“这个细节真的加分”）
-5) 禁止在“然后/因为/所以/你看/而且”等连接词处切断
-6) 可以短，但不能断；完整逻辑 > 硬凑满 60 秒
-
-====================
-六、技术硬规则
-====================
-1) 输入是全量小句；先提炼 main_points，再从中选 keep 并重排
-2) 只能使用输入小句 id；优先整句采用该小句完整 t0~t1，不要随意砍半句
-3) 总源片时长尽量接近 target_source_ms；若无法完整讲完，宁可少 5–8 秒，也要完整
-4) 删除：尺码建议、长段砍价、直播控场、幻觉垃圾（对对对、xy）
-5) keep 按成片播放顺序；每条写 why 与 point；最后 1–2 条必须是收束，不能是未完成句
-6) 只输出严格 JSON，不要 markdown
-
-输出 JSON schema:
-{
-  "product_summary": "一句话主卖点",
-  "hook_type": "visual|pain|welfare",
-  "main_points": ["主卖点1","版型点","体验点","细节点"],
-  "logic": ["钩子","版型上身","细节","对比体验","收束"],
-  "keep": [
-    {"id":"c00012","t0_ms":12300,"t1_ms":15800,"text":"...","why":"3秒痛点钩子","point":"显瘦","complete":true}
-  ],
-  "drop_ids": ["c00001","c00002"],
-  "notes": "如何保证完整逻辑、删了哪些半句/重复"
-}
-"""
-
-
-SYSTEM_PROMPT_LIGHT = """你是服装带货短视频剪辑导演。输入为口播小句(id+时间戳+text)。
-任务：先提炼 main_points，再从输入中选 keep 并按成片顺序重排。只使用输入 id，禁止编造时间。
-
-硬规则：
-1) 开场 0-3s 仅 1 句最强钩子：视觉冲击/痛点/福利悬念 三选一
-2) 删除：打招呼/控场/扣1/闲聊/调试、尺码建议、长段讲价、重复话术只留最优一句
-3) 优先：上身效果>面料>价格(价格最多开场一句)
-4) 顺序：钩子→版型上身→细节→对比/体验→自然收束；句子必须语义完整，禁止半截
-5) 总源片时长接近 target_source_ms；宁可略短也要完整
-6) 只输出严格 JSON，不要 markdown
+【成片组织】
+顺序固定：钩子 → 版型上身 → 细节 → 对比/体验 → 收束
+优先级：上身效果 > 面料 > 细节 > 价格(最多开场1句)
+时长：总源片接近 target_src_ms；完整表达优先，宁可短 5–8 秒也不凑静音尾巴
+keep 每条：完整语义 + why + point；最后 1–2 条必须是收束
 
 JSON:
 {"product_summary":"...","hook_type":"visual|pain|welfare","main_points":["..."],"logic":["钩子","版型上身","细节","对比体验","收束"],"keep":[{"id":"c00012","t0_ms":0,"t1_ms":1,"text":"...","why":"...","point":"...","complete":true}],"drop_ids":["c00001"],"notes":"..."}
@@ -344,17 +274,34 @@ def select_clauses_for_llm(
     return selected, stats
 
 
-def _learning_hints(limit: int = 4) -> dict[str, Any]:
-    """Tiny preference hints only — keep payload small for latency."""
+def _learning_hints(limit: int = 6) -> dict[str, Any]:
+    """Compact learned taste for the user message (from preferences / cases)."""
+    # Static priors distilled from 学习2.0 pair folders (pos short cut / neg long live)
+    static = {
+        "pos_like": [
+            "显瘦", "收腰", "版型", "面料软", "不透", "垂感", "遮肉", "梨形",
+            "蕾丝", "拼接", "显白", "上身效果", "对比",
+        ],
+        "neg_like": [
+            "家人们", "扣1", "点关注", "小黄车", "上链接", "尺码", "M码", "L码",
+            "券后", "加购", "欢迎", "过一下", "直播间",
+        ],
+        "taste": "像短成片口播，不像直播间讲解",
+    }
     try:
         st = learning_status()
-        keep = (st.get("top_hook") or [])[:limit]
+        keep = (st.get("top_hook") or st.get("top_keep") or [])[:limit]
         drop = (st.get("top_drop") or [])[:limit]
-        if not keep and not drop:
-            return {}
-        return {"keep": keep, "drop": drop}
+        out = dict(static)
+        if keep:
+            out["learned_keep"] = keep
+        if drop:
+            out["learned_drop"] = drop
+        if st.get("events"):
+            out["events"] = st.get("events")
+        return out
     except Exception:
-        return {}
+        return static
 
 
 def call_llm_for_plan(
@@ -395,19 +342,23 @@ def call_llm_for_plan(
         for u in clauses
     ]
     user_payload: dict[str, Any] = {
+        "task": "extract_main_points_then_select_reorder_keep",
         "target_s": target_seconds,
         "speed": sp,
         "target_src_ms": target_source_ms,
         "n": len(compact),
-        "rules": "去控场/尺码; 钩子→版型→细节→体验→收束; 只用输入id; 完整句",
+        # Taste lock from 学习2.0：短成片正样本 vs 长直播负样本
+        "rules": (
+            "像正样本短成片:高密度卖点完整句;"
+            "不像负样本直播:去控场/尺码/讲价/欢迎;"
+            "顺序钩子→版型→细节→体验→收束;只用输入id;禁止凑静音尾巴"
+        ),
+        "taste": _learning_hints(),
         "clauses": compact,
     }
-    hints = _learning_hints()
-    if hints:
-        user_payload["hints"] = hints
 
     user_text = (
-        "已筛选口播小句。提取 main_points 并选/排 keep，只输出JSON：\n"
+        "以下为已筛选口播小句与学习偏好。先提 main_points，再选/排 keep，只输出JSON：\n"
         + json.dumps(user_payload, ensure_ascii=False, separators=(",", ":"))
     )
     messages = [

@@ -1703,6 +1703,7 @@ function setupTranscriptPanelToggle() {
   const apply = (collapsed) => {
     panel.classList.toggle("collapsed", collapsed);
     btn.textContent = collapsed ? "展开" : "收起";
+    btn.title = collapsed ? "展开口播时间轴" : "收起口播时间轴";
     try {
       localStorage.setItem("clipper_transcript_panel_collapsed", collapsed ? "1" : "0");
     } catch (_) {}
@@ -1717,6 +1718,13 @@ function setupTranscriptPanelToggle() {
     e.preventDefault();
     e.stopPropagation();
     apply(!panel.classList.contains("collapsed"));
+  });
+  // Convenience: clicking the panel title also expands when collapsed
+  panel.querySelector(".jy-panel-head")?.addEventListener("click", (e) => {
+    if (!panel.classList.contains("collapsed")) return;
+    if (e.target.closest("button")) return;
+    e.preventDefault();
+    apply(false);
   });
 }
 

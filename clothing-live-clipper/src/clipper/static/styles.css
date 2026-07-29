@@ -199,9 +199,13 @@ body {
 }
 .jy-panel.collapsed {
   flex: 0 0 auto !important;
+  min-height: 0 !important;
 }
+/* Hide everything under the header so collapse never looks like an empty content area */
 .jy-panel.collapsed .jy-transcript,
-.jy-panel.collapsed .jy-panel-body {
+.jy-panel.collapsed .jy-panel-body,
+.jy-panel.collapsed .jy-track-tools,
+.jy-panel.collapsed .jy-llm-status {
   display: none !important;
 }
 .jy-panel.collapsed .jy-panel-head {

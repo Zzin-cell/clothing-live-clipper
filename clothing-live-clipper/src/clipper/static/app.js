@@ -1102,6 +1102,76 @@ function setupAsrTools() {
   $("asr-to-golden")?.addEventListener("click", () => addAsrToTrack("golden"));
 }
 
+function resolvePlanPath(data) {
+  /** Normalize job meta into a user-facing processing path. */
+  const st = data.status || "";
+  const processing = ["queued", "processing", "starting", "claimed"].includes(st);
+  const stage = String(data.stage || "");
+  const pathRaw = String(data.llm_path || "");
+  const model = String(data.llm_model || "");
+  let status = data.llm_status || "";
+  let statusText = data.llm_status_text || "";
+
+  // Infer for older jobs / incomplete meta
+  if (!status) {
+    if (processing && (stage.includes("llm") || /llm/i.test(String(data.stage_detail || "")))) {
+      status = "running";
+      statusText = "正在走 LLM 规划…";
+    } else if (data.llm_fallback || data.llm_error) {
+      status = "failed";
+      statusText = "LLM 失败，已回退规则";
+    } else if (
+      pathRaw === "cloud_or_repaired" ||
+      pathRaw.includes("stable_ids_only") ||
+      pathRaw.includes("light_asr") ||
+      model.startsWith("Qwen") ||
+      /gpt|deepseek|glm|qwen/i.test(model)
+    ) {
+      status = "success";
+      statusText = "云端 LLM";
+    } else if (pathRaw.includes("local") || model.includes("local")) {
+      status = "local_fallback";
+      statusText = "本地卖点兜底";
+    } else if (pathRaw.includes("rules") || model.includes("rules") || data.planner === "rules") {
+      status = "rules_fallback";
+      statusText = "规则兜底";
+    } else if (data.planner === "llm") {
+      status = "success";
+      statusText = "LLM 路径";
+    } else if (processing) {
+      status = "running";
+      statusText = "处理中…";
+    } else {
+      status = "idle";
+      statusText = "";
+    }
+  }
+
+  // Canonical labels for the "处理路径" module
+  const pathLabel = {
+    success: "云端 LLM",
+    local_fallback: "本地卖点兜底",
+    rules_fallback: "规则兜底",
+    failed: "失败（已回退）",
+    disabled: "规则排片",
+    running: "处理中",
+  }[status] || "";
+
+  const detail =
+    statusText ||
+    {
+      success: "本视频由云端大模型选句排片",
+      local_fallback: "云端失败/不可用，使用本地卖点规则补片",
+      rules_fallback: "云端失败或时长不足，使用规则排片兜底",
+      failed: "LLM 失败，已回退规则",
+      disabled: "未启用 LLM，规则排片",
+      running: "ASR/规划进行中",
+    }[status] ||
+    "";
+
+  return { status, pathLabel, detail, pathRaw, model };
+}
+
 function renderLlmStatus(data) {
   const card = $("llm-status-card");
   const badge = $("llm-status-badge");
@@ -1109,49 +1179,9 @@ function renderLlmStatus(data) {
   const metaEl = $("llm-status-meta");
   if (!badge || !text) return;
 
-  const st = data.status || "";
-  const processing = ["queued", "processing", "starting", "claimed"].includes(st);
-  const stage = String(data.stage || "");
-  let status = data.llm_status || "";
-  let statusText = data.llm_status_text || "";
+  const { status, pathLabel, detail, pathRaw, model } = resolvePlanPath(data);
 
-  // Infer for older jobs without new fields
-  if (!status) {
-    if (processing && (stage.includes("llm") || /llm/i.test(String(data.stage_detail || "")))) {
-      status = "running";
-      statusText = "LLM 处理中…";
-    } else if (data.llm_fallback || data.llm_error) {
-      status = "failed";
-      statusText = "LLM失败，已回退规则";
-    } else if (data.planner === "llm") {
-      const model = String(data.llm_model || "");
-      if (model.startsWith("Qwen") || model.includes("gpt") || model.includes("deepseek")) {
-        status = "success";
-        statusText = "云端LLM成功";
-      } else if (model.includes("local")) {
-        status = "local_fallback";
-        statusText = "本地卖点兜底";
-      } else if (model.includes("rules")) {
-        status = "rules_fallback";
-        statusText = "规则时长兜底";
-      } else {
-        status = "success";
-        statusText = "LLM路径完成";
-      }
-    } else if (data.planner === "rules") {
-      status = data.llm_error ? "failed" : "disabled";
-      statusText = data.llm_error ? "LLM失败，已回退规则" : "规则排片";
-    } else if (processing && stage.includes("llm")) {
-      status = "running";
-      statusText = "LLM 处理中…";
-    } else {
-      status = "idle";
-      statusText = "";
-    }
-  }
-
-  // Idle / empty: hide the whole card (placeholder "未处理" is meaningless).
-  // Show only when we have a real outcome or are actively in LLM stage.
+  // Only show once there is a real path or active processing
   const meaningful = new Set([
     "success",
     "local_fallback",
@@ -1160,7 +1190,7 @@ function renderLlmStatus(data) {
     "disabled",
     "running",
   ]);
-  if (!meaningful.has(status) || (!statusText && status === "idle")) {
+  if (!meaningful.has(status) || !pathLabel) {
     if (card) card.hidden = true;
     badge.className = "llm-badge llm-badge-idle";
     badge.textContent = "";
@@ -1182,27 +1212,24 @@ function renderLlmStatus(data) {
     running: "llm-badge-idle",
   }[status] || "llm-badge-idle";
 
-  const badgeLabel = {
-    success: "成功",
-    local_fallback: "本地兜底",
-    rules_fallback: "规则兜底",
-    failed: "失败",
-    disabled: "未启用",
-    running: "处理中",
-  }[status] || status;
-
   badge.className = `llm-badge ${badgeClass}`;
-  badge.textContent = badgeLabel;
-  text.textContent = statusText || badgeLabel;
+  badge.textContent = pathLabel;
+  // One clear line: which path this video used
+  text.textContent = detail;
 
   if (metaEl) {
     const bits = [];
-    if (data.llm_model) bits.push(`模型: ${data.llm_model}`);
-    if (data.llm_path) bits.push(`路径: ${data.llm_path}`);
+    if (status === "success") bits.push("路径: 云端 LLM");
+    else if (status === "local_fallback") bits.push("路径: 本地兜底");
+    else if (status === "rules_fallback" || status === "disabled") bits.push("路径: 规则兜底");
+    else if (status === "failed") bits.push("路径: 失败回退");
+    else if (status === "running") bits.push("路径: 处理中");
+    if (pathRaw) bits.push(`内部: ${pathRaw}`);
+    if (model) bits.push(`模型: ${model}`);
     if (data.llm_latency_ms != null) bits.push(`耗时: ${data.llm_latency_ms}ms`);
     if (data.llm_attempt) bits.push(`尝试: ${data.llm_attempt}`);
-    if (data.final_duration_s != null) bits.push(`成片: ${data.final_duration_s}s`);
     if (data.selected_clips != null) bits.push(`段数: ${data.selected_clips}`);
+    if (data.final_duration_s != null) bits.push(`成片: ${data.final_duration_s}s`);
     const cov = data.llm_coverage;
     if (cov && typeof cov === "object") {
       bits.push(

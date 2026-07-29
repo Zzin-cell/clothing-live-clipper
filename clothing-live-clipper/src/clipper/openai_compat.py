@@ -244,21 +244,17 @@ def build_payload_variants(
     max_tokens: int = 4096,
     force_json: bool = True,
 ) -> list[dict[str, Any]]:
-    """Request bodies ordered from preferred -> more compatible."""
+    """Request bodies ordered from preferred -> more compatible.
+
+    Stability note: keep variants few and place the historically-successful
+    compact JSON body first for SiliconFlow/Qwen.
+    """
     think_off = _thinking_off_fields(model)
     base_msg = {"model": model, "messages": messages, **think_off}
     variants: list[dict[str, Any]] = []
 
     if force_json:
-        # Prefer JSON + max_tokens + thinking off first (speed + parseability)
-        variants.append(
-            {
-                **base_msg,
-                "temperature": temperature,
-                "response_format": {"type": "json_object"},
-                "max_tokens": max_tokens,
-            }
-        )
+        # SiliconFlow Qwen: json_object + max_tokens is enough; keep body lean.
         variants.append(
             {
                 "model": model,
@@ -268,13 +264,26 @@ def build_payload_variants(
                 "max_tokens": max_tokens,
             }
         )
+        # Fallback without response_format (some gateways reject it)
         variants.append(
             {
-                **base_msg,
+                "model": model,
+                "messages": messages,
                 "temperature": temperature,
-                "response_format": {"type": "json_object"},
+                "max_tokens": max_tokens,
             }
         )
+        # Thinking-off only when model family needs it (Qwen3/R1); avoid extra flags otherwise
+        if think_off:
+            variants.insert(
+                0,
+                {
+                    **base_msg,
+                    "temperature": temperature,
+                    "response_format": {"type": "json_object"},
+                    "max_tokens": max_tokens,
+                },
+            )
 
     variants.extend(
         [
@@ -285,9 +294,7 @@ def build_payload_variants(
                 "temperature": temperature,
                 "max_tokens": max_tokens,
             },
-            {**base_msg, "temperature": temperature},
-            {**base_msg, "top_p": 0.9, "max_tokens": max_tokens},
-            {**base_msg, "max_tokens": max_tokens},
+            {"model": model, "messages": messages, "max_tokens": max_tokens},
             {"model": model, "messages": messages},  # minimal
         ]
     )
@@ -377,69 +384,90 @@ def chat_completions(
     if fast:
         endpoints = endpoints[:1]
         headers_list = headers_list[:1]
-        # Stability: one payload only. Multi-variant retries *multiply* timeout risk.
+        # Stability: single payload only in fast mode.
+        # Multiple variants multiply timeout risk and used to dominate plan failures.
         payloads = payloads[:1]
-        timeout = min(max(int(timeout), 60), 120)
+        # Respect caller budget; do not inflate small plan timeouts back to 70+.
+        timeout = min(max(int(timeout), 12), 90)
 
     errors: list[str] = []
     t0 = time.perf_counter()
+    # Fast path: do not silently double a full timeout (was burning 2x budget).
+    # Non-fast: allow one quick reconnect on network blips only.
+    max_transient = 0 if fast else 1
     for url in endpoints:
         for hi, headers in enumerate(headers_list):
             for pi, payload in enumerate(payloads):
-                try:
-                    raw = _http_json(url, headers, payload, method="POST", timeout=timeout)
-                    content = extract_chat_text(raw)
-                    # For force_json planning: empty content is unusable, try next variant.
-                    # For probe/fast path: empty-but-valid assistant response still means connected.
-                    if force_json and not (content or "").strip():
-                        errors.append(f"empty_content@{url}")
-                        continue
-                    ms = int((time.perf_counter() - t0) * 1000)
+                transient_left = max_transient
+                while True:
                     try:
-                        remember_successful_route(
-                            endpoint=url,
-                            auth_variant=hi if not last_ep else last_auth,
-                            payload_variant=pi if not last_ep else last_payload,
-                            latency_ms=ms,
-                        )
-                    except Exception:
-                        pass
-                    return {
-                        "content": content,
-                        "raw": raw,
-                        "model": mdl,
-                        "base_url": base,
-                        "endpoint": url,
-                        "auth_variant": hi,
-                        "payload_variant": pi,
-                        "latency_ms": ms,
-                    }
-                except OpenAICompatError as e:
-                    msg = str(e)
-                    errors.append(msg)
-                    # Auth invalid: try at most one alternate auth on this endpoint, then abort ALL retries
-                    if "HTTP 401" in msg or "HTTP 403" in msg:
-                        # if this is already the second auth attempt (hi>=1) or message clearly invalid token → stop hard
-                        if hi >= 1 or is_auth_invalid_error(msg):
-                            info = classify_llm_error(msg, base_url=base)
-                            raise OpenAICompatError(
-                                f"auth_invalid: {info['message']} | {msg[:200]}"
-                            ) from e
-                        break  # next auth variant only
-                    if "HTTP 404" in msg or "HTTP 405" in msg:
-                        hi = len(headers_list)
+                        raw = _http_json(url, headers, payload, method="POST", timeout=timeout)
+                        content = extract_chat_text(raw)
+                        # For force_json planning: empty content is unusable, try next variant.
+                        # For probe/fast path: empty-but-valid assistant response still means connected.
+                        if force_json and not (content or "").strip():
+                            errors.append(f"empty_content@{url}")
+                            break
+                        ms = int((time.perf_counter() - t0) * 1000)
+                        try:
+                            # Store absolute payload index from original list order when possible.
+                            remember_successful_route(
+                                endpoint=url,
+                                auth_variant=hi if not last_ep else last_auth,
+                                payload_variant=pi if not last_ep else last_payload,
+                                latency_ms=ms,
+                            )
+                        except Exception:
+                            pass
+                        return {
+                            "content": content,
+                            "raw": raw,
+                            "model": mdl,
+                            "base_url": base,
+                            "endpoint": url,
+                            "auth_variant": hi,
+                            "payload_variant": pi,
+                            "latency_ms": ms,
+                        }
+                    except OpenAICompatError as e:
+                        msg = str(e)
+                        errors.append(msg)
+                        # Auth invalid: try at most one alternate auth on this endpoint, then abort ALL retries
+                        if "HTTP 401" in msg or "HTTP 403" in msg:
+                            # if this is already the second auth attempt (hi>=1) or message clearly invalid token → stop hard
+                            if hi >= 1 or is_auth_invalid_error(msg):
+                                info = classify_llm_error(msg, base_url=base)
+                                raise OpenAICompatError(
+                                    f"auth_invalid: {info['message']} | {msg[:200]}"
+                                ) from e
+                            break  # next auth variant only
+                        if "HTTP 404" in msg or "HTTP 405" in msg:
+                            hi = len(headers_list)
+                            break
+                        low = msg.lower()
+                        # Rate limit / transient gateway: short backoff then maybe one more try
+                        if any(k in low for k in ("429", "502", "503", "temporarily")) and transient_left > 0:
+                            transient_left -= 1
+                            time.sleep(0.8)
+                            continue
+                        if ("timeout" in low or "timed out" in low or "10054" in low or "10060" in low) and transient_left > 0:
+                            transient_left -= 1
+                            time.sleep(0.4)
+                            continue
+                        if "timeout" in low or "timed out" in low:
+                            # don't burn remaining payload variants after a full timeout
+                            raise OpenAICompatError(msg) from e
                         break
-                    # Timeout / network: do NOT burn another full timeout on payload variants
-                    low = msg.lower()
-                    if "timeout" in low or "timed out" in low:
-                        raise OpenAICompatError(msg) from e
-                    continue
-                except Exception as e:
-                    errors.append(f"{type(e).__name__}:{e}")
-                    low = f"{type(e).__name__}:{e}".lower()
-                    if "timeout" in low or "timed out" in low:
-                        raise OpenAICompatError(f"{type(e).__name__}:{e}") from e
-                    continue
+                    except Exception as e:
+                        errors.append(f"{type(e).__name__}:{e}")
+                        low = f"{type(e).__name__}:{e}".lower()
+                        if ("timeout" in low or "timed out" in low or "10054" in low) and transient_left > 0:
+                            transient_left -= 1
+                            time.sleep(0.4)
+                            continue
+                        if "timeout" in low or "timed out" in low:
+                            raise OpenAICompatError(f"{type(e).__name__}:{e}") from e
+                        break
     detail = " | ".join(errors[-6:]) if errors else "unknown"
     info = classify_llm_error(detail, base_url=base)
     if info["error_class"] == "auth_invalid":

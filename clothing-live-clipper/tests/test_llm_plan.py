@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import re
+from unittest.mock import patch
+
 from clipper import llm_plan as lp
 from clipper.llm_plan import LIGHT_MAX_CLAUSES, expand_lines_to_clauses, llm_obj_to_timeline, select_clauses_for_llm
 from clipper.models import TimelinePlan
@@ -69,6 +72,91 @@ def test_select_clauses_for_llm_caps_and_drops_bad():
     assert stats.get("dropped_price_ship", 0) >= 1
     # audience / fabric details may be kept
     assert ("面料" in joined) or ("显瘦" in joined) or ("适合" in joined)
+
+
+def test_build_plan_messages_is_ids_only_schema():
+    clauses = expand_lines_to_clauses(_lines())
+    messages, id_map, compact = lp._build_plan_messages(
+        clauses,
+        target_seconds=60,
+        sp=1.4,
+        target_source_ms=84_000,
+        text_max=lp.CLAUSE_TEXT_MAX,
+    )
+    assert messages[0]["role"] == "system"
+    assert '"ids"' in messages[0]["content"]
+    assert "keep\":[{" not in messages[0]["content"]
+    assert "why" not in messages[0]["content"]
+    user = messages[1]["content"]
+    assert "只输出JSON" in user or "ids" in user
+    assert "c|" in user or "c" in user
+    assert compact
+    assert id_map
+    # compact carries text only (no bulky t0/t1 forced into model echo)
+    assert all("id" in c and "text" in c for c in compact)
+
+
+def test_normalize_llm_keep_obj_ids_only_and_numbers():
+    clauses = expand_lines_to_clauses(
+        [
+            {"utt_id": "u1", "text": "家人们扣1", "t0_ms": 0, "t1_ms": 1000},
+            {"utt_id": "u2", "text": "收腰版型显瘦", "t0_ms": 1000, "t1_ms": 3000},
+            {"utt_id": "u3", "text": "面料超软不透", "t0_ms": 3000, "t1_ms": 5000},
+            {"utt_id": "u4", "text": "小个子适合", "t0_ms": 5000, "t1_ms": 7000},
+        ]
+    )
+    # map short -> full like production
+    id_map = {}
+    for c in clauses:
+        m = re.search(r"(\d+)$", c["id"])
+        if m:
+            id_map[f"c{int(m.group(1))}"] = c["id"]
+    obj = lp._normalize_llm_keep_obj(
+        {"ids": ["c2", "c3", "c4"], "hook": "effect"}, clauses, id_map
+    )
+    assert [k["id"] for k in obj["keep"]]
+    texts = " ".join(k["text"] for k in obj["keep"])
+    assert "版型" in texts or "面料" in texts or "适合" in texts
+
+    obj2 = lp._normalize_llm_keep_obj({"sel": [2, 3, 4]}, clauses, id_map)
+    assert obj2["keep"]
+    # numbers 2/3/4 should resolve via id_map
+    assert all(k["id"] in {c["id"] for c in clauses} for k in obj2["keep"])
+
+
+def test_extract_json_obj_accepts_ids_schema():
+    obj = lp._extract_json_obj('```json\n{"ids":["c2","c3"],"hook":"effect"}\n```')
+    assert obj.get("ids") == ["c2", "c3"]
+
+
+def test_call_llm_for_plan_ids_only_success_path():
+    lines = _many_lines(30)
+    fake = {
+        "content": '{"ids":["c3","c4","c6","c7","c12"],"hook":"effect"}',
+        "model": "Qwen/Qwen2.5-7B-Instruct",
+        "base_url": "https://api.siliconflow.cn/v1",
+        "endpoint": "https://api.siliconflow.cn/v1/chat/completions",
+        "auth_variant": 0,
+        "payload_variant": 0,
+        "latency_ms": 900,
+    }
+    with patch("clipper.llm_plan.chat_completions", return_value=fake):
+        with patch(
+            "clipper.llm_plan.runtime_llm",
+            return_value={
+                "enabled": True,
+                "plan_enabled": True,
+                "api_key": "sk-test",
+                "base_url": "https://api.siliconflow.cn/v1",
+                "model": "Qwen/Qwen2.5-7B-Instruct",
+            },
+        ):
+            obj = lp.call_llm_for_plan(lines, target_seconds=60, playback_speed=1.4)
+    assert obj.get("keep")
+    assert obj.get("_meta", {}).get("submit_mode") == "stable_ids_only_asr_selected_clauses"
+    assert obj.get("_meta", {}).get("latency_ms") == 900
+    plan = llm_obj_to_timeline(obj, lines, target_seconds=60, playback_speed=1.4)
+    assert plan.golden
 
 
 def test_plan_from_local_clauses_not_empty():
@@ -396,15 +484,17 @@ def test_call_llm_for_plan_uses_trim_and_lower_tokens(monkeypatch):
     assert captured.get("timeout") == lp.PLAN_TIMEOUT_S
     assert captured.get("force_json") is True
     assert captured.get("fast") is True
-    # system should be short stability prompt
+    # system should be short stability prompt (ids-only)
     msgs = captured.get("messages") or []
     assert msgs and msgs[0]["role"] == "system"
     assert len(msgs[0]["content"]) < 900
+    assert "ids" in msgs[0]["content"]
     user_content = msgs[1]["content"]
-    assert "已筛选" in user_content
+    assert "候选" in user_content
     assert "all_clauses" not in user_content
-    assert "must_cover" in user_content
-    assert "版型" in user_content and "面料" in user_content and "适用人群" in user_content
-    assert "60" in user_content or "target_s" in user_content
+    assert "ids" in user_content
+    assert "版型" in user_content and "面料" in user_content and ("适用人群" in user_content or "人群" in user_content)
+    assert "60" in user_content
     assert obj.get("_meta", {}).get("clauses_sent", 10**9) <= lp.LIGHT_MAX_CLAUSES
+    assert obj.get("_meta", {}).get("submit_mode") == "stable_ids_only_asr_selected_clauses"
     assert obj.get("_meta", {}).get("attempt") in {"primary", "retry_light"}

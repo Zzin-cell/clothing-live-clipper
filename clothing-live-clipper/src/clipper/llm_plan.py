@@ -187,7 +187,18 @@ def _extract_json_obj(text: str) -> dict[str, Any]:
             continue
         if not isinstance(obj, dict):
             continue
-        if "keep" in obj or "main_points" in obj or "product_summary" in obj:
+        if any(
+            k in obj
+            for k in (
+                "keep",
+                "ids",
+                "keep_ids",
+                "sel",
+                "selected",
+                "main_points",
+                "product_summary",
+            )
+        ):
             return obj
         if best is None:
             best = obj
@@ -291,16 +302,18 @@ def expand_lines_to_clauses(
     return out
 
 
-# Latency-first caps (SiliconFlow lightweight path)
-# Stability-first: small payload → fewer SiliconFlow timeouts
-LIGHT_MAX_CLAUSES = 28
-CLAUSE_TEXT_MAX = 48
-PLAN_MAX_TOKENS = 700
-PLAN_TIMEOUT_S = 100
-# Second attempt uses an even smaller payload if first times out
-LIGHT_MAX_CLAUSES_RETRY = 18
-CLAUSE_TEXT_MAX_RETRY = 40
-PLAN_MAX_TOKENS_RETRY = 500
+# Stability-first caps (SiliconFlow Qwen2.5-7B path)
+# Root cause of ~10% cloud success: full keep objects (id+t0+t1+text+why)
+# timeout / echo / garbage. Id-only schema finishes in ~1–3s in probes.
+LIGHT_MAX_CLAUSES = 20
+CLAUSE_TEXT_MAX = 28
+PLAN_MAX_TOKENS = 160
+PLAN_TIMEOUT_S = 45
+# Second attempt: even lighter + shorter timeout budget
+LIGHT_MAX_CLAUSES_RETRY = 12
+CLAUSE_TEXT_MAX_RETRY = 22
+PLAN_MAX_TOKENS_RETRY = 100
+PLAN_TIMEOUT_S_RETRY = 28
 
 _CONTROL_MARKERS = (
     # 称呼/互动
@@ -555,9 +568,16 @@ def _build_plan_messages(
     target_source_ms: int,
     text_max: int,
 ) -> tuple[list[dict[str, Any]], dict[str, str], list[dict[str, Any]]]:
-    """Build compact chat messages + short-id map + compact clause list."""
+    """Build id-only chat messages + short-id map + compact clause list.
+
+    Intentionally ask the model for keep *ids only* (not full keep objects).
+    Full objects were the main source of SiliconFlow read-timeouts and JSON garbage.
+    Local code expands ids → clauses and runs coverage/duration repair.
+    """
+    del sp, target_source_ms  # kept in signature for call-site compatibility
     id_map: dict[str, str] = {}
     compact: list[dict[str, Any]] = []
+    lines: list[str] = []
     for u in clauses:
         full = str(u["id"])
         m = re.search(r"(\d+)$", full)
@@ -565,43 +585,22 @@ def _build_plan_messages(
         if short in id_map and id_map[short] != full:
             short = full
         id_map[short] = full
-        compact.append(
-            {
-                "id": short,
-                "t0": int(u["t0_ms"]),
-                "t1": int(u["t1_ms"]),
-                "text": str(u["text"])[:text_max],
-            }
-        )
-    final_lo, final_hi = 55, 65
-    user_payload: dict[str, Any] = {
-        "target_s": target_seconds,
-        "final_window_s": [final_lo, final_hi],
-        "speed": sp,
-        "target_src_ms": target_source_ms,
-        "n": len(compact),
-        "must_cover": ["版型", "面料", "适用人群"],
-        "rules": (
-            "去直播感/尺码/价格/发货;"
-            "必含版型+面料+适用人群;"
-            f"成片约{target_seconds}s;"
-            "钩子→版型→面料→人群→收束;只用输入id"
-        ),
-        "clauses": compact,
-    }
+        text = str(u["text"])[:text_max]
+        compact.append({"id": short, "text": text})
+        lines.append(f"{short}|{text}")
+    # Line format beats nested JSON for small models (less echo / faster).
     user_text = (
-        "已筛选口播小句。只输出JSON keep（id必须原样复制）：\n"
-        + json.dumps(user_payload, ensure_ascii=False, separators=(",", ":"))
+        f"目标约{int(target_seconds)}s。从候选选保留id并按播放顺序排列（约8-16个）。"
+        "优先版型/面料/适用人群；删除直播/尺码/价格/发货。\n"
+        "候选:\n"
+        + "\n".join(lines)
+        + '\n只输出JSON:{"ids":["c2","c3"],"hook":"effect"}'
     )
-    # Ultra-short system for speed/stability; full light prompt still available but heavy.
     system = (
-        "服装短视频剪辑。输入小句id/t0/t1/text。"
-        "选keep重排：钩子→版型→面料→适用人群→收束。"
-        "删直播控场/尺码/价格/发货。只用输入id，完整句，禁编造。"
-        "只输出JSON:"
-        '{"product_summary":"...","hook_type":"visual|pain|effect","main_points":["版型","面料","人群"],'
-        '"keep":[{"id":"c12","t0_ms":0,"t1_ms":1,"text":"...","why":"...","point":"版型","complete":true}],'
-        '"drop_ids":[],"notes":"..."}'
+        "你是服装短视频剪辑助手。只输出一个JSON对象。"
+        "ids必须来自候选且原样复制；覆盖版型+面料+适用人群；"
+        "删除直播控场/尺码/价格/发货；顺序钩子→版型→面料→人群→收束。"
+        '格式:{"ids":["c2","c3","c4"],"hook":"effect"}'
     )
     messages = [
         {"role": "system", "content": system},
@@ -648,7 +647,7 @@ def call_llm_for_plan(
             "max_clauses": LIGHT_MAX_CLAUSES_RETRY,
             "text_max": CLAUSE_TEXT_MAX_RETRY,
             "max_tokens": PLAN_MAX_TOKENS_RETRY,
-            "timeout": min(70, PLAN_TIMEOUT_S),
+            "timeout": PLAN_TIMEOUT_S_RETRY,
             "label": "retry_light",
         },
     ]
@@ -659,8 +658,9 @@ def call_llm_for_plan(
     trim_stats: dict[str, Any] = {}
     id_map: dict[str, str] = {}
     attempt_label = "primary"
+    import time as _time
 
-    for att in attempts:
+    for idx, att in enumerate(attempts):
         clauses, trim_stats = select_clauses_for_llm(
             clauses_all, max_clauses=int(att["max_clauses"])
         )
@@ -677,12 +677,12 @@ def call_llm_for_plan(
                 model=model,
                 base_url=base,
                 api_key=key,
-                temperature=0.1,
+                temperature=0.0,
                 max_tokens=int(att["max_tokens"]),
                 force_json=True,
                 timeout=int(att["timeout"]),
                 cfg=cfg,
-                fast=True,  # last_route + single payload, no multi-timeout burn
+                fast=True,  # last_route + few payloads
             )
             attempt_label = str(att["label"])
             last_err = None
@@ -691,8 +691,14 @@ def call_llm_for_plan(
             last_err = e
             msg = str(e).lower()
             # Only retry on timeout/network-ish failures with lighter payload
-            if "timeout" not in msg and "timed out" not in msg and "10054" not in msg:
+            retriable = any(
+                k in msg
+                for k in ("timeout", "timed out", "10054", "10060", "temporarily", "503", "502", "429")
+            )
+            if not retriable:
                 raise RuntimeError(f"llm_request_failed:{e}") from e
+            if idx + 1 < len(attempts):
+                _time.sleep(0.8)  # brief backoff before lighter retry
             continue
 
     if out is None:
@@ -700,20 +706,7 @@ def call_llm_for_plan(
 
     content = out.get("content") or ""
     obj = _extract_json_obj(content)
-    # Expand short ids (c12) back to canonical c00012 before repair/timeline
-    keep = obj.get("keep") if isinstance(obj.get("keep"), list) else []
-    for item in keep:
-        if not isinstance(item, dict):
-            continue
-        raw_id = str(item.get("id") or "").strip()
-        if raw_id in id_map:
-            item["id"] = id_map[raw_id]
-        else:
-            m = re.search(r"c?0*(\d{1,5})", raw_id, flags=re.I)
-            if m:
-                full = f"c{int(m.group(1)):05d}"
-                if full in {c["id"] for c in clauses}:
-                    item["id"] = full
+    obj = _normalize_llm_keep_obj(obj, clauses, id_map)
     obj = _repair_keep_ids(obj, clauses)
     obj["_meta"] = {
         "model": out.get("model") or model,
@@ -725,7 +718,7 @@ def call_llm_for_plan(
         "input_clauses": len(clauses),
         "clauses_sent": trim_stats.get("clauses_sent"),
         "trim_stats": trim_stats,
-        "submit_mode": "stable_light_asr_selected_clauses",
+        "submit_mode": "stable_ids_only_asr_selected_clauses",
         "attempt": attempt_label,
         "compat": {
             "auth_variant": out.get("auth_variant"),
@@ -743,6 +736,101 @@ def call_llm_for_plan(
     return obj
 
 
+def _resolve_short_id(raw: str, id_map: dict[str, str], by_id: dict[str, dict[str, Any]]) -> str | None:
+    """Map model short ids (c2 / C02 / 2) onto canonical clause ids."""
+    s = str(raw or "").strip()
+    if not s:
+        return None
+    if s in by_id:
+        return s
+    if s in id_map and id_map[s] in by_id:
+        return id_map[s]
+    m = re.search(r"c?0*(\d{1,5})", s, flags=re.I)
+    if m:
+        short = f"c{int(m.group(1))}"
+        if short in id_map and id_map[short] in by_id:
+            return id_map[short]
+        cand = f"c{int(m.group(1)):05d}"
+        if cand in by_id:
+            return cand
+    if s.isdigit():
+        short = f"c{int(s)}"
+        if short in id_map and id_map[short] in by_id:
+            return id_map[short]
+        cand = f"c{int(s):05d}"
+        if cand in by_id:
+            return cand
+    return None
+
+
+def _normalize_llm_keep_obj(
+    obj: dict[str, Any],
+    clauses: list[dict[str, Any]],
+    id_map: dict[str, str],
+) -> dict[str, Any]:
+    """Accept ids-only / keep / sel schemas and expand into keep[{id,text,...}]."""
+    if not isinstance(obj, dict):
+        obj = {}
+    by_id = {str(c.get("id")): c for c in clauses}
+    ordered_ids: list[str] = []
+
+    def _push(raw: Any) -> None:
+        if isinstance(raw, dict):
+            raw = raw.get("id") or raw.get("utt_id") or raw.get("cid")
+        if isinstance(raw, (int, float)) and not isinstance(raw, bool):
+            raw = str(int(raw))
+        sid = _resolve_short_id(str(raw or ""), id_map, by_id)
+        if sid and sid not in ordered_ids:
+            ordered_ids.append(sid)
+
+    # Preferred lightweight schema
+    for key in ("ids", "keep_ids", "sel", "selected", "order", "keep_order"):
+        arr = obj.get(key)
+        if isinstance(arr, list) and arr:
+            for x in arr:
+                _push(x)
+            break
+
+    # Legacy full keep objects / mixed list
+    if not ordered_ids:
+        keep = obj.get("keep")
+        if isinstance(keep, list):
+            for item in keep:
+                _push(item)
+
+    # Fallback: scan whole JSON text for cN tokens that exist in map
+    if not ordered_ids:
+        blob = json.dumps(obj, ensure_ascii=False)
+        for m in re.finditer(r"\bc0*(\d{1,5})\b", blob, flags=re.I):
+            _push(f"c{int(m.group(1))}")
+
+    keep_out: list[dict[str, Any]] = []
+    for sid in ordered_ids:
+        src = by_id.get(sid)
+        if not src:
+            continue
+        keep_out.append(
+            {
+                "id": sid,
+                "t0_ms": int(src["t0_ms"]),
+                "t1_ms": int(src["t1_ms"]),
+                "text": str(src.get("text") or ""),
+                "why": "llm_id",
+                "point": "",
+                "complete": True,
+            }
+        )
+    out = dict(obj)
+    out["keep"] = keep_out
+    if "hook_type" not in out and obj.get("hook"):
+        out["hook_type"] = obj.get("hook")
+    if "main_points" not in out:
+        out["main_points"] = ["版型", "面料", "适用人群"]
+    out["_ids_only"] = True
+    out["_keep_ids_n"] = len(keep_out)
+    return out
+
+
 def _repair_keep_ids(obj: dict[str, Any], clauses: list[dict[str, Any]]) -> dict[str, Any]:
     """
     Small models often invent broken keep ids (e.g. c0000000...1).
@@ -751,6 +839,10 @@ def _repair_keep_ids(obj: dict[str, Any], clauses: list[dict[str, Any]]) -> dict
     """
     if not isinstance(obj, dict):
         obj = {}
+    # Expand compact schemas before repair when caller skipped normalize
+    if not isinstance(obj.get("keep"), list) or not obj.get("keep"):
+        if any(k in obj for k in ("ids", "keep_ids", "sel", "selected")):
+            obj = _normalize_llm_keep_obj(obj, clauses, {})
     keep = obj.get("keep")
     if not isinstance(keep, list):
         keep = []
@@ -767,6 +859,13 @@ def _repair_keep_ids(obj: dict[str, Any], clauses: list[dict[str, Any]]) -> dict
             cand = f"c{int(m.group(1)):05d}"
             if cand in by_id:
                 return by_id[cand]
+            # short form c2 when clauses use c00002
+            short = f"c{int(m.group(1))}"
+            for kid, c in by_id.items():
+                mm = re.search(r"(\d+)$", kid)
+                if mm and int(mm.group(1)) == int(m.group(1)):
+                    return c
+            del short
         text_i = re.sub(r"\s+", "", str(item.get("text") or ""))
         if text_i:
             for n in (14, 10, 8, 6):
@@ -795,7 +894,11 @@ def _repair_keep_ids(obj: dict[str, Any], clauses: list[dict[str, Any]]) -> dict
 
     for item in keep:
         if not isinstance(item, dict):
-            continue
+            # bare id string inside keep
+            if isinstance(item, str) or isinstance(item, (int, float)):
+                item = {"id": item}
+            else:
+                continue
         src = match_clause(item)
         if not src:
             continue
@@ -1421,7 +1524,12 @@ def plan_from_asr_with_llm(
 
     candidates: list[tuple[str, TimelinePlan, dict[str, Any]]] = []
     if plan is not None and plan.golden:
-        candidates.append(("cloud_or_repaired", plan, obj))
+        cloud_obj = dict(obj)
+        cmeta = dict(cloud_obj.get("_meta") or {})
+        cmeta["cloud_error"] = None
+        cmeta["model"] = cmeta.get("model") or "cloud_llm"
+        cloud_obj["_meta"] = cmeta
+        candidates.append(("cloud_or_repaired", plan, cloud_obj))
     if local_plan.golden:
         lo = dict(local_obj)
         meta = dict(lo.get("_meta") or {})
@@ -1449,7 +1557,20 @@ def plan_from_asr_with_llm(
     if not candidates:
         raise RuntimeError(cloud_err or "llm_plan_has_no_slots")
 
-    best_name, best_plan, best_obj = max(candidates, key=lambda x: _score(x[1]))
+    def _pick_score(item: tuple[str, TimelinePlan, dict[str, Any]]) -> tuple:
+        name, p, _o = item
+        base = _score(p)
+        # Prefer cloud whenever coverage is decent and duration is not collapsed.
+        # Previous pure score often chose rules_duration because it pads longer.
+        if name == "cloud_or_repaired" and base[0] >= 2 and base[3] >= int(min_ok_src * 0.55):
+            return (base[0] + 1, base[1] + aim_src // 4, base[2], base[3], 3)
+        if name == "cloud_or_repaired":
+            return (*base, 2)
+        if name == "local_clause_rank":
+            return (*base, 1)
+        return (*base, 0)
+
+    best_name, best_plan, best_obj = max(candidates, key=_pick_score)
     meta = dict(best_obj.get("_meta") or {})
     meta["chosen_path"] = best_name
     meta["cloud_error"] = cloud_err
@@ -1459,8 +1580,9 @@ def plan_from_asr_with_llm(
             "ms": int(p.total_duration_ms or 0),
             "cov": _cov(p),
             "score": _score(p),
+            "pick": _pick_score((name, p, o)),
         }
-        for name, p, _o in candidates
+        for name, p, o in candidates
     }
     best_obj["_meta"] = meta
     # ensure warnings mark path

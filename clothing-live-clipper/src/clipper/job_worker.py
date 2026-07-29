@@ -283,6 +283,7 @@ def process_job_dir(job_dir: Path) -> None:
                 if model_name.startswith("Qwen") or chosen in {
                     "cloud_or_repaired",
                     "stable_light_asr_selected_clauses",
+                    "stable_ids_only_asr_selected_clauses",
                     "light_asr_selected_clauses",
                 }:
                     llm_status = "success"

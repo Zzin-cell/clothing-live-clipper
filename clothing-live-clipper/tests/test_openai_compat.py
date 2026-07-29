@@ -200,6 +200,42 @@ def test_chat_completions_fast_with_last_route_is_single_shot():
             )
     assert out.get("content")
     assert calls["n"] == 1
-    # plan-friendly numeric timeout (not tuple); keep real budget
+    # plan-friendly numeric timeout (not tuple); keep caller budget
     assert isinstance(calls["timeout"], (int, float))
     assert calls["timeout"] >= 60
+    assert calls["timeout"] <= 90
+
+
+def test_chat_completions_fast_uses_single_payload_and_no_double_timeout():
+    calls = {"n": 0}
+
+    def fake_http(url, headers, payload=None, method="POST", timeout=180):
+        calls["n"] += 1
+        raise OpenAICompatError("TimeoutError: The read operation timed out")
+
+    with patch("clipper.openai_compat._http_json", side_effect=fake_http):
+        try:
+            chat_completions(
+                messages=[{"role": "user", "content": "1"}],
+                model="Qwen/Qwen2.5-7B-Instruct",
+                base_url="https://api.siliconflow.cn/v1",
+                api_key="sk-test-key-xxxxxxxx",
+                force_json=True,
+                timeout=45,
+                fast=True,
+                cfg={
+                    "api_key": "sk-test-key-xxxxxxxx",
+                    "base_url": "https://api.siliconflow.cn/v1",
+                    "model": "Qwen/Qwen2.5-7B-Instruct",
+                    "last_endpoint": "https://api.siliconflow.cn/v1/chat/completions",
+                    "last_auth_variant": 0,
+                    "last_payload_variant": 0,
+                    "extra_headers": {},
+                    "organization": "",
+                },
+            )
+            assert False, "expected timeout"
+        except OpenAICompatError as e:
+            assert "timeout" in str(e).lower() or "timed out" in str(e).lower()
+    # fast mode must not multiply timeout across payloads / reconnect
+    assert calls["n"] == 1

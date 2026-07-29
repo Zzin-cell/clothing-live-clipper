@@ -1103,6 +1103,7 @@ function setupAsrTools() {
 }
 
 function renderLlmStatus(data) {
+  const card = $("llm-status-card");
   const badge = $("llm-status-badge");
   const text = $("llm-status-text");
   const metaEl = $("llm-status-meta");
@@ -1140,14 +1141,37 @@ function renderLlmStatus(data) {
     } else if (data.planner === "rules") {
       status = data.llm_error ? "failed" : "disabled";
       statusText = data.llm_error ? "LLM失败，已回退规则" : "规则排片";
-    } else if (processing) {
+    } else if (processing && stage.includes("llm")) {
       status = "running";
-      statusText = "处理中（ASR/排片/渲染）";
+      statusText = "LLM 处理中…";
     } else {
       status = "idle";
-      statusText = "未处理";
+      statusText = "";
     }
   }
+
+  // Idle / empty: hide the whole card (placeholder "未处理" is meaningless).
+  // Show only when we have a real outcome or are actively in LLM stage.
+  const meaningful = new Set([
+    "success",
+    "local_fallback",
+    "rules_fallback",
+    "failed",
+    "disabled",
+    "running",
+  ]);
+  if (!meaningful.has(status) || (!statusText && status === "idle")) {
+    if (card) card.hidden = true;
+    badge.className = "llm-badge llm-badge-idle";
+    badge.textContent = "";
+    text.textContent = "";
+    if (metaEl) {
+      metaEl.hidden = true;
+      metaEl.textContent = "";
+    }
+    return;
+  }
+  if (card) card.hidden = false;
 
   const badgeClass = {
     success: "llm-badge-ok",
@@ -1156,7 +1180,6 @@ function renderLlmStatus(data) {
     failed: "llm-badge-err",
     disabled: "llm-badge-idle",
     running: "llm-badge-idle",
-    idle: "llm-badge-idle",
   }[status] || "llm-badge-idle";
 
   const badgeLabel = {
@@ -1166,8 +1189,7 @@ function renderLlmStatus(data) {
     failed: "失败",
     disabled: "未启用",
     running: "处理中",
-    idle: "未处理",
-  }[status] || status || "未处理";
+  }[status] || status;
 
   badge.className = `llm-badge ${badgeClass}`;
   badge.textContent = badgeLabel;

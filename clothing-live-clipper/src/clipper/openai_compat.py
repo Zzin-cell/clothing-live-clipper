@@ -376,15 +376,10 @@ def chat_completions(
     has_last_route = bool(last_ep)
     if fast:
         endpoints = endpoints[:1]
-        if has_last_route:
-            headers_list = headers_list[:1]
-            payloads = payloads[:1]
-            # Keep caller budget for real plan jobs; only trim absurd values
-            timeout = min(max(int(timeout), 45), 90)
-        else:
-            headers_list = headers_list[:1]
-            payloads = payloads[:2]
-            timeout = min(max(int(timeout), 35), 75)
+        headers_list = headers_list[:1]
+        # Stability: one payload only. Multi-variant retries *multiply* timeout risk.
+        payloads = payloads[:1]
+        timeout = min(max(int(timeout), 60), 120)
 
     errors: list[str] = []
     t0 = time.perf_counter()
@@ -434,9 +429,16 @@ def chat_completions(
                     if "HTTP 404" in msg or "HTTP 405" in msg:
                         hi = len(headers_list)
                         break
+                    # Timeout / network: do NOT burn another full timeout on payload variants
+                    low = msg.lower()
+                    if "timeout" in low or "timed out" in low:
+                        raise OpenAICompatError(msg) from e
                     continue
                 except Exception as e:
                     errors.append(f"{type(e).__name__}:{e}")
+                    low = f"{type(e).__name__}:{e}".lower()
+                    if "timeout" in low or "timed out" in low:
+                        raise OpenAICompatError(f"{type(e).__name__}:{e}") from e
                     continue
     detail = " | ".join(errors[-6:]) if errors else "unknown"
     info = classify_llm_error(detail, base_url=base)

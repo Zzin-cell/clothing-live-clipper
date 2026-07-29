@@ -292,11 +292,15 @@ def expand_lines_to_clauses(
 
 
 # Latency-first caps (SiliconFlow lightweight path)
-# Smaller selected set → faster/more reliable SiliconFlow responses
-LIGHT_MAX_CLAUSES = 36
-CLAUSE_TEXT_MAX = 56
-PLAN_MAX_TOKENS = 900
-PLAN_TIMEOUT_S = 120
+# Stability-first: small payload → fewer SiliconFlow timeouts
+LIGHT_MAX_CLAUSES = 28
+CLAUSE_TEXT_MAX = 48
+PLAN_MAX_TOKENS = 700
+PLAN_TIMEOUT_S = 100
+# Second attempt uses an even smaller payload if first times out
+LIGHT_MAX_CLAUSES_RETRY = 18
+CLAUSE_TEXT_MAX_RETRY = 40
+PLAN_MAX_TOKENS_RETRY = 500
 
 _CONTROL_MARKERS = (
     # 称呼/互动
@@ -499,6 +503,69 @@ def _learning_hints(limit: int = 4) -> dict[str, Any]:
         return {}
 
 
+def _build_plan_messages(
+    clauses: list[dict[str, Any]],
+    *,
+    target_seconds: int,
+    sp: float,
+    target_source_ms: int,
+    text_max: int,
+) -> tuple[list[dict[str, Any]], dict[str, str], list[dict[str, Any]]]:
+    """Build compact chat messages + short-id map + compact clause list."""
+    id_map: dict[str, str] = {}
+    compact: list[dict[str, Any]] = []
+    for u in clauses:
+        full = str(u["id"])
+        m = re.search(r"(\d+)$", full)
+        short = f"c{int(m.group(1))}" if m else full
+        if short in id_map and id_map[short] != full:
+            short = full
+        id_map[short] = full
+        compact.append(
+            {
+                "id": short,
+                "t0": int(u["t0_ms"]),
+                "t1": int(u["t1_ms"]),
+                "text": str(u["text"])[:text_max],
+            }
+        )
+    final_lo, final_hi = 55, 65
+    user_payload: dict[str, Any] = {
+        "target_s": target_seconds,
+        "final_window_s": [final_lo, final_hi],
+        "speed": sp,
+        "target_src_ms": target_source_ms,
+        "n": len(compact),
+        "must_cover": ["版型", "面料", "适用人群"],
+        "rules": (
+            "去直播感/尺码/价格/发货;"
+            "必含版型+面料+适用人群;"
+            f"成片约{target_seconds}s;"
+            "钩子→版型→面料→人群→收束;只用输入id"
+        ),
+        "clauses": compact,
+    }
+    user_text = (
+        "已筛选口播小句。只输出JSON keep（id必须原样复制）：\n"
+        + json.dumps(user_payload, ensure_ascii=False, separators=(",", ":"))
+    )
+    # Ultra-short system for speed/stability; full light prompt still available but heavy.
+    system = (
+        "服装短视频剪辑。输入小句id/t0/t1/text。"
+        "选keep重排：钩子→版型→面料→适用人群→收束。"
+        "删直播控场/尺码/价格/发货。只用输入id，完整句，禁编造。"
+        "只输出JSON:"
+        '{"product_summary":"...","hook_type":"visual|pain|effect","main_points":["版型","面料","人群"],'
+        '"keep":[{"id":"c12","t0_ms":0,"t1_ms":1,"text":"...","why":"...","point":"版型","complete":true}],'
+        '"drop_ids":[],"notes":"..."}'
+    )
+    messages = [
+        {"role": "system", "content": system},
+        {"role": "user", "content": user_text},
+    ]
+    return messages, id_map, compact
+
+
 def call_llm_for_plan(
     lines: list[dict[str, Any]],
     *,
@@ -524,75 +591,68 @@ def call_llm_for_plan(
     clauses_all = expand_lines_to_clauses(lines, max_clauses=420)
     if not clauses_all:
         raise RuntimeError("empty_transcript")
-    clauses, trim_stats = select_clauses_for_llm(clauses_all, max_clauses=LIGHT_MAX_CLAUSES)
 
-    # Minimal clause fields → fewer input tokens.
-    # Use short stable ids (c12) so small models copy them correctly.
-    id_map: dict[str, str] = {}  # short -> full
-    compact = []
-    for u in clauses:
-        full = str(u["id"])
-        m = re.search(r"(\d+)$", full)
-        short = f"c{int(m.group(1))}" if m else full
-        # avoid collision
-        if short in id_map and id_map[short] != full:
-            short = full
-        id_map[short] = full
-        compact.append(
-            {
-                "id": short,
-                "t0": int(u["t0_ms"]),
-                "t1": int(u["t1_ms"]),
-                "text": str(u["text"])[:CLAUSE_TEXT_MAX],
-            }
-        )
-    # 成片观感约 60s：源片按倍速反推；给模型明确目标窗
-    final_lo, final_hi = 55, 65
-    user_payload: dict[str, Any] = {
-        "target_s": target_seconds,
-        "final_window_s": [final_lo, final_hi],
-        "speed": sp,
-        "target_src_ms": target_source_ms,
-        "n": len(compact),
-        "must_cover": ["版型上身效果", "面料", "适用人群"],
-        "rules": (
-            "像短视频不像直播;"
-            "必含版型+面料+适用人群卖点;"
-            "去控场/尺码/价格/发货;"
-            f"成片约{target_seconds}s(可{final_lo}-{final_hi});源片贴近target_src_ms;"
-            "顺序钩子→版型→面料细节→适用人群→体验收束;"
-            "只用输入id;完整句;禁静音尾巴"
-        ),
-        "clauses": compact,
-    }
-    hints = _learning_hints()
-    if hints:
-        user_payload["hints"] = hints
-
-    user_text = (
-        "已筛选口播小句。提取 main_points 并选/排 keep，只输出JSON：\n"
-        + json.dumps(user_payload, ensure_ascii=False, separators=(",", ":"))
-    )
-    messages = [
-        {"role": "system", "content": SYSTEM_PROMPT_LIGHT},
-        {"role": "user", "content": user_text},
+    attempts = [
+        {
+            "max_clauses": LIGHT_MAX_CLAUSES,
+            "text_max": CLAUSE_TEXT_MAX,
+            "max_tokens": PLAN_MAX_TOKENS,
+            "timeout": PLAN_TIMEOUT_S,
+            "label": "primary",
+        },
+        {
+            "max_clauses": LIGHT_MAX_CLAUSES_RETRY,
+            "text_max": CLAUSE_TEXT_MAX_RETRY,
+            "max_tokens": PLAN_MAX_TOKENS_RETRY,
+            "timeout": min(70, PLAN_TIMEOUT_S),
+            "label": "retry_light",
+        },
     ]
 
-    try:
-        out = chat_completions(
-            messages=messages,
-            model=model,
-            base_url=base,
-            api_key=key,
-            temperature=0.2,
-            max_tokens=PLAN_MAX_TOKENS,
-            force_json=True,
-            timeout=PLAN_TIMEOUT_S,
-            cfg=cfg,
-            fast=True,  # prefer last_route; tight retries for speed
+    last_err: Exception | None = None
+    out: dict[str, Any] | None = None
+    clauses: list[dict[str, Any]] = []
+    trim_stats: dict[str, Any] = {}
+    id_map: dict[str, str] = {}
+    attempt_label = "primary"
+
+    for att in attempts:
+        clauses, trim_stats = select_clauses_for_llm(
+            clauses_all, max_clauses=int(att["max_clauses"])
         )
-    except OpenAICompatError as e:
-        raise RuntimeError(f"llm_request_failed:{e}") from e
+        messages, id_map, _compact = _build_plan_messages(
+            clauses,
+            target_seconds=target_seconds,
+            sp=sp,
+            target_source_ms=target_source_ms,
+            text_max=int(att["text_max"]),
+        )
+        try:
+            out = chat_completions(
+                messages=messages,
+                model=model,
+                base_url=base,
+                api_key=key,
+                temperature=0.1,
+                max_tokens=int(att["max_tokens"]),
+                force_json=True,
+                timeout=int(att["timeout"]),
+                cfg=cfg,
+                fast=True,  # last_route + single payload, no multi-timeout burn
+            )
+            attempt_label = str(att["label"])
+            last_err = None
+            break
+        except OpenAICompatError as e:
+            last_err = e
+            msg = str(e).lower()
+            # Only retry on timeout/network-ish failures with lighter payload
+            if "timeout" not in msg and "timed out" not in msg and "10054" not in msg:
+                raise RuntimeError(f"llm_request_failed:{e}") from e
+            continue
+
+    if out is None:
+        raise RuntimeError(f"llm_request_failed:{last_err}")
 
     content = out.get("content") or ""
     obj = _extract_json_obj(content)
@@ -621,7 +681,8 @@ def call_llm_for_plan(
         "input_clauses": len(clauses),
         "clauses_sent": trim_stats.get("clauses_sent"),
         "trim_stats": trim_stats,
-        "submit_mode": "light_asr_selected_clauses",
+        "submit_mode": "stable_light_asr_selected_clauses",
+        "attempt": attempt_label,
         "compat": {
             "auth_variant": out.get("auth_variant"),
             "payload_variant": out.get("payload_variant"),

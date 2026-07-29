@@ -202,4 +202,4 @@ def test_chat_completions_fast_with_last_route_is_single_shot():
     assert calls["n"] == 1
     # plan-friendly numeric timeout (not tuple); keep real budget
     assert isinstance(calls["timeout"], (int, float))
-    assert calls["timeout"] >= 45
+    assert calls["timeout"] >= 60

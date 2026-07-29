@@ -231,6 +231,10 @@ def process_job_dir(job_dir: Path) -> None:
                 )
                 # Serialize cloud plan calls so concurrent jobs don't all timeout.
                 with _llm_lock:
+                    # tiny stagger avoids bursty gateway throttling after ASR finishes
+                    import time as _time
+
+                    _time.sleep(0.15)
                     plan_llm, llm_obj = plan_from_asr_with_llm(
                         llm_input,
                         target_seconds=target,

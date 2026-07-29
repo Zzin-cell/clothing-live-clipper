@@ -52,10 +52,10 @@ def _many_lines(n: int = 80):
 def test_select_clauses_for_llm_caps_and_drops_bad():
     clauses = expand_lines_to_clauses(_many_lines(160), max_clauses=500)
     assert len(clauses) > LIGHT_MAX_CLAUSES or len(clauses) > 100
-    selected, stats = select_clauses_for_llm(clauses, max_clauses=36)
+    selected, stats = select_clauses_for_llm(clauses, max_clauses=28)
     assert stats["clauses_raw"] == len(clauses)
     assert stats["clauses_sent"] == len(selected)
-    assert len(selected) <= 36
+    assert len(selected) <= 28
     assert stats["clauses_sent"] <= stats["clauses_raw"]
     # no invented ids
     raw_ids = {c["id"] for c in clauses}
@@ -374,10 +374,10 @@ def test_call_llm_for_plan_uses_trim_and_lower_tokens(monkeypatch):
     assert captured.get("timeout") == lp.PLAN_TIMEOUT_S
     assert captured.get("force_json") is True
     assert captured.get("fast") is True
-    # system should be light
+    # system should be short stability prompt
     msgs = captured.get("messages") or []
     assert msgs and msgs[0]["role"] == "system"
-    assert len(msgs[0]["content"]) < len(lp.SYSTEM_PROMPT)
+    assert len(msgs[0]["content"]) < 900
     user_content = msgs[1]["content"]
     assert "已筛选" in user_content
     assert "all_clauses" not in user_content
@@ -385,3 +385,4 @@ def test_call_llm_for_plan_uses_trim_and_lower_tokens(monkeypatch):
     assert "版型" in user_content and "面料" in user_content and "适用人群" in user_content
     assert "60" in user_content or "target_s" in user_content
     assert obj.get("_meta", {}).get("clauses_sent", 10**9) <= lp.LIGHT_MAX_CLAUSES
+    assert obj.get("_meta", {}).get("attempt") in {"primary", "retry_light"}

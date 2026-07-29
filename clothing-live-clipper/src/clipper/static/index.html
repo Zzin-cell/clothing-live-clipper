@@ -70,6 +70,7 @@
             <span>口播时间轴</span>
             <div class="jy-head-actions">
               <span class="muted" id="asr-count">—</span>
+              <b id="plan-path-chip" class="llm-badge llm-badge-idle" hidden title="当前视频处理路径"></b>
               <button type="button" class="jy-btn tiny" id="toggle-transcript-panel" title="折叠/展开">收起</button>
             </div>
           </div>
@@ -78,9 +79,7 @@
             <button type="button" class="jy-btn tiny" id="asr-to-golden" disabled>+加入成片</button>
             <span class="muted">拖到中间逻辑成片 · 可改词</span>
           </div>
-          <div class="jy-transcript asr-cards" id="transcript-list">
-            <div class="jy-empty">处理后在这里显示口播句子（可编辑、可拖入成片）</div>
-          </div>
+          <!-- Above the sentence list so it is always visible (not buried under 40+ cards) -->
           <div class="jy-llm-status jy-plan-path" id="llm-status-card" hidden>
             <div class="jy-llm-status-head">
               <span>处理路径</span>
@@ -88,6 +87,9 @@
             </div>
             <p class="jy-hint" id="llm-status-text"></p>
             <div class="jy-llm-status-meta" id="llm-status-meta" hidden></div>
+          </div>
+          <div class="jy-transcript asr-cards" id="transcript-list">
+            <div class="jy-empty">处理后在这里显示口播句子（可编辑、可拖入成片）</div>
           </div>
         </div>
       </aside>

@@ -389,20 +389,28 @@ body {
   order: -1;
 }
 
-/* Processing path under transcript timeline */
+/* Processing path — sits above sentence list for visibility */
 .jy-llm-status,
 .jy-plan-path {
-  margin-top: 10px;
+  margin: 8px 0 10px;
   padding: 10px 12px;
   border: 1px solid var(--line);
   border-radius: 12px;
-  background: #f8fafc;
+  background: linear-gradient(180deg, #f8fafc 0%, #f1f5f9 100%);
+  box-shadow: 0 1px 0 rgba(15, 23, 42, 0.03);
+  flex: 0 0 auto;
 }
 .jy-plan-path .jy-hint {
   margin: 0;
   font-size: 12px;
   color: #0f172a;
   line-height: 1.45;
+}
+#plan-path-chip {
+  max-width: 7.5rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .jy-llm-status-head {
   display: flex;

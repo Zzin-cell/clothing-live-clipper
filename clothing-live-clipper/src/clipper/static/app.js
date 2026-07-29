@@ -1177,9 +1177,10 @@ function renderLlmStatus(data) {
   const badge = $("llm-status-badge");
   const text = $("llm-status-text");
   const metaEl = $("llm-status-meta");
+  const chip = $("plan-path-chip");
   if (!badge || !text) return;
 
-  const { status, pathLabel, detail, pathRaw, model } = resolvePlanPath(data);
+  const { status, pathLabel, detail, pathRaw, model } = resolvePlanPath(data || {});
 
   // Only show once there is a real path or active processing
   const meaningful = new Set([
@@ -1190,6 +1191,15 @@ function renderLlmStatus(data) {
     "disabled",
     "running",
   ]);
+  const badgeClass = {
+    success: "llm-badge-ok",
+    local_fallback: "llm-badge-warn",
+    rules_fallback: "llm-badge-warn",
+    failed: "llm-badge-err",
+    disabled: "llm-badge-idle",
+    running: "llm-badge-idle",
+  }[status] || "llm-badge-idle";
+
   if (!meaningful.has(status) || !pathLabel) {
     if (card) card.hidden = true;
     badge.className = "llm-badge llm-badge-idle";
@@ -1199,18 +1209,22 @@ function renderLlmStatus(data) {
       metaEl.hidden = true;
       metaEl.textContent = "";
     }
+    if (chip) {
+      chip.hidden = true;
+      chip.textContent = "";
+      chip.className = "llm-badge llm-badge-idle";
+    }
     return;
   }
   if (card) card.hidden = false;
 
-  const badgeClass = {
-    success: "llm-badge-ok",
-    local_fallback: "llm-badge-warn",
-    rules_fallback: "llm-badge-warn",
-    failed: "llm-badge-err",
-    disabled: "llm-badge-idle",
-    running: "llm-badge-idle",
-  }[status] || "llm-badge-idle";
+  // Header chip stays visible even when transcript panel is collapsed
+  if (chip) {
+    chip.hidden = false;
+    chip.className = `llm-badge ${badgeClass}`;
+    chip.textContent = pathLabel;
+    chip.title = detail || pathLabel;
+  }
 
   badge.className = `llm-badge ${badgeClass}`;
   badge.textContent = pathLabel;

@@ -19,7 +19,9 @@ class FFmpegError(RuntimeError):
 @dataclass(frozen=True)
 class RenderProfile:
     name: str
-    max_edge: int | None  # None = keep source size
+    max_edge: int | None  # None = keep source size; for 1080P export use 1080
+    force_height: int | None  # e.g. 1080 for final export
+    force_width: int | None
     fps: int
     # Video must NOT fade to black between cuts (looks like black flashes).
     # Keep only a tiny audio ease to avoid pops; video is hard-cut.
@@ -36,16 +38,28 @@ class RenderProfile:
     x264_preset: str
     nvenc_preset: str
     nvenc_cq: int
+    # "recommend" ~ CapCut-style default bitrate for 1080p30 H.264
+    video_bitrate: str | None
+    max_video_bitrate: str | None
     audio_bitrate: str
+    container: str  # mp4
+    vcodec_family: str  # h264
 
 
 def get_render_profile(name: str = "final") -> RenderProfile:
+    """
+    draft  = fast preview
+    final  = export spec:
+      分辨率 1080P, 格式 MP4, 帧率 30, 视频码率 推荐, 视频编码 H.264
+    """
     n = (name or "final").strip().lower()
     if n in {"draft", "preview", "fast"}:
         return RenderProfile(
             name="draft",
             max_edge=720,
-            fps=25,
+            force_height=None,
+            force_width=None,
+            fps=30,  # keep 30 for timeline consistency with export
             edge_fade_s=0.0,
             video_fade_s=0.0,
             audio_fade_s=0.02,
@@ -56,11 +70,19 @@ def get_render_profile(name: str = "final") -> RenderProfile:
             x264_preset="ultrafast",
             nvenc_preset="p1",
             nvenc_cq=28,
-            audio_bitrate="96k",
+            video_bitrate="4M",
+            max_video_bitrate="6M",
+            audio_bitrate="128k",
+            container="mp4",
+            vcodec_family="h264",
         )
+    # Final export — match user CapCut-like panel:
+    # 1080P / MP4 / 30fps / 推荐码率 / H.264
     return RenderProfile(
         name="final",
-        max_edge=None,
+        max_edge=1080,
+        force_height=1080,
+        force_width=None,  # keep aspect; typical vertical becomes 608x1080 / 1080x1920 handled below
         fps=30,
         edge_fade_s=0.0,
         video_fade_s=0.0,
@@ -68,11 +90,16 @@ def get_render_profile(name: str = "final") -> RenderProfile:
         smooth_handle_ms=40,
         join_overlap_frames=1,
         tail_trim_ms=100,
-        crf=23,
-        x264_preset="ultrafast",
+        crf=20,
+        x264_preset="veryfast",
         nvenc_preset="p4",
-        nvenc_cq=23,
-        audio_bitrate="128k",
+        nvenc_cq=19,
+        # CapCut “推荐” ≈ solid 1080p30 social export
+        video_bitrate="12M",
+        max_video_bitrate="16M",
+        audio_bitrate="192k",
+        container="mp4",
+        vcodec_family="h264",
     )
 
 
@@ -144,27 +171,57 @@ def _ffmpeg_has_encoder(name: str) -> bool:
 def pick_video_encoder(*, profile: RenderProfile) -> tuple[str, list[str]]:
     """
     Return (codec_name, extra_args_before_pix_fmt).
+    Export family is H.264 (libx264 / h264_nvenc).
     CLIPPER_RENDER_HW=auto|off|nvenc
     """
     mode = (os.environ.get("CLIPPER_RENDER_HW") or "auto").strip().lower()
+    use_bitrate = bool(profile.video_bitrate)
+
+    def x264_args() -> list[str]:
+        args = ["-preset", profile.x264_preset]
+        if use_bitrate:
+            args += [
+                "-b:v",
+                str(profile.video_bitrate),
+                "-maxrate",
+                str(profile.max_video_bitrate or profile.video_bitrate),
+                "-bufsize",
+                str(profile.max_video_bitrate or profile.video_bitrate),
+            ]
+            # still allow CRF ceiling for complex scenes
+            args += ["-crf", str(profile.crf)]
+        else:
+            args += ["-crf", str(profile.crf)]
+        return args
+
+    def nvenc_args() -> list[str]:
+        args = [
+            "-preset",
+            profile.nvenc_preset,
+            "-rc",
+            "vbr",
+            "-cq",
+            str(profile.nvenc_cq),
+        ]
+        if use_bitrate:
+            args += [
+                "-b:v",
+                str(profile.video_bitrate),
+                "-maxrate",
+                str(profile.max_video_bitrate or profile.video_bitrate),
+                "-bufsize",
+                str(profile.max_video_bitrate or profile.video_bitrate),
+            ]
+        else:
+            args += ["-b:v", "0"]
+        return args
+
     if mode in {"off", "0", "false", "cpu", "libx264"}:
-        return "libx264", ["-preset", profile.x264_preset, "-crf", str(profile.crf)]
+        return "libx264", x264_args()
     want_nvenc = mode in {"auto", "nvenc", "gpu", "h264_nvenc", "1", "true", "on"}
     if want_nvenc and _ffmpeg_has_encoder("h264_nvenc"):
-        return (
-            "h264_nvenc",
-            [
-                "-preset",
-                profile.nvenc_preset,
-                "-rc",
-                "vbr",
-                "-cq",
-                str(profile.nvenc_cq),
-                "-b:v",
-                "0",
-            ],
-        )
-    return "libx264", ["-preset", profile.x264_preset, "-crf", str(profile.crf)]
+        return "h264_nvenc", nvenc_args()
+    return "libx264", x264_args()
 
 
 def _atempo_chain(speed: float) -> str:
@@ -188,17 +245,42 @@ def _fit_target_size(
     force_w: int | None = None,
     force_h: int | None = None,
 ) -> tuple[int, int]:
+    """
+    Compute output width/height.
+    - final 1080P: long edge limited to 1080 (vertical 1080x1920 stays if already;
+      landscape becomes max height/width 1080).
+    - If force_height=1080 and portrait source, emit 1080-high (e.g. 608x1080 / 1080x1920).
+    """
+    w, h = int(src_w), int(src_h)
     if force_w and force_h:
-        w, h = force_w, force_h
-    else:
-        w, h = src_w, src_h
-    if max_edge and max(w, h) > max_edge:
+        w, h = int(force_w), int(force_h)
+    elif force_h and not force_w:
+        # lock height (1080P common for portrait shorts)
+        h = int(force_h)
+        w = max(2, int(round(src_w * (h / float(src_h or 1)))))
+    elif force_w and not force_h:
+        w = int(force_w)
+        h = max(2, int(round(src_h * (w / float(src_w or 1)))))
+    elif max_edge and max(w, h) > max_edge:
         if h >= w:
             h = max_edge
-            w = max(2, int(round(src_w * (max_edge / float(src_h)))))
+            w = max(2, int(round(src_w * (max_edge / float(src_h or 1)))))
         else:
             w = max_edge
-            h = max(2, int(round(src_h * (max_edge / float(src_w)))))
+            h = max(2, int(round(src_h * (max_edge / float(src_w or 1)))))
+    # Prefer true 1080x1920 for portrait 9:16-ish sources on final
+    if force_h == 1080 and src_h >= src_w:
+        # if nearly 9:16, snap to 1080x1920
+        ratio = (src_w / float(src_h or 1))
+        if 0.54 <= ratio <= 0.60:
+            w, h = 1080, 1920
+        else:
+            h = 1080
+            w = max(2, int(round(src_w * (1080 / float(src_h or 1)))))
+            if max_edge:
+                # also cap width if extreme
+                if w > max_edge * 2:
+                    w = max_edge
     w = max(2, w - (w % 2))
     h = max(2, h - (h % 2))
     return w, h
@@ -698,7 +780,13 @@ def render_plan(
     work_dir.mkdir(parents=True, exist_ok=True)
 
     src_w, src_h = _probe_stream_size(video)
-    tw, th = _fit_target_size(src_w, src_h, max_edge=prof.max_edge)
+    tw, th = _fit_target_size(
+        src_w,
+        src_h,
+        max_edge=prof.max_edge,
+        force_w=prof.force_width,
+        force_h=prof.force_height,
+    )
     speed = float(playback_speed) if playback_speed and playback_speed > 0 else 1.0
     if abs(speed - 1.0) < 0.01:
         speed = 1.0

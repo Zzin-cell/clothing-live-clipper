@@ -148,12 +148,14 @@ def test_repair_keep_ids_from_mangled_model_output():
 
 
 def test_live_stage_direction_dropped():
-    from clipper.llm_plan import _is_control, llm_obj_to_timeline
+    from clipper.llm_plan import _is_control, _is_size, _is_persona_or_hype, llm_obj_to_timeline
 
     assert _is_control("里面去拍就可以了，好不好 来准备一下")
     assert _is_control("我们先上裤紫袜，来凳备一下，321，用鞋把给它")
     assert _is_control("来准备一下 3 2 1")
     assert not _is_control("这件收腰版型显瘦，面料很透气")
+    assert _is_persona_or_hype("不要随便定义我的标签啊，我告诉你 甄姐的标签不是随意定出来的是你根本就摸不着拆不透的 是不是")
+    assert _is_size("衣缝胸大的，卡满，网袋胸小的，我推荐什么来三")
 
     lines = [
         {"utt_id": "u1", "text": "里面去拍就可以了，好不好 来准备一下", "t0_ms": 0, "t1_ms": 2000},
@@ -179,6 +181,26 @@ def test_live_stage_direction_dropped():
     blob = " ".join(s.text for s in plan.golden)
     assert "准备" not in blob and "321" not in blob and "里面去拍" not in blob
     assert "显瘦" in blob or "版型" in blob
+
+    lines2 = [
+        {"utt_id": "u1", "text": "不要随便定义我的标签啊，甄姐的标签不是随意定出来的", "t0_ms": 0, "t1_ms": 3000},
+        {"utt_id": "u2", "text": "面料超级软还不透", "t0_ms": 3000, "t1_ms": 6000},
+        {"utt_id": "u3", "text": "衣缝胸大的，卡满，网袋胸小的，我推荐什么来三", "t0_ms": 6000, "t1_ms": 9000},
+    ]
+    clauses2 = expand_lines_to_clauses(lines2)
+    plan2 = llm_obj_to_timeline(
+        {
+            "keep": [{"id": c["id"], "text": c["text"]} for c in clauses2],
+            "_clauses": clauses2,
+        },
+        lines2,
+        target_seconds=60,
+        playback_speed=1.0,
+    )
+    blob2 = " ".join(s.text for s in plan2.golden)
+    assert "标签" not in blob2
+    assert "胸大" not in blob2 and "卡满" not in blob2 and "胸小" not in blob2
+    assert "面料" in blob2 or "软" in blob2
 
 
 def test_price_shipping_variants_dropped():

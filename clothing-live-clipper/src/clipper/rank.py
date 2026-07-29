@@ -41,6 +41,7 @@ _SIZE_TEXT = (
     "加大码", "码数", "建议穿", "该穿", "斤穿", "身高", "体重", "试码",
     "报尺码", "穿M", "穿S", "穿L", "穿XL", "穿XXL", "S码", "M码", "L码",
     "XL码", "XXL码", "袖长", "衣长", "裤长", "能穿吗", "能不能穿",
+    "胸大", "胸小", "卡满", "网袋胸", "罩杯",
 )
 
 # Unique / rare product claims — rank to front of golden 20s
@@ -273,6 +274,8 @@ _LIVE_ROOM_MARKERS = (
     "准备一下", "来准备", "先准备", "準備一下", "备一下", "備一下",
     "里面去拍", "裏面去拍", "里面拍", "出去拍", "换机位", "转个机位",
     "倒计时", "倒數", "三二一", "上脚", "上裤", "来凳", "凳子",
+    # 人设/标签灌鸡汤
+    "定义我的标签", "甄姐的标签", "标签不是随意", "摸不着拆不透", "不要随便定义",
 )
 
 
@@ -291,6 +294,16 @@ def _looks_like_live_room(text: str) -> bool:
     if re.search(r"(准备|準備|备一下|備一下).{0,6}(一下|下)", t):
         return True
     if re.search(r"(里面|裏面|外头|外面).{0,4}(拍|去拍)", t):
+        return True
+    # 人设标签鸡汤
+    if any(k in t for k in ("定义我的标签", "甄姐的标签", "标签不是随意", "摸不着拆不透")):
+        return True
+    if "标签" in t and not any(h in t for h in _CLOTHING_TEXT_HINTS):
+        return True
+    # 胸大/胸小报码
+    if ("胸大" in t or "胸小" in t or "卡满" in t) and not any(
+        h in t for h in ("版型", "显瘦", "面料", "垂感")
+    ):
         return True
     return False
 

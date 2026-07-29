@@ -316,10 +316,15 @@ _CONTROL_MARKERS = (
     "321", "3 2 1", "三二一", "倒计时", "倒數", "倒数",
     "过一下", "过一遍", "先上", "上脚", "上裤", "来凳", "凳子", "板凳",
     "用鞋把", "卡一下", "固定一下", "摆一下", "站好", "转一圈给你看一下哦等下",
+    # 人设/标签灌鸡汤（非服装卖点）
+    "定义我的标签", "不要随便定义", "甄姐的标签", "标签不是随意", "摸不着拆不透",
+    "我的标签", "定义标签", "随便定义",
 )
 _SIZE_MARKERS = (
     "尺码", "M码", "L码", "m码", "S码", "s码", "XL", "胸围", "腰围", "偏大", "偏小", "建议穿",
     "斤穿", "斤", "码穿",
+    # 报码/罩杯口播（用户截图：胸大/胸小/卡满）
+    "胸大", "胸小", "罩杯", "卡满", "网袋胸", "内衣", "钢圈", "杯型",
 )
 # 价格/发货/物流：一律剔除（含开场福利话术、ASR 谐音/繁体）
 _PRICE_SHIP_MARKERS = (
@@ -377,7 +382,38 @@ def _is_control(text: str) -> bool:
 
 
 def _is_size(text: str) -> bool:
-    return any(x in text for x in _SIZE_MARKERS)
+    t = text or ""
+    if any(x in t for x in _SIZE_MARKERS):
+        return True
+    # 胸大/胸小/卡满/推荐来三（ASR 报码）
+    if re.search(r"胸\s*(大|小)", t) and any(k in t for k in ("卡", "网袋", "推荐", "推荐什么", "来三", "码")):
+        return True
+    if "胸大" in t or "胸小" in t:
+        return True
+    return False
+
+
+def _is_persona_or_hype(text: str) -> bool:
+    """品牌人设/情绪灌鸡汤，无服装信息。"""
+    t = text or ""
+    if any(
+        k in t
+        for k in (
+            "定义我的标签",
+            "甄姐的标签",
+            "标签不是随意",
+            "摸不着拆不透",
+            "不要随便定义",
+            "随便定义我",
+        )
+    ):
+        return True
+    # 纯人设：有“标签”但没有版型/面料/穿着信息
+    if "标签" in t and not any(
+        k in t for k in ("面料", "版型", "显瘦", "上身", "遮肉", "适合", "垂感", "不透", "收腰")
+    ):
+        return True
+    return False
 
 
 def _is_price_or_shipping(text: str) -> bool:
@@ -415,7 +451,7 @@ def _value_score(text: str) -> int:
             s += 2
     if 4 <= len(t) <= 40:
         s += 1
-    if _is_control(t) or _is_size(t) or _is_price_or_shipping(t):
+    if _is_control(t) or _is_size(t) or _is_price_or_shipping(t) or _is_persona_or_hype(t):
         s -= 80
     if len(t) < 2:
         s -= 20
@@ -452,6 +488,9 @@ def select_clauses_for_llm(
         if _is_size(text):
             stats["dropped_size"] += 1
             continue
+        if _is_persona_or_hype(text):
+            stats["dropped_control"] += 1
+            continue
         if _is_price_or_shipping(text):
             stats["dropped_price_ship"] += 1
             continue
@@ -475,7 +514,12 @@ def select_clauses_for_llm(
             if cid in top_ids:
                 continue
             text = str(c.get("text") or "")
-            if _is_control(text) or _is_size(text) or _is_price_or_shipping(text):
+            if (
+                _is_control(text)
+                or _is_size(text)
+                or _is_price_or_shipping(text)
+                or _is_persona_or_hype(text)
+            ):
                 continue
             top.append(c)
             top_ids.add(cid)
@@ -758,8 +802,12 @@ def _repair_keep_ids(obj: dict[str, Any], clauses: list[dict[str, Any]]) -> dict
         sid = str(src.get("id"))
         if sid in used:
             continue
-        if _is_price_or_shipping(str(src.get("text") or "")) or _is_size(str(src.get("text") or "")) or _is_control(
-            str(src.get("text") or "")
+        _tx = str(src.get("text") or "")
+        if (
+            _is_price_or_shipping(_tx)
+            or _is_size(_tx)
+            or _is_control(_tx)
+            or _is_persona_or_hype(_tx)
         ):
             continue
         used.add(sid)
@@ -768,7 +816,7 @@ def _repair_keep_ids(obj: dict[str, Any], clauses: list[dict[str, Any]]) -> dict
                 "id": sid,
                 "t0_ms": int(src["t0_ms"]),
                 "t1_ms": int(src["t1_ms"]),
-                "text": str(src.get("text") or ""),
+                "text": _tx,
                 "why": str(item.get("why") or "remap_keep"),
                 "point": str(item.get("point") or ""),
                 "complete": True,
@@ -803,7 +851,13 @@ def _repair_keep_ids(obj: dict[str, Any], clauses: list[dict[str, Any]]) -> dict
         if sid in used:
             return False
         tx = str(c.get("text") or "")
-        if not tx or _is_control(tx) or _is_size(tx) or _is_price_or_shipping(tx):
+        if (
+            not tx
+            or _is_control(tx)
+            or _is_size(tx)
+            or _is_price_or_shipping(tx)
+            or _is_persona_or_hype(tx)
+        ):
             return False
         used.add(sid)
         fixed.append(
@@ -837,6 +891,7 @@ def _repair_keep_ids(obj: dict[str, Any], clauses: list[dict[str, Any]]) -> dict
             and not _is_control(str(c.get("text") or ""))
             and not _is_size(str(c.get("text") or ""))
             and not _is_price_or_shipping(str(c.get("text") or ""))
+            and not _is_persona_or_hype(str(c.get("text") or ""))
         ]
         cands.sort(key=lambda c: _value_score(str(c.get("text") or "")), reverse=True)
         for c in cands[:2]:
@@ -1020,12 +1075,12 @@ def llm_obj_to_timeline(
         text = str(src.get("text") or "").strip()
         if not text:
             return
-        if any(x in text for x in ("尺码", "M码", "L码", "m码", "胸围", "腰围", "偏大", "偏小")):
+        if any(x in text for x in ("尺码", "M码", "L码", "m码", "胸围", "腰围", "偏大", "偏小", "胸大", "胸小", "卡满")):
             return
         if any(x in text for x in ("加购", "小黄车", "上链接", "点链接")):
             return
-        # hard drop price / shipping / live-control even if LLM kept them
-        if _is_price_or_shipping(text) or _is_control(text):
+        # hard drop price / shipping / live-control / persona even if LLM kept them
+        if _is_price_or_shipping(text) or _is_control(text) or _is_size(text) or _is_persona_or_hype(text):
             return
         # always take full clause window first (avoid mid-clause cutoff)
         t0 = int(src["t0_ms"])
@@ -1159,7 +1214,12 @@ def llm_obj_to_timeline(
             if uid in used_ids:
                 continue
             tx = str(u.get("text") or "")
-            if _is_control(tx) or _is_size(tx) or _is_price_or_shipping(tx):
+            if (
+                _is_control(tx)
+                or _is_size(tx)
+                or _is_price_or_shipping(tx)
+                or _is_persona_or_hype(tx)
+            ):
                 continue
             if _value_score(tx) < 2:
                 continue

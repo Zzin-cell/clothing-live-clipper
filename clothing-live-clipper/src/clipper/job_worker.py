@@ -275,10 +275,40 @@ def process_job_dir(job_dir: Path) -> None:
                 )
                 planner = "llm"
                 used_llm = True
+                _meta = (llm_obj.get("_meta") or {}) if isinstance(llm_obj, dict) else {}
+                chosen = str(_meta.get("chosen_path") or _meta.get("submit_mode") or "cloud_or_repaired")
+                model_name = str(_meta.get("model") or settings.llm_model or "")
+                cloud_err = str(_meta.get("cloud_error") or "")
+                # Explicit status for UI: cloud success vs local/rules fallback
+                if model_name.startswith("Qwen") or chosen in {
+                    "cloud_or_repaired",
+                    "stable_light_asr_selected_clauses",
+                    "light_asr_selected_clauses",
+                }:
+                    llm_status = "success"
+                    llm_status_text = "云端LLM成功"
+                elif model_name == "local_clause_rank" or "local" in chosen:
+                    llm_status = "local_fallback"
+                    llm_status_text = "云端失败，本地卖点兜底"
+                elif model_name == "rules_duration_fallback" or "rules" in chosen:
+                    llm_status = "rules_fallback"
+                    llm_status_text = "云端失败/时长不足，规则兜底"
+                else:
+                    llm_status = "success"
+                    llm_status_text = f"LLM路径：{chosen or model_name or 'ok'}"
+
                 meta = _read_meta(job_dir)
                 meta["planner"] = "llm"
-                meta["llm_model"] = (llm_obj.get("_meta") or {}).get("model") or settings.llm_model
+                meta["llm_status"] = llm_status
+                meta["llm_status_text"] = llm_status_text
+                meta["llm_ok"] = llm_status == "success"
+                meta["llm_model"] = model_name or settings.llm_model
+                meta["llm_path"] = chosen
+                meta["llm_latency_ms"] = _meta.get("latency_ms")
+                meta["llm_attempt"] = _meta.get("attempt")
+                meta["llm_cloud_error"] = cloud_err[:300] if cloud_err else None
                 meta["llm_summary"] = str(llm_obj.get("product_summary") or "")[:120]
+                meta["llm_coverage"] = llm_obj.get("_coverage")
                 meta["selected_clips"] = len(plan_llm.golden)
                 meta["warnings"] = list(plan_llm.warnings or [])
                 _write_meta(job_dir, meta)
@@ -292,6 +322,13 @@ def process_job_dir(job_dir: Path) -> None:
                     # render_from_plan_only writes final status; reload
                     meta = _read_meta(job_dir)
                     meta["planner"] = "llm"
+                    meta["llm_status"] = llm_status
+                    meta["llm_status_text"] = llm_status_text
+                    meta["llm_ok"] = llm_status == "success"
+                    meta["llm_model"] = model_name or settings.llm_model
+                    meta["llm_path"] = chosen
+                    meta["llm_latency_ms"] = _meta.get("latency_ms")
+                    meta["llm_cloud_error"] = cloud_err[:300] if cloud_err else None
                     meta["transcript_source"] = "faster_whisper_local"
                     meta["playback_speed"] = sp
                     meta["llm_summary"] = str(llm_obj.get("product_summary") or "")[:120]
@@ -341,12 +378,19 @@ def process_job_dir(job_dir: Path) -> None:
                 meta = _read_meta(job_dir)
                 meta["planner"] = "rules"
                 meta["llm_fallback"] = True
+                meta["llm_ok"] = False
+                meta["llm_status"] = "failed"
+                meta["llm_status_text"] = "LLM失败，已回退规则"
                 meta["llm_error"] = str(e)[:500]
+                meta["llm_cloud_error"] = str(e)[:300]
                 _write_meta(job_dir, meta)
                 _set_progress(job_dir, "filter", 50, f"LLM 不可用，回退规则：{str(e)[:80]}")
         else:
             meta = _read_meta(job_dir)
             meta["planner"] = "rules"
+            meta["llm_ok"] = False
+            meta["llm_status"] = "disabled"
+            meta["llm_status_text"] = "未启用/未配置LLM，走规则"
             meta["llm_fallback"] = False
             meta["llm_error"] = "llm_plan_disabled_or_missing_key"
             _write_meta(job_dir, meta)

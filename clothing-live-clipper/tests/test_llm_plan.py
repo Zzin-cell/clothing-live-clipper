@@ -52,10 +52,10 @@ def _many_lines(n: int = 80):
 def test_select_clauses_for_llm_caps_and_drops_bad():
     clauses = expand_lines_to_clauses(_many_lines(160), max_clauses=500)
     assert len(clauses) > LIGHT_MAX_CLAUSES or len(clauses) > 100
-    selected, stats = select_clauses_for_llm(clauses, max_clauses=28)
+    selected, stats = select_clauses_for_llm(clauses, max_clauses=lp.LIGHT_MAX_CLAUSES)
     assert stats["clauses_raw"] == len(clauses)
     assert stats["clauses_sent"] == len(selected)
-    assert len(selected) <= 28
+    assert len(selected) <= lp.LIGHT_MAX_CLAUSES
     assert stats["clauses_sent"] <= stats["clauses_raw"]
     # no invented ids
     raw_ids = {c["id"] for c in clauses}

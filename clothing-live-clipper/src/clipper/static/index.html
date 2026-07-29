@@ -81,6 +81,14 @@
           <div class="jy-transcript asr-cards" id="transcript-list">
             <div class="jy-empty">处理后在这里显示口播句子（可编辑、可拖入成片）</div>
           </div>
+          <div class="jy-llm-status" id="llm-status-card">
+            <div class="jy-llm-status-head">
+              <span>LLM 处理状态</span>
+              <b id="llm-status-badge" class="llm-badge llm-badge-idle">未处理</b>
+            </div>
+            <p class="jy-hint" id="llm-status-text">上传并处理后，这里显示云端LLM成功/失败/兜底原因。</p>
+            <div class="jy-llm-status-meta" id="llm-status-meta" hidden></div>
+          </div>
         </div>
       </aside>
 

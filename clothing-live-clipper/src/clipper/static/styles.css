@@ -375,8 +375,7 @@ body {
   gap: 12px;
 }
 .jy-panel-job,
-.jy-panel-llm,
-.jy-panel-policy {
+.jy-panel-llm {
   flex: 0 0 auto;
 }
 .jy-panel-llm {
@@ -384,6 +383,60 @@ body {
 }
 .jy-panel-job {
   order: -1;
+}
+
+/* LLM status under transcript timeline */
+.jy-llm-status {
+  margin-top: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: #f8fafc;
+}
+.jy-llm-status-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--muted);
+  margin-bottom: 6px;
+}
+.llm-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 700;
+  border: 1px solid transparent;
+}
+.llm-badge-idle {
+  background: #eef2ff;
+  color: #4338ca;
+  border-color: #c7d2fe;
+}
+.llm-badge-ok {
+  background: #ecfdf5;
+  color: #047857;
+  border-color: #a7f3d0;
+}
+.llm-badge-warn {
+  background: #fffbeb;
+  color: #b45309;
+  border-color: #fde68a;
+}
+.llm-badge-err {
+  background: #fef2f2;
+  color: #b91c1c;
+  border-color: #fecaca;
+}
+.jy-llm-status-meta {
+  margin-top: 6px;
+  font-size: 11px;
+  color: var(--muted);
+  line-height: 1.45;
+  word-break: break-all;
 }
 
 .llm-form {

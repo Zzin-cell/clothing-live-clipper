@@ -1102,6 +1102,103 @@ function setupAsrTools() {
   $("asr-to-golden")?.addEventListener("click", () => addAsrToTrack("golden"));
 }
 
+function renderLlmStatus(data) {
+  const badge = $("llm-status-badge");
+  const text = $("llm-status-text");
+  const metaEl = $("llm-status-meta");
+  if (!badge || !text) return;
+
+  const st = data.status || "";
+  const processing = ["queued", "processing", "starting", "claimed"].includes(st);
+  const stage = String(data.stage || "");
+  let status = data.llm_status || "";
+  let statusText = data.llm_status_text || "";
+
+  // Infer for older jobs without new fields
+  if (!status) {
+    if (processing && (stage.includes("llm") || /llm/i.test(String(data.stage_detail || "")))) {
+      status = "running";
+      statusText = "LLM 处理中…";
+    } else if (data.llm_fallback || data.llm_error) {
+      status = "failed";
+      statusText = "LLM失败，已回退规则";
+    } else if (data.planner === "llm") {
+      const model = String(data.llm_model || "");
+      if (model.startsWith("Qwen") || model.includes("gpt") || model.includes("deepseek")) {
+        status = "success";
+        statusText = "云端LLM成功";
+      } else if (model.includes("local")) {
+        status = "local_fallback";
+        statusText = "本地卖点兜底";
+      } else if (model.includes("rules")) {
+        status = "rules_fallback";
+        statusText = "规则时长兜底";
+      } else {
+        status = "success";
+        statusText = "LLM路径完成";
+      }
+    } else if (data.planner === "rules") {
+      status = data.llm_error ? "failed" : "disabled";
+      statusText = data.llm_error ? "LLM失败，已回退规则" : "规则排片";
+    } else if (processing) {
+      status = "running";
+      statusText = "处理中（ASR/排片/渲染）";
+    } else {
+      status = "idle";
+      statusText = "未处理";
+    }
+  }
+
+  const badgeClass = {
+    success: "llm-badge-ok",
+    local_fallback: "llm-badge-warn",
+    rules_fallback: "llm-badge-warn",
+    failed: "llm-badge-err",
+    disabled: "llm-badge-idle",
+    running: "llm-badge-idle",
+    idle: "llm-badge-idle",
+  }[status] || "llm-badge-idle";
+
+  const badgeLabel = {
+    success: "成功",
+    local_fallback: "本地兜底",
+    rules_fallback: "规则兜底",
+    failed: "失败",
+    disabled: "未启用",
+    running: "处理中",
+    idle: "未处理",
+  }[status] || status || "未处理";
+
+  badge.className = `llm-badge ${badgeClass}`;
+  badge.textContent = badgeLabel;
+  text.textContent = statusText || badgeLabel;
+
+  if (metaEl) {
+    const bits = [];
+    if (data.llm_model) bits.push(`模型: ${data.llm_model}`);
+    if (data.llm_path) bits.push(`路径: ${data.llm_path}`);
+    if (data.llm_latency_ms != null) bits.push(`耗时: ${data.llm_latency_ms}ms`);
+    if (data.llm_attempt) bits.push(`尝试: ${data.llm_attempt}`);
+    if (data.final_duration_s != null) bits.push(`成片: ${data.final_duration_s}s`);
+    if (data.selected_clips != null) bits.push(`段数: ${data.selected_clips}`);
+    const cov = data.llm_coverage;
+    if (cov && typeof cov === "object") {
+      bits.push(
+        `覆盖: 版型${cov.fit ? "✓" : "×"} 面料${cov.fabric ? "✓" : "×"} 人群${cov.audience ? "✓" : "×"}`
+      );
+    }
+    const err = data.llm_cloud_error || data.llm_error;
+    if (err) bits.push(`原因: ${String(err).slice(0, 160)}`);
+    if (bits.length) {
+      metaEl.hidden = false;
+      metaEl.textContent = bits.join("  ·  ");
+    } else {
+      metaEl.hidden = true;
+      metaEl.textContent = "";
+    }
+  }
+}
+
 function renderJob(data) {
   const jobChanged = currentJobId !== data.job_id;
   currentJobId = data.job_id;
@@ -1116,6 +1213,7 @@ function renderJob(data) {
   $("current-job-status").textContent = `${STATUS_LABEL[st] || st}${
     data.final_duration_s ? ` · ${data.final_duration_s}s` : ""
   }`;
+  renderLlmStatus(data);
 
   // progress
   const pb = $("progress-block");

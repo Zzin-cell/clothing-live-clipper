@@ -49,8 +49,9 @@ class RenderProfile:
 def get_render_profile(name: str = "final") -> RenderProfile:
     """
     draft  = fast preview
-    final  = export spec:
-      分辨率 1080P, 格式 MP4, 帧率 30, 视频码率 推荐, 视频编码 H.264
+    final  = sharper export for publish:
+      2K (1440P) when source allows, MP4, 30fps, H.264,
+      bitrate tuned so ~60s cut ≈ 50–60MB.
     """
     n = (name or "final").strip().lower()
     if n in {"draft", "preview", "fast"}:
@@ -76,13 +77,13 @@ def get_render_profile(name: str = "final") -> RenderProfile:
             container="mp4",
             vcodec_family="h264",
         )
-    # Final export — match user CapCut-like panel:
-    # 1080P / MP4 / 30fps / 推荐码率 / H.264
+    # Final export: clearer 2K + higher bitrate.
+    # 60s * 7.5Mbps ≈ 56MB (plus audio ≈ 50–60MB target).
     return RenderProfile(
         name="final",
-        max_edge=1080,
-        force_height=1080,
-        force_width=None,  # keep aspect; typical vertical becomes 608x1080 / 1080x1920 handled below
+        max_edge=1440,  # 2K class (1440p long edge)
+        force_height=1440,
+        force_width=None,
         fps=30,
         edge_fade_s=0.0,
         video_fade_s=0.0,
@@ -90,13 +91,13 @@ def get_render_profile(name: str = "final") -> RenderProfile:
         smooth_handle_ms=40,
         join_overlap_frames=1,
         tail_trim_ms=100,
-        crf=20,
-        x264_preset="veryfast",
-        nvenc_preset="p4",
-        nvenc_cq=19,
-        # CapCut “推荐” ≈ solid 1080p30 social export
-        video_bitrate="12M",
-        max_video_bitrate="16M",
+        crf=18,
+        x264_preset="fast",
+        nvenc_preset="p5",
+        nvenc_cq=17,
+        # Higher “推荐” bitrate for sharper fabric/detail
+        video_bitrate="7.5M",
+        max_video_bitrate="10M",
         audio_bitrate="192k",
         container="mp4",
         vcodec_family="h264",
@@ -246,41 +247,65 @@ def _fit_target_size(
     force_h: int | None = None,
 ) -> tuple[int, int]:
     """
-    Compute output width/height.
-    - final 1080P: long edge limited to 1080 (vertical 1080x1920 stays if already;
-      landscape becomes max height/width 1080).
-    - If force_height=1080 and portrait source, emit 1080-high (e.g. 608x1080 / 1080x1920).
+    Compute output width/height for export.
+
+    Final goal: sharper ~2K when source supports it.
+      - portrait 9:16 with long edge >= 2560 → 1440x2560
+      - portrait 1080x1920 → keep 1080x1920 (no heavy fake upscale)
+      - higher-res source → downscale long edge to max_edge (1440)
+    Never upscale more than ~8% (avoids mushy look).
     """
-    w, h = int(src_w), int(src_h)
+    sw, sh = max(2, int(src_w)), max(2, int(src_h))
+    ratio = sw / float(sh)
+    portrait = sh >= sw
+    src_long = max(sw, sh)
+
+    # Desired long edge from profile
+    want_long = None
     if force_w and force_h:
-        w, h = int(force_w), int(force_h)
-    elif force_h and not force_w:
-        # lock height (1080P common for portrait shorts)
-        h = int(force_h)
-        w = max(2, int(round(src_w * (h / float(src_h or 1)))))
-    elif force_w and not force_h:
-        w = int(force_w)
-        h = max(2, int(round(src_h * (w / float(src_w or 1)))))
-    elif max_edge and max(w, h) > max_edge:
-        if h >= w:
-            h = max_edge
-            w = max(2, int(round(src_w * (max_edge / float(src_h or 1)))))
+        return (
+            max(2, int(force_w) - (int(force_w) % 2)),
+            max(2, int(force_h) - (int(force_h) % 2)),
+        )
+    if force_h and portrait:
+        want_long = int(force_h)
+    elif force_w and not portrait:
+        want_long = int(force_w)
+    elif max_edge:
+        want_long = int(max_edge)
+
+    # Do not invent detail: cap target by source long edge * 1.08
+    if want_long is not None:
+        want_long = min(want_long, max(src_long, int(round(src_long * 1.08))))
+
+    # Snap common 9:16 social sizes
+    if portrait and 0.54 <= ratio <= 0.60 and want_long:
+        if want_long >= 1440 and src_long >= 2400:
+            w, h = 1440, 2560  # 2K-class vertical
+        elif src_long >= 1800:
+            w, h = 1080, 1920  # native 1080p vertical
         else:
-            w = max_edge
-            h = max(2, int(round(src_h * (max_edge / float(src_w or 1)))))
-    # Prefer true 1080x1920 for portrait 9:16-ish sources on final
-    if force_h == 1080 and src_h >= src_w:
-        # if nearly 9:16, snap to 1080x1920
-        ratio = (src_w / float(src_h or 1))
-        if 0.54 <= ratio <= 0.60:
-            w, h = 1080, 1920
+            # scale to want_long height
+            h = want_long
+            w = max(2, int(round(sw * (h / float(sh)))))
+    else:
+        # general scale to long-edge target
+        if want_long and src_long > 0:
+            if portrait:
+                h = want_long
+                w = max(2, int(round(sw * (h / float(sh)))))
+            else:
+                w = want_long
+                h = max(2, int(round(sh * (w / float(sw)))))
         else:
-            h = 1080
-            w = max(2, int(round(src_w * (1080 / float(src_h or 1)))))
-            if max_edge:
-                # also cap width if extreme
-                if w > max_edge * 2:
-                    w = max_edge
+            w, h = sw, sh
+
+    # final safety: no >8% upscale
+    if w > sw * 1.08 or h > sh * 1.08:
+        scale = min(sw * 1.08 / float(w or 1), sh * 1.08 / float(h or 1), 1.0)
+        w = max(2, int(round(w * scale)))
+        h = max(2, int(round(h * scale)))
+
     w = max(2, w - (w % 2))
     h = max(2, h - (h % 2))
     return w, h

@@ -1177,7 +1177,6 @@ function renderLlmStatus(data) {
   const badge = $("llm-status-badge");
   const text = $("llm-status-text");
   const metaEl = $("llm-status-meta");
-  const chip = $("plan-path-chip");
   if (!badge || !text) return;
 
   const { status, pathLabel, detail, pathRaw, model } = resolvePlanPath(data || {});
@@ -1209,22 +1208,9 @@ function renderLlmStatus(data) {
       metaEl.hidden = true;
       metaEl.textContent = "";
     }
-    if (chip) {
-      chip.hidden = true;
-      chip.textContent = "";
-      chip.className = "llm-badge llm-badge-idle";
-    }
     return;
   }
   if (card) card.hidden = false;
-
-  // Header chip stays visible even when transcript panel is collapsed
-  if (chip) {
-    chip.hidden = false;
-    chip.className = `llm-badge ${badgeClass}`;
-    chip.textContent = pathLabel;
-    chip.title = detail || pathLabel;
-  }
 
   badge.className = `llm-badge ${badgeClass}`;
   badge.textContent = pathLabel;

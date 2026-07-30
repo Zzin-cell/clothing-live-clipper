@@ -421,6 +421,12 @@ function renderTracks(plan) {
             <label>开始(s)<input class="clip-t0s" type="number" step="0.1" min="0" value="${a}" /></label>
             <label>结束(s)<input class="clip-t1s" type="number" step="0.1" min="0" value="${b}" /></label>
           </div>
+          <div class="clip-time-row cut-row">
+            <label>裁掉从(s)<input class="clip-cut0s" type="number" step="0.1" min="0" value="" placeholder="${a}" /></label>
+            <label>到(s)<input class="clip-cut1s" type="number" step="0.1" min="0" value="" placeholder="${b}" /></label>
+            <button type="button" class="clip-cut-range" title="按秒数裁掉中间一段">裁掉这段</button>
+            <button type="button" class="clip-cut-sel" title="删除口播框中选中文字对应时间">删选中文字段</button>
+          </div>
           <div class="meta">时长 ${((Number(s.t1_ms || 0) - Number(s.t0_ms || 0)) / 1000).toFixed(1)}s</div>
         </div>`;
       })

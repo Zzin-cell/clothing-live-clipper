@@ -675,7 +675,7 @@ body {
   user-select: text;
   touch-action: pan-y;
   min-height: auto;
-  overflow: hidden; /* contain children; avoid text paint-over */
+  overflow: visible; /* never clip textarea second line */
   box-sizing: border-box;
 }
 /* IMPORTANT: do not use min-height:0 here — it crushed cards and overlapped text */
@@ -720,10 +720,11 @@ body {
 .jy-clip .clip-text-edit {
   display: block;
   width: 100%;
-  flex: 0 0 auto;
-  min-height: 2.6em;
-  height: auto; /* JS fitTextareaHeight sets exact height to content */
-  max-height: none; /* measurement + grow; JS applies practical cap */
+  flex: 0 0 auto !important;
+  align-self: stretch;
+  min-height: 3.2em; /* at least ~2 lines so mid-line clip is rare */
+  height: auto;
+  max-height: none !important;
   resize: none;
   border: 1px solid rgba(15,23,42,.12);
   background: rgba(255,255,255,.92);
@@ -736,11 +737,13 @@ body {
   position: relative;
   z-index: 0;
   box-sizing: border-box;
+  overflow: visible;
   overflow-x: hidden;
   overflow-y: hidden;
   white-space: pre-wrap;
   word-break: break-word;
-  field-sizing: content; /* Chromium: content-sized when supported */
+  /* Prefer browser content sizing when available; JS still sets height as fallback */
+  field-sizing: content;
 }
 .jy-clip .clip-time-row {
   display: flex; gap: 8px; margin-top: 6px; flex-wrap: wrap; align-items: center;

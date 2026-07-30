@@ -29,31 +29,96 @@ function escapeHtml(str) {
     .replaceAll('"', "&quot;");
 }
 
+/** Off-screen mirror gives reliable content height (textarea scrollHeight is flaky). */
+let _mirrorEl = null;
+function getTextMirror() {
+  if (_mirrorEl && _mirrorEl.isConnected) return _mirrorEl;
+  const m = document.createElement("div");
+  m.id = "clip-text-mirror";
+  m.setAttribute("aria-hidden", "true");
+  Object.assign(m.style, {
+    position: "fixed",
+    left: "-99999px",
+    top: "0",
+    visibility: "hidden",
+    pointerEvents: "none",
+    whiteSpace: "pre-wrap",
+    wordBreak: "break-word",
+    overflow: "hidden",
+    boxSizing: "border-box",
+  });
+  document.body.appendChild(m);
+  _mirrorEl = m;
+  return m;
+}
+
+function measureTextareaContentHeight(el) {
+  const cs = window.getComputedStyle(el);
+  const mirror = getTextMirror();
+  const width = el.clientWidth || el.offsetWidth || 280;
+  // copy typography/box used for wrap decisions
+  mirror.style.width = `${width}px`;
+  mirror.style.font = cs.font;
+  mirror.style.fontSize = cs.fontSize;
+  mirror.style.fontFamily = cs.fontFamily;
+  mirror.style.fontWeight = cs.fontWeight;
+  mirror.style.lineHeight = cs.lineHeight;
+  mirror.style.letterSpacing = cs.letterSpacing;
+  mirror.style.padding = cs.padding;
+  mirror.style.border = cs.border;
+  mirror.style.boxSizing = cs.boxSizing;
+  // trailing newline needs a space to take a line
+  const val = el.value || el.placeholder || "";
+  mirror.textContent = val.endsWith("\n") ? `${val} ` : val || " ";
+  return Math.ceil(mirror.scrollHeight);
+}
+
 /** Grow/shrink textarea to fit full text (no clipped second line). */
-function fitTextareaHeight(el, { minPx = 40, maxPx = 280 } = {}) {
+function fitTextareaHeight(el, { minPx = 48, maxPx = 360 } = {}) {
   if (!el || el.tagName !== "TEXTAREA") return;
-  // Measure without CSS max-height crushing scrollHeight
-  const prevMax = el.style.maxHeight;
-  const prevOverflow = el.style.overflowY;
-  el.style.maxHeight = "none";
-  el.style.overflowY = "hidden";
-  el.style.height = "0px";
-  // force reflow
-  void el.offsetHeight;
-  const needed = el.scrollHeight;
-  // padding-box can under-report by 1–3px in WebView; pad a bit
-  const next = Math.min(maxPx, Math.max(minPx, needed + 4));
-  el.style.height = `${next}px`;
-  el.style.maxHeight = prevMax || `${maxPx}px`;
-  el.style.overflowY = needed + 4 > maxPx ? "auto" : "hidden";
-  if (prevOverflow && needed + 4 <= maxPx) {
-    // keep hidden when fully shown
+  // Prefer explicit rows from content length as a floor (works even if layout is delayed)
+  const rowsFloor = suggestTextareaRows(el.value);
+  const lineH = (() => {
+    const cs = window.getComputedStyle(el);
+    const lh = parseFloat(cs.lineHeight);
+    if (Number.isFinite(lh) && lh > 0) return lh;
+    const fs = parseFloat(cs.fontSize) || 13;
+    return fs * 1.5;
+  })();
+  const padY = (() => {
+    const cs = window.getComputedStyle(el);
+    return (parseFloat(cs.paddingTop) || 0) + (parseFloat(cs.paddingBottom) || 0)
+      + (parseFloat(cs.borderTopWidth) || 0) + (parseFloat(cs.borderBottomWidth) || 0);
+  })();
+  const fromRows = Math.ceil(rowsFloor * lineH + padY + 2);
+
+  let measured = fromRows;
+  try {
+    if (el.clientWidth > 0) {
+      measured = Math.max(fromRows, measureTextareaContentHeight(el) + 2);
+    } else {
+      // width not ready: use textarea native after clearing height
+      el.style.height = "auto";
+      el.style.maxHeight = "none";
+      void el.offsetHeight;
+      measured = Math.max(fromRows, el.scrollHeight + 6);
+    }
+  } catch (_) {
+    measured = fromRows;
   }
+
+  const next = Math.min(maxPx, Math.max(minPx, measured));
+  el.style.maxHeight = "none";
+  el.style.height = `${next}px`;
+  el.style.overflowY = measured > maxPx ? "auto" : "hidden";
+  // keep rows attribute in sync for non-JS fallbacks
+  el.rows = Math.max(2, Math.min(12, rowsFloor));
 }
 
 function clipTextareaLimits(ta) {
   const inAsr = !!(ta?.closest?.("#transcript-list") || ta?.closest?.(".jy-transcript"));
-  return inAsr ? { minPx: 40, maxPx: 240 } : { minPx: 44, maxPx: 280 };
+  // High max so long ASR lines fully expand; still cap absurd walls of text
+  return inAsr ? { minPx: 48, maxPx: 320 } : { minPx: 52, maxPx: 360 };
 }
 
 function fitAllClipTextareas(root) {
@@ -62,27 +127,28 @@ function fitAllClipTextareas(root) {
   list.forEach((ta) => fitTextareaHeight(ta, clipTextareaLimits(ta)));
 }
 
-/** After DOM paint — run twice so flex width is settled before measuring. */
+/** After DOM paint — multiple passes until width is real. */
 function scheduleFitClipTextareas(root) {
   const run = () => fitAllClipTextareas(root);
+  run();
   if (typeof requestAnimationFrame === "function") {
     requestAnimationFrame(() => {
       run();
       requestAnimationFrame(run);
     });
-  } else {
-    setTimeout(run, 0);
-    setTimeout(run, 50);
   }
+  setTimeout(run, 0);
+  setTimeout(run, 80);
+  setTimeout(run, 200);
 }
 
 function suggestTextareaRows(text) {
-  const t = String(text || "");
+  const t = String(text || "").trim();
   if (!t) return 2;
-  // Chinese ~18–22 chars/line in this card width; + explicit newlines
-  const soft = Math.ceil(t.length / 18);
+  // Left column ~280–320px, 13px font ≈ 14–16 Chinese chars/line; stay conservative
   const hard = (t.match(/\n/g) || []).length + 1;
-  return Math.min(10, Math.max(2, Math.max(soft, hard)));
+  const soft = Math.ceil(t.length / 14);
+  return Math.min(12, Math.max(2, Math.max(hard, soft)));
 }
 
 function statusClass(status) {
@@ -2053,3 +2119,9 @@ setupPlanTools();
 setupAsrTools();
 setupTranscriptPanelToggle();
 setupLlmConfig();
+// reflow-safe fit when fonts/layout settle or panel width changes
+window.addEventListener("resize", () => scheduleFitClipTextareas(document));
+if (document.fonts?.ready) {
+  document.fonts.ready.then(() => scheduleFitClipTextareas(document)).catch(() => {});
+}
+setTimeout(() => scheduleFitClipTextareas(document), 300);

@@ -63,17 +63,19 @@ def get_render_profile(name: str = "final") -> RenderProfile:
             fps=30,  # keep 30 for timeline consistency with export
             edge_fade_s=0.0,
             video_fade_s=0.0,
-            audio_fade_s=0.02,
-            smooth_handle_ms=20,
-            join_overlap_frames=1,
-            tail_trim_ms=80,
-            crf=28,
-            x264_preset="ultrafast",
-            nvenc_preset="p1",
-            nvenc_cq=28,
-            video_bitrate="4M",
-            max_video_bitrate="6M",
-            audio_bitrate="128k",
+            # No mid-cut audio fades (they make every join "hitch").
+            # Tiny optional fade is applied only at whole-file ends if ever needed.
+            audio_fade_s=0.0,
+            smooth_handle_ms=16,
+            join_overlap_frames=2,
+            tail_trim_ms=60,
+            crf=26,
+            x264_preset="veryfast",
+            nvenc_preset="p2",
+            nvenc_cq=26,
+            video_bitrate="5M",
+            max_video_bitrate="7M",
+            audio_bitrate="160k",
             container="mp4",
             vcodec_family="h264",
         )
@@ -87,10 +89,10 @@ def get_render_profile(name: str = "final") -> RenderProfile:
         fps=30,
         edge_fade_s=0.0,
         video_fade_s=0.0,
-        audio_fade_s=0.025,
-        smooth_handle_ms=40,
-        join_overlap_frames=1,
-        tail_trim_ms=100,
+        audio_fade_s=0.0,
+        smooth_handle_ms=24,
+        join_overlap_frames=2,
+        tail_trim_ms=80,
         crf=18,
         x264_preset="fast",
         nvenc_preset="p5",
@@ -361,12 +363,14 @@ def build_cut_cmd(
     h = target_h - (target_h % 2)
 
     # Cover-crop instead of black pad when aspect differs (avoids black bars + "black seam" look)
+    # Force CFR early so every part has identical timebase before concat (reduces hitch).
     vf_parts = [
-        f"scale={w}:{h}:force_original_aspect_ratio=increase",
-        f"crop={w}:{h}",
         f"fps={int(fps)}",
+        f"scale={w}:{h}:force_original_aspect_ratio=increase:flags=bicubic",
+        f"crop={w}:{h}",
+        "setsar=1",
     ]
-    af_parts: list[str] = []
+    af_parts: list[str] = ["aresample=44100:async=1:first_pts=0"]
     if speed != 1.0:
         # Critical: setpts alone can leave a longer container timeline padded with black.
         # Always trim BOTH streams to the real output duration after speed.
@@ -376,15 +380,21 @@ def build_cut_cmd(
         af_parts.append(_atempo_chain(speed))
         af_parts.append(f"atrim=duration={out_dur:.5f}")
         af_parts.append("asetpts=PTS-STARTPTS")
+    else:
+        vf_parts.append("setpts=PTS-STARTPTS")
+        af_parts.append("asetpts=PTS-STARTPTS")
+    # Do not fade audio at every cut edge — that makes the whole cut "一卡一卡".
+    # Only allow fade if profile explicitly requests a meaningful value (>0).
+    if a_fade > 0.001:
+        a_fade = min(a_fade, max(0.01, min(0.04, out_dur / 12.0)))
+        a_fade_out_st = max(0.0, out_dur - a_fade)
+        af_parts.append(f"afade=t=in:st=0:d={a_fade:.3f}")
+        af_parts.append(f"afade=t=out:st={a_fade_out_st:.3f}:d={a_fade:.3f}")
     # Video fade intentionally off by default (v_fade==0)
     if v_fade > 0:
         v_out_st = max(0.0, out_dur - v_fade)
         vf_parts.append(f"fade=t=in:st=0:d={v_fade:.3f}")
         vf_parts.append(f"fade=t=out:st={v_out_st:.3f}:d={v_fade:.3f}")
-    if a_fade > 0:
-        af_parts.append(f"afade=t=in:st=0:d={a_fade:.3f}")
-        af_parts.append(f"afade=t=out:st={a_fade_out_st:.3f}:d={a_fade:.3f}")
-    af_parts.append("aresample=async=1:first_pts=0")
 
     cmd = [
         ffmpeg,
@@ -400,6 +410,10 @@ def build_cut_cmd(
         ",".join(vf_parts),
         "-af",
         ",".join(af_parts),
+        "-r",
+        str(int(fps)),
+        "-vsync",
+        "cfr",
         "-c:v",
         vcodec,
         *v_extra,
@@ -414,7 +428,7 @@ def build_cut_cmd(
         "-ar",
         "44100",
         "-ac",
-        "1",
+        "2",
         # output-side hard stop: this is the key fix against black gaps after 1.4x
         # (setpts shortens motion but encoder can still write a longer empty timeline)
         "-t",
@@ -599,22 +613,27 @@ def concat_segments(
     out_mp4: str | Path,
     *,
     crossfade_s: float = 0.0,
+    profile: RenderProfile | None = None,
 ) -> Path:
     """
-    Direct seamless join (no visible transition).
-    Pairwise concat filter keeps full duration reliably.
-    crossfade_s is ignored for visual dissolves (policy: invisible hard cut).
+    Seamless join with continuous timestamps (no dissolve / no black pad).
+    Uses filter_complex n= concat so A/V stay locked; falls back to demuxer.
     """
     del crossfade_s
-    return _concat_pairwise_hard(segment_paths, Path(out_mp4))
+    return _concat_filter_complex(segment_paths, Path(out_mp4), profile=profile)
 
 
-def _concat_pairwise_hard(segment_paths: list[Path], out_mp4: Path) -> Path:
+def _concat_filter_complex(
+    segment_paths: list[Path],
+    out_mp4: Path,
+    *,
+    profile: RenderProfile | None = None,
+) -> Path:
     """
-    Concat parts without black pads.
+    n-input concat filter → one continuous timeline.
 
-    Prefer re-encode concat (not stream-copy): copy can preserve broken part
-    timelines / edit-list gaps that look like multi-second black flashes.
+    More reliable than concat demuxer for mixed encoder sessions / NVENC parts
+    (avoids micro freezes at every join).
     """
     ffmpeg = require_ffmpeg()
     out_mp4 = Path(out_mp4)
@@ -625,16 +644,96 @@ def _concat_pairwise_hard(segment_paths: list[Path], out_mp4: Path) -> Path:
         shutil.copy2(segment_paths[0], out_mp4)
         return out_mp4
 
+    prof = profile or get_render_profile("draft")
+    fps = int(prof.fps or 30)
+    threads = str(max(2, min(8, (os.cpu_count() or 4))))
+    vcodec, v_extra = pick_video_encoder(profile=prof)
+
+    # ffmpeg argv limits: when many parts, chunk pairwise into trees of 12
+    paths = [Path(p) for p in segment_paths]
+    if len(paths) > 12:
+        with tempfile.TemporaryDirectory(prefix="clipper_concat_chunks_") as td:
+            td_path = Path(td)
+            chunk_outs: list[Path] = []
+            for ci in range(0, len(paths), 12):
+                chunk = paths[ci : ci + 12]
+                cout = td_path / f"chunk_{ci:03d}.mp4"
+                _concat_filter_complex(chunk, cout, profile=prof)
+                chunk_outs.append(cout)
+            return _concat_filter_complex(chunk_outs, out_mp4, profile=prof)
+
+    cmd: list[str] = [ffmpeg, "-y"]
+    for p in paths:
+        cmd += ["-i", str(p.resolve())]
+    n = len(paths)
+    # Reset pts per input then n concat (v=1 a=1) for A/V lock
+    chains: list[str] = []
+    labels: list[str] = []
+    for i in range(n):
+        chains.append(
+            f"[{i}:v]setpts=PTS-STARTPTS,fps={fps},format=yuv420p,setsar=1[v{i}]"
+        )
+        chains.append(
+            f"[{i}:a]asetpts=PTS-STARTPTS,aresample=44100:async=1:first_pts=0,"
+            f"aformat=sample_fmts=fltp:channel_layouts=stereo[a{i}]"
+        )
+        labels.append(f"[v{i}][a{i}]")
+    fc = ";".join(chains) + ";" + "".join(labels) + f"concat=n={n}:v=1:a=1[vout][aout]"
+    cmd += [
+        "-filter_complex",
+        fc,
+        "-map",
+        "[vout]",
+        "-map",
+        "[aout]",
+        "-r",
+        str(fps),
+        "-vsync",
+        "cfr",
+        "-c:v",
+        vcodec,
+        *v_extra,
+        "-threads",
+        threads,
+        "-pix_fmt",
+        "yuv420p",
+        "-c:a",
+        "aac",
+        "-b:a",
+        prof.audio_bitrate or "160k",
+        "-ar",
+        "44100",
+        "-ac",
+        "2",
+        "-movflags",
+        "+faststart",
+        str(out_mp4),
+    ]
+    try:
+        run_cmd(cmd)
+    except FFmpegError:
+        # Fallback: concat demuxer re-encode (older ffmpeg / filter graph fail)
+        return _concat_demuxer_reencode(paths, out_mp4, profile=prof)
+    return out_mp4
+
+
+def _concat_demuxer_reencode(
+    segment_paths: list[Path],
+    out_mp4: Path,
+    *,
+    profile: RenderProfile | None = None,
+) -> Path:
+    ffmpeg = require_ffmpeg()
+    prof = profile or get_render_profile("draft")
+    fps = int(prof.fps or 30)
     with tempfile.TemporaryDirectory(prefix="clipper_concat_") as td:
         list_file = Path(td) / "list.txt"
         lines = []
         for p in segment_paths:
-            # ffmpeg concat demuxer wants escaped single quotes on Windows paths
-            ap = p.resolve().as_posix().replace("'", r"'\''")
+            ap = Path(p).resolve().as_posix().replace("'", r"'\''")
             lines.append(f"file '{ap}'")
         list_file.write_text("\n".join(lines), encoding="utf-8")
         threads = str(max(2, min(8, (os.cpu_count() or 4))))
-        # Always re-encode join for clean continuous timestamps (no black gaps).
         cmd = [
             ffmpeg,
             "-y",
@@ -647,15 +746,19 @@ def _concat_pairwise_hard(segment_paths: list[Path], out_mp4: Path) -> Path:
             "-i",
             str(list_file),
             "-vf",
-            "setpts=PTS-STARTPTS",
+            f"setpts=PTS-STARTPTS,fps={fps},setsar=1",
             "-af",
-            "asetpts=PTS-STARTPTS,aresample=async=1:first_pts=0",
+            "asetpts=PTS-STARTPTS,aresample=44100:async=1:first_pts=0",
+            "-r",
+            str(fps),
+            "-vsync",
+            "cfr",
             "-c:v",
             "libx264",
             "-preset",
-            "ultrafast",
+            "veryfast",
             "-crf",
-            "23",
+            "20",
             "-threads",
             threads,
             "-pix_fmt",
@@ -663,36 +766,16 @@ def _concat_pairwise_hard(segment_paths: list[Path], out_mp4: Path) -> Path:
             "-c:a",
             "aac",
             "-b:a",
-            "128k",
+            prof.audio_bitrate or "160k",
             "-ar",
             "44100",
             "-ac",
-            "1",
-            "-shortest",
+            "2",
             "-movflags",
             "+faststart",
             str(out_mp4),
         ]
-        try:
-            run_cmd(cmd)
-        except FFmpegError:
-            # last resort: copy (may keep gaps — only if reencode fails hard)
-            cmd_copy = [
-                ffmpeg,
-                "-y",
-                "-f",
-                "concat",
-                "-safe",
-                "0",
-                "-i",
-                str(list_file),
-                "-c",
-                "copy",
-                "-movflags",
-                "+faststart",
-                str(out_mp4),
-            ]
-            run_cmd(cmd_copy)
+        run_cmd(cmd)
     return out_mp4
 
 
@@ -766,10 +849,11 @@ def _part_fingerprint(
 ) -> str:
     # include join_overlap so caches invalidate when cut windows expand
     # cover_trim_outt = cover + post-speed filter trim + output -t hard stop
+    # bump tag when cut/audio layout changes so old hitchy parts are not reused
     raw = (
         f"{t0}|{t1}|{speed:.5f}|{tw}x{th}|{fps}|{fade:.3f}|"
         f"vf{video_fade:.3f}|af{audio_fade:.3f}|ov{join_overlap_ms}|"
-        f"{profile}|{vcodec}|{crop_mode}"
+        f"{profile}|{vcodec}|{crop_mode}|smooth_join_v2"
     )
     return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:16]
 
@@ -960,18 +1044,6 @@ def render_plan(
     except Exception:
         pass
 
-    # single concat — speed already in parts
-    concat_segments(parts, out_mp4, crossfade_s=0.0)
-
-    # Optional short pad only if material shortage (rare)
-    try:
-        final_ms = probe_duration_ms(out_mp4)
-        if final_ms > 0 and final_ms < 56_500 and prof.name == "final":
-            target_ms = 58_500
-            factor = min(1.12, max(1.01, target_ms / final_ms))
-            tmp = out_mp4.with_suffix(".retime.mp4")
-            apply_playback_speed(out_mp4, tmp, speed=1.0 / factor)
-            tmp.replace(out_mp4)
-    except Exception:
-        pass
+    # single concat — speed already in parts; never whole-file retime (causes hitch)
+    concat_segments(parts, out_mp4, crossfade_s=0.0, profile=prof)
     return out_mp4

@@ -29,23 +29,60 @@ function escapeHtml(str) {
     .replaceAll('"', "&quot;");
 }
 
-/** Grow/shrink textarea to fit content (no tall empty boxes). */
-function fitTextareaHeight(el, { minPx = 36, maxPx = 220 } = {}) {
+/** Grow/shrink textarea to fit full text (no clipped second line). */
+function fitTextareaHeight(el, { minPx = 40, maxPx = 280 } = {}) {
   if (!el || el.tagName !== "TEXTAREA") return;
-  el.style.height = "auto";
-  const next = Math.min(maxPx, Math.max(minPx, el.scrollHeight + 2));
+  // Measure without CSS max-height crushing scrollHeight
+  const prevMax = el.style.maxHeight;
+  const prevOverflow = el.style.overflowY;
+  el.style.maxHeight = "none";
+  el.style.overflowY = "hidden";
+  el.style.height = "0px";
+  // force reflow
+  void el.offsetHeight;
+  const needed = el.scrollHeight;
+  // padding-box can under-report by 1–3px in WebView; pad a bit
+  const next = Math.min(maxPx, Math.max(minPx, needed + 4));
   el.style.height = `${next}px`;
-  el.style.overflowY = el.scrollHeight > maxPx ? "auto" : "hidden";
+  el.style.maxHeight = prevMax || `${maxPx}px`;
+  el.style.overflowY = needed + 4 > maxPx ? "auto" : "hidden";
+  if (prevOverflow && needed + 4 <= maxPx) {
+    // keep hidden when fully shown
+  }
+}
+
+function clipTextareaLimits(ta) {
+  const inAsr = !!(ta?.closest?.("#transcript-list") || ta?.closest?.(".jy-transcript"));
+  return inAsr ? { minPx: 40, maxPx: 240 } : { minPx: 44, maxPx: 280 };
 }
 
 function fitAllClipTextareas(root) {
-  const scope = root || document;
-  scope.querySelectorAll?.("textarea.clip-text-edit")?.forEach((ta) => {
-    fitTextareaHeight(ta, {
-      minPx: scope.closest?.("#transcript-list") || ta.closest?.("#transcript-list") ? 34 : 36,
-      maxPx: ta.closest?.("#transcript-list") ? 160 : 220,
+  const scope = root && root.querySelectorAll ? root : document;
+  const list = scope.querySelectorAll("textarea.clip-text-edit");
+  list.forEach((ta) => fitTextareaHeight(ta, clipTextareaLimits(ta)));
+}
+
+/** After DOM paint — run twice so flex width is settled before measuring. */
+function scheduleFitClipTextareas(root) {
+  const run = () => fitAllClipTextareas(root);
+  if (typeof requestAnimationFrame === "function") {
+    requestAnimationFrame(() => {
+      run();
+      requestAnimationFrame(run);
     });
-  });
+  } else {
+    setTimeout(run, 0);
+    setTimeout(run, 50);
+  }
+}
+
+function suggestTextareaRows(text) {
+  const t = String(text || "");
+  if (!t) return 2;
+  // Chinese ~18–22 chars/line in this card width; + explicit newlines
+  const soft = Math.ceil(t.length / 18);
+  const hard = (t.match(/\n/g) || []).length + 1;
+  return Math.min(10, Math.max(2, Math.max(soft, hard)));
 }
 
 function statusClass(status) {
@@ -435,7 +472,7 @@ function renderTracks(plan) {
             <span class="clip-badge">逻辑 #${idx + 1}</span>
             <button type="button" class="clip-x" title="${removed ? "恢复" : "删除"}">${removed ? "+" : "×"}</button>
           </div>
-          <textarea class="clip-text-edit" rows="2" placeholder="编辑这段口播词…">${escapeHtml(s.text || "")}</textarea>
+          <textarea class="clip-text-edit" rows="${suggestTextareaRows(s.text)}" placeholder="编辑这段口播词…">${escapeHtml(s.text || "")}</textarea>
           <div class="clip-time-row">
             <label>开始(s)<input class="clip-t0s" type="number" step="0.1" min="0" value="${a}" /></label>
             <label>结束(s)<input class="clip-t1s" type="number" step="0.1" min="0" value="${b}" /></label>
@@ -458,7 +495,7 @@ function renderTracks(plan) {
   if ($("cta-track")) $("cta-track").innerHTML = "";
   ensurePlanEventsBound();
   updatePlanHint();
-  fitAllClipTextareas($("golden-track"));
+  scheduleFitClipTextareas($("golden-track"));
 
   if (scrollBox) scrollBox.scrollTop = scrollTop;
   if (focusKey) {
@@ -496,7 +533,7 @@ function ensurePlanEventsBound() {
     planDirty = true;
     if (t.classList.contains("clip-text-edit")) {
       planEdit[role][idx].text = t.value;
-      fitTextareaHeight(t);
+      fitTextareaHeight(t, clipTextareaLimits(t));
     } else if (t.classList.contains("clip-t0s")) {
       planEdit[role][idx].t0_ms = Math.max(0, Math.round(Number(t.value || 0) * 1000));
     } else if (t.classList.contains("clip-t1s")) {
@@ -954,7 +991,7 @@ function renderAsrCards() {
           <span class="clip-badge">口播 #${idx + 1}</span>
           <button type="button" class="clip-x asr-add-one" title="加入逻辑成片">＋</button>
         </div>
-        <textarea class="clip-text-edit" rows="2" placeholder="编辑这段口播词…">${escapeHtml(u.text || "")}</textarea>
+        <textarea class="clip-text-edit" rows="${suggestTextareaRows(u.text)}" placeholder="编辑这段口播词…">${escapeHtml(u.text || "")}</textarea>
         <div class="clip-time-row">
           <label>开始(s)<input class="clip-t0s" type="number" step="0.1" min="0" value="${a}" /></label>
           <label>结束(s)<input class="clip-t1s" type="number" step="0.1" min="0" value="${b}" /></label>
@@ -967,7 +1004,7 @@ function renderAsrCards() {
     .join("");
 
   ensureAsrEventsBound();
-  fitAllClipTextareas(box);
+  scheduleFitClipTextareas(box);
   box.scrollTop = scrollTop;
   if (focusIdx != null) {
     const card = box.querySelector(`.asr-card[data-idx="${focusIdx}"]`);
@@ -981,7 +1018,7 @@ function renderAsrCards() {
           el.setSelectionRange(caret.s ?? el.value.length, caret.e ?? el.value.length);
         } catch (_) {}
       }
-      if (el.classList?.contains("clip-text-edit")) fitTextareaHeight(el, { minPx: 34, maxPx: 160 });
+      if (el.classList?.contains("clip-text-edit")) fitTextareaHeight(el, clipTextareaLimits(el));
     }
   }
 }
@@ -1002,7 +1039,7 @@ function ensureAsrEventsBound() {
     if (!asrCards[idx]) return;
     if (t.classList.contains("clip-text-edit")) {
       asrCards[idx].text = t.value;
-      fitTextareaHeight(t, { minPx: 34, maxPx: 160 });
+      fitTextareaHeight(t, clipTextareaLimits(t));
     }
     if (t.classList.contains("clip-t0s")) asrCards[idx].t0_ms = Math.max(0, Math.round(Number(t.value || 0) * 1000));
     if (t.classList.contains("clip-t1s")) {

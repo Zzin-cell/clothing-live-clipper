@@ -29,6 +29,25 @@ function escapeHtml(str) {
     .replaceAll('"', "&quot;");
 }
 
+/** Grow/shrink textarea to fit content (no tall empty boxes). */
+function fitTextareaHeight(el, { minPx = 36, maxPx = 220 } = {}) {
+  if (!el || el.tagName !== "TEXTAREA") return;
+  el.style.height = "auto";
+  const next = Math.min(maxPx, Math.max(minPx, el.scrollHeight + 2));
+  el.style.height = `${next}px`;
+  el.style.overflowY = el.scrollHeight > maxPx ? "auto" : "hidden";
+}
+
+function fitAllClipTextareas(root) {
+  const scope = root || document;
+  scope.querySelectorAll?.("textarea.clip-text-edit")?.forEach((ta) => {
+    fitTextareaHeight(ta, {
+      minPx: scope.closest?.("#transcript-list") || ta.closest?.("#transcript-list") ? 34 : 36,
+      maxPx: ta.closest?.("#transcript-list") ? 160 : 220,
+    });
+  });
+}
+
 function statusClass(status) {
   if (status === "success") return "ok";
   if (status === "failed") return "bad";
@@ -439,6 +458,7 @@ function renderTracks(plan) {
   if ($("cta-track")) $("cta-track").innerHTML = "";
   ensurePlanEventsBound();
   updatePlanHint();
+  fitAllClipTextareas($("golden-track"));
 
   if (scrollBox) scrollBox.scrollTop = scrollTop;
   if (focusKey) {
@@ -452,6 +472,7 @@ function renderTracks(plan) {
           el.setSelectionRange(caret.s ?? el.value.length, caret.e ?? el.value.length);
         } catch (_) {}
       }
+      if (el.classList?.contains("clip-text-edit")) fitTextareaHeight(el);
     }
   }
 }
@@ -475,6 +496,7 @@ function ensurePlanEventsBound() {
     planDirty = true;
     if (t.classList.contains("clip-text-edit")) {
       planEdit[role][idx].text = t.value;
+      fitTextareaHeight(t);
     } else if (t.classList.contains("clip-t0s")) {
       planEdit[role][idx].t0_ms = Math.max(0, Math.round(Number(t.value || 0) * 1000));
     } else if (t.classList.contains("clip-t1s")) {
@@ -945,6 +967,7 @@ function renderAsrCards() {
     .join("");
 
   ensureAsrEventsBound();
+  fitAllClipTextareas(box);
   box.scrollTop = scrollTop;
   if (focusIdx != null) {
     const card = box.querySelector(`.asr-card[data-idx="${focusIdx}"]`);
@@ -958,6 +981,7 @@ function renderAsrCards() {
           el.setSelectionRange(caret.s ?? el.value.length, caret.e ?? el.value.length);
         } catch (_) {}
       }
+      if (el.classList?.contains("clip-text-edit")) fitTextareaHeight(el, { minPx: 34, maxPx: 160 });
     }
   }
 }
@@ -976,7 +1000,10 @@ function ensureAsrEventsBound() {
     if (!card) return;
     const idx = Number(card.dataset.idx);
     if (!asrCards[idx]) return;
-    if (t.classList.contains("clip-text-edit")) asrCards[idx].text = t.value;
+    if (t.classList.contains("clip-text-edit")) {
+      asrCards[idx].text = t.value;
+      fitTextareaHeight(t, { minPx: 34, maxPx: 160 });
+    }
     if (t.classList.contains("clip-t0s")) asrCards[idx].t0_ms = Math.max(0, Math.round(Number(t.value || 0) * 1000));
     if (t.classList.contains("clip-t1s")) {
       const t0 = asrCards[idx].t0_ms || 0;

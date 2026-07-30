@@ -1167,13 +1167,23 @@ def llm_obj_to_timeline(
     target_seconds: int = 60,
     playback_speed: float = 1.4,
 ) -> TimelinePlan:
-    # Prefer clause units if provided by call_llm_for_plan; else expand now
+    # Prefer selected clauses for keep resolve; full raw pool for duration fill.
     clause_units = llm_obj.get("_clauses")
     if not isinstance(clause_units, list) or not clause_units:
         clause_units = expand_lines_to_clauses(lines)
+    raw_units = llm_obj.get("_clauses_raw")
+    if not isinstance(raw_units, list) or not raw_units:
+        raw_units = expand_lines_to_clauses(lines, max_clauses=420) if lines else list(clause_units)
     by_id = {str(u.get("utt_id") or u.get("id")): u for u in clause_units}
-    # ordered list for neighbor completion
-    ordered = list(clause_units)
+    # Merge raw into by_id so fill can append ids not in the light subset
+    for u in raw_units:
+        if not isinstance(u, dict):
+            continue
+        uid = str(u.get("utt_id") or u.get("id") or "")
+        if uid and uid not in by_id:
+            by_id[uid] = u
+    # ordered list for neighbor completion / duration fill (prefer raw chronology)
+    ordered = list(raw_units) if raw_units else list(clause_units)
     id_to_idx = {str(u.get("id")): i for i, u in enumerate(ordered)}
     parents = {str(u.get("id")): u for u in _normalize_lines(lines)}
     keep = llm_obj.get("keep") or []
@@ -1310,13 +1320,59 @@ def llm_obj_to_timeline(
     # duration trim toward target source length for ~60s final after speed
     sp = playback_speed if playback_speed and playback_speed > 0 else 1.4
     aim = int(round(target_seconds * 1000 * sp))
-    # Product floor: final >= 50s → source >= 50s * playback_speed
-    floor_src_ms = int(round(50_000 * sp))
+    # Product floor: final >= 50s → source >= 50s * playback_speed (+tiny join slack)
+    floor_src_ms = int(round(50_000 * sp * 1.02))
     min_ms = max(floor_src_ms, int(aim * 0.90))
-    max_ms = int(aim * 1.12)
+    max_ms = int(aim * 1.15)
 
     def total_ms() -> int:
         return sum(max(0, s.t1_ms - s.t0_ms) for s in slots)
+
+    def _fillable_tx(tx: str, *, relax: bool) -> bool:
+        if not tx or len(tx.strip()) < 2:
+            return False
+        if (
+            _is_control(tx)
+            or _is_size(tx)
+            or _is_price_or_shipping(tx)
+            or _is_persona_or_hype(tx)
+        ):
+            return False
+        if relax:
+            # last resort for hitting 50s: any non-banned clothing-ish line
+            return _value_score(tx) >= 1 or any(
+                k in tx for k in ("穿", "衣", "裙", "裤", "软", "透", "瘦", "腰", "色", "搭")
+            )
+        return _value_score(tx) >= 2
+
+    # Proactive fill BEFORE trim — must clear 50s-final floor when material exists
+    for relax in (False, True):
+        guard_f = 0
+        while total_ms() < min_ms and guard_f < 80:
+            guard_f += 1
+            added = False
+            # prefer higher value first, then chronological
+            cands = sorted(
+                ordered,
+                key=lambda u: (
+                    -_value_score(str(u.get("text") or "")),
+                    int(u.get("t0_ms") or 0),
+                ),
+            )
+            for u in cands:
+                uid = str(u.get("id") or u.get("utt_id") or "")
+                if not uid or uid in used_ids:
+                    continue
+                tx = str(u.get("text") or "")
+                if not _fillable_tx(tx, relax=relax):
+                    continue
+                before = total_ms()
+                _append_from_src(uid, u, why="duration_floor_fill", score=32 if not relax else 20)
+                if total_ms() > before:
+                    added = True
+                    break
+            if not added:
+                break
 
     # trim from middle-low value first; keep first hook and last closer
     guard = 0
@@ -1384,41 +1440,48 @@ def llm_obj_to_timeline(
         warnings.append("policy:main_points_first")
     if not slots:
         warnings.append("llm_empty_keep")
-    # If still short, pull more sell clauses (no silent pad)
-    guard = 0
-    while total_ms() < min_ms and guard < 30:
-        guard += 1
-        added = False
-        for u in ordered:
-            uid = str(u.get("id"))
-            if uid in used_ids:
-                continue
-            tx = str(u.get("text") or "")
-            if (
-                _is_control(tx)
-                or _is_size(tx)
-                or _is_price_or_shipping(tx)
-                or _is_persona_or_hype(tx)
-            ):
-                continue
-            if _value_score(tx) < 2:
-                continue
-            before = total_ms()
-            _append_from_src(uid, u, why="timeline_duration_fill", score=35)
-            if total_ms() > before:
-                added = True
+    # Second fill pass after merge/drop incomplete — hard push to >=50s final source
+    for relax in (False, True):
+        guard = 0
+        while total_ms() < min_ms and guard < 80:
+            guard += 1
+            added = False
+            cands = sorted(
+                ordered,
+                key=lambda u: (
+                    -_value_score(str(u.get("text") or "")),
+                    int(u.get("t0_ms") or 0),
+                ),
+            )
+            for u in cands:
+                uid = str(u.get("id") or u.get("utt_id") or "")
+                if not uid or uid in used_ids:
+                    continue
+                tx = str(u.get("text") or "")
+                if not _fillable_tx(tx, relax=relax):
+                    continue
+                before = total_ms()
+                _append_from_src(uid, u, why="timeline_duration_fill", score=30 if not relax else 18)
+                if total_ms() > before:
+                    added = True
+                    break
+            if not added:
                 break
-        if not added:
-            break
-    if total_ms() < min_ms:
-        warnings.append(f"short_but_complete_ms={total_ms()}")
+    final_ms = total_ms()
+    final_out_s = final_ms / 1000.0 / sp if sp > 0 else final_ms / 1000.0
+    if final_out_s + 0.05 < 50.0:
+        warnings.append(f"short_under_50s_final={final_out_s:.1f}")
+        warnings.append(f"short_but_complete_ms={final_ms}")
     if llm_obj.get("_coverage"):
         warnings.append(f"coverage:{llm_obj.get('_coverage')}")
 
-    # final guard: never end with incomplete text
+    # final guard: never end with incomplete text (if still short, prefer keep length)
     if slots and _looks_incomplete_text(slots[-1].text) and len(slots) > 1:
-        slots.pop()
-        warnings.append("dropped_incomplete_tail")
+        if total_ms() - max(0, slots[-1].t1_ms - slots[-1].t0_ms) >= min_ms:
+            slots.pop()
+            warnings.append("dropped_incomplete_tail")
+        else:
+            warnings.append("kept_incomplete_tail_for_duration")
 
     # Keep rough narrative order preference: fit/fabric/audience mixed but opener first already from keep
     return TimelinePlan(
@@ -1591,15 +1654,22 @@ def plan_from_asr_with_llm(
             "audience": any(k in blob for k in _AUDIENCE_MARKERS),
         }
 
+    def _final_s(p: TimelinePlan | None) -> float:
+        if p is None:
+            return 0.0
+        return float(p.total_duration_ms or 0) / 1000.0 / sp
+
     def _score(p: TimelinePlan | None) -> tuple:
         if p is None or not p.golden:
             return (-1, -1, -1, -1)
         cov = _cov(p)
         cov_n = int(cov["fit"]) + int(cov["fabric"]) + int(cov["audience"])
-        # prefer near-target duration without being insanely short
         dur = int(p.total_duration_ms or 0)
-        dur_score = min(dur, aim_src) - max(0, min_ok_src - dur) * 2
-        return (cov_n, dur_score, len(p.golden), dur)
+        final_s = dur / 1000.0 / sp if sp > 0 else dur / 1000.0
+        # Strong penalty under 50s final; reward filling toward target
+        under50 = max(0.0, 50.0 - final_s)
+        dur_score = min(dur, aim_src) - max(0, min_ok_src - dur) * 2 - int(under50 * 8000)
+        return (0 if under50 > 0.05 else 1, cov_n, dur_score, len(p.golden), dur)
 
     candidates: list[tuple[str, TimelinePlan, dict[str, Any]]] = []
     if plan is not None and plan.golden:
@@ -1639,17 +1709,25 @@ def plan_from_asr_with_llm(
     def _pick_score(item: tuple[str, TimelinePlan, dict[str, Any]]) -> tuple:
         name, p, _o = item
         base = _score(p)
-        # Prefer cloud whenever coverage is decent and duration is not collapsed.
-        # Previous pure score often chose rules_duration because it pads longer.
-        if name == "cloud_or_repaired" and base[0] >= 2 and base[3] >= int(min_ok_src * 0.55):
-            return (base[0] + 1, base[1] + aim_src // 4, base[2], base[3], 3)
+        meets50 = base[0] == 1
+        # Cloud wins only if already >=50s final; otherwise prefer longer local/rules
+        if name == "cloud_or_repaired" and meets50 and base[1] >= 2:
+            return (1, base[1] + 1, base[2] + aim_src // 5, base[3], base[4], 3)
+        if name == "cloud_or_repaired" and meets50:
+            return (1, *base[1:], 2)
         if name == "cloud_or_repaired":
-            return (*base, 2)
+            return (0, *base[1:], 1)
         if name == "local_clause_rank":
-            return (*base, 1)
-        return (*base, 0)
+            return (1 if meets50 else 0, *base[1:], 1)
+        # rules_duration: use for length when cloud is short
+        return (1 if meets50 else 0, *base[1:], 2 if not meets50 else 0)
 
     best_name, best_plan, best_obj = max(candidates, key=_pick_score)
+    # Absolute guard: if winner still <50s but another path is longer, take the longest eligible
+    if _final_s(best_plan) + 0.05 < 50.0:
+        longer = max(candidates, key=lambda it: int(it[1].total_duration_ms or 0))
+        if int(longer[1].total_duration_ms or 0) > int(best_plan.total_duration_ms or 0):
+            best_name, best_plan, best_obj = longer
     meta = dict(best_obj.get("_meta") or {})
     meta["chosen_path"] = best_name
     meta["cloud_error"] = cloud_err

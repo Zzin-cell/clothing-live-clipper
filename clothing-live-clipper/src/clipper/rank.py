@@ -937,7 +937,7 @@ def build_timeline_plan(
         last_t1 = first.t1_ms
         selected_texts.append(first.text or "")
 
-    max_slots = 28  # more slots so short clips can still sum near 60s final
+    max_slots = 40  # more slots so short clips can still sum to >=50s final
     while total < aim and len(selected) < max_slots:
         best = None
         best_key = None
@@ -1015,7 +1015,7 @@ def build_timeline_plan(
         last_t1 = best.t1_ms
         selected_texts.append(best.text or "")
 
-    # Keep filling until soft_min if we still have clothing-useful leftovers
+    # Keep filling until soft_min (>=50s final source) with any eligible leftovers
     if total < soft_min:
         leftovers = sorted(
             [c for c in ordered if c.clip_id not in used],
@@ -1024,7 +1024,23 @@ def build_timeline_plan(
         for c in leftovers:
             if total >= soft_min or len(selected) >= max_slots:
                 break
-            if any(_similarity(c.text or "", p) >= 0.93 for p in selected_texts) and total > soft_min * 0.75:
+            if any(_similarity(c.text or "", p) >= 0.95 for p in selected_texts) and total > soft_min * 0.85:
+                continue
+            selected.append(c)
+            used.add(c.clip_id)
+            total += c.duration_ms
+            selected_texts.append(c.text or "")
+
+    # Final push: expand to pool (not only core) until floor
+    if total < soft_min:
+        leftovers = sorted(
+            [c for c in pool if c.clip_id not in used and c.score > 0],
+            key=lambda c: (-c.score, c.t0_ms),
+        )
+        for c in leftovers:
+            if total >= soft_min or len(selected) >= max_slots:
+                break
+            if any(_similarity(c.text or "", p) >= 0.96 for p in selected_texts):
                 continue
             selected.append(c)
             used.add(c.clip_id)
@@ -1033,16 +1049,18 @@ def build_timeline_plan(
 
     if total < min_plan:
         warnings.append(f"short_source_ms={total}")
-        leftovers = [c for c in ordered if c.clip_id not in used]
+        leftovers = [c for c in pool if c.clip_id not in used and c.score > 0]
         for c in leftovers:
-            if total >= min_plan or len(selected) >= max_slots:
+            if total >= soft_min or len(selected) >= max_slots:
                 break
-            if any(_similarity(c.text or "", p) >= 0.93 for p in selected_texts) and total > min_plan * 0.8:
+            if any(_similarity(c.text or "", p) >= 0.96 for p in selected_texts):
                 continue
             selected.append(c)
             used.add(c.clip_id)
             total += c.duration_ms
             selected_texts.append(c.text or "")
+    if total < soft_min:
+        warnings.append(f"under_50s_floor_source_ms={total}")
 
     if len(selected) >= 2:
         head = selected[0]

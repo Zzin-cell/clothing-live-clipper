@@ -421,20 +421,7 @@ function renderTracks(plan) {
             <label>开始(s)<input class="clip-t0s" type="number" step="0.1" min="0" value="${a}" /></label>
             <label>结束(s)<input class="clip-t1s" type="number" step="0.1" min="0" value="${b}" /></label>
           </div>
-          <div class="clip-time-row cut-row">
-            <label>裁掉从(s)<input class="clip-cut0s" type="number" step="0.1" min="0" value="" placeholder="${a}" /></label>
-            <label>到(s)<input class="clip-cut1s" type="number" step="0.1" min="0" value="" placeholder="${b}" /></label>
-            <button type="button" class="clip-cut-range" title="按秒数裁掉中间一段">裁掉这段</button>
-            <button type="button" class="clip-cut-sel" title="删除口播框中选中文字对应时间">删选中文字段</button>
-          </div>
-          <div class="meta">时长 ${((Number(s.t1_ms || 0) - Number(s.t0_ms || 0)) / 1000).toFixed(1)}s · 想去掉“199再来一次”：选中文字点「删选中文字段」</div>
-          <div class="clip-tools">
-            <button type="button" class="clip-up" title="同轨上移">↑</button>
-            <button type="button" class="clip-down" title="同轨下移">↓</button>
-            <button type="button" class="clip-prev" title="移到上一轨">↑轨</button>
-            <button type="button" class="clip-next" title="移到下一轨">↓轨</button>
-            <button type="button" class="clip-del-hard" title="删除整个片段">删整段</button>
-          </div>
+          <div class="meta">时长 ${((Number(s.t1_ms || 0) - Number(s.t0_ms || 0)) / 1000).toFixed(1)}s</div>
         </div>`;
       })
       .join("");
@@ -944,7 +931,7 @@ function renderAsrCards() {
           <label>开始(s)<input class="clip-t0s" type="number" step="0.1" min="0" value="${a}" /></label>
           <label>结束(s)<input class="clip-t1s" type="number" step="0.1" min="0" value="${b}" /></label>
         </div>
-        <div class="meta">可改词/改时码 · 拖到中间逻辑成片 · 或勾选后点「+加入成片」</div>
+        <div class="meta">拖到逻辑成片，或点 ＋ / 「+加入成片」</div>
         <div class="clip-tools">
           <button type="button" class="asr-add-golden">+加入成片</button>
         </div>

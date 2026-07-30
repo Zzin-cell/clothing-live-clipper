@@ -60,7 +60,7 @@
             </div>
 
             <button type="submit" class="jy-btn primary block" id="submit-btn">开始服装切片</button>
-            <p class="jy-hint">硬规则保留：剔尺码/价格发货/直播控场/无关闲聊。结构优化：开场3秒最吸睛上身或面料特写→全身效果→细节做工→穿搭场景。成片约55–65秒（默认60s@1.4x）。导出终稿：2K / MP4 / 30fps / H.264（约60秒≈50–60MB）。</p>
+            <p class="jy-hint">约 60 秒成片（1.4x）。自动去尺码/价格/直播闲聊；优先上身与面料。终稿：2K MP4。</p>
             <p class="jy-error" id="form-error" hidden></p>
           </form>
         </div>
@@ -104,30 +104,22 @@
         <div class="jy-timeline-panel">
           <div class="jy-panel-head">
             <span>逻辑成片</span>
-            <span class="muted">逻辑通顺分模块 · 句尾自然收束 · 改时间/删段后重剪</span>
+            <div class="jy-head-actions">
+              <span class="muted" id="plan-edit-hint"></span>
+              <button type="button" class="jy-btn tiny primary" id="plan-apply" disabled>保存并重剪</button>
+            </div>
           </div>
-          <div class="jy-track-tools">
-            <button type="button" class="jy-btn tiny" id="plan-reset" disabled>还原结构</button>
-            <button type="button" class="jy-btn tiny" id="plan-balance" disabled>均分时长</button>
-            <label class="jy-switch learn-switch" title="勾选后，这次重剪会写入全局学习">
-              <input type="checkbox" id="plan-learn" />
-              <span>学习这次重剪</span>
-            </label>
-            <button type="button" class="jy-btn tiny" id="learn-clear">清空学习</button>
-            <button type="button" class="jy-btn tiny primary" id="plan-apply" disabled>保存并重剪成片</button>
-            <span class="muted" id="plan-edit-hint"></span>
-          </div>
-          <p class="jy-hint" id="plan-note">
-            硬规则（始终）：去尺码/价格发货/直播控场/无关内容。结构优化：开场3秒最吸睛→全身效果→细节做工→穿搭场景收束；禁止话说一半就截断。目标约60秒。
-            想删小句：选中文字 →「删选中文字段」→「保存并重剪成片」。
-          </p>
           <div class="jy-tracks">
             <div class="jy-track jy-track-logic">
-              <div class="jy-track-label">逻辑</div>
               <div class="jy-track-body" id="golden-track"></div>
             </div>
           </div>
           <!-- legacy ids for JS null-safe fallback (not displayed) -->
+          <div id="plan-reset" hidden></div>
+          <div id="plan-balance" hidden></div>
+          <div id="plan-learn" hidden></div>
+          <div id="learn-clear" hidden></div>
+          <div id="plan-note" hidden></div>
           <div id="trust-track" hidden></div>
           <div id="cta-track" hidden></div>
         </div>

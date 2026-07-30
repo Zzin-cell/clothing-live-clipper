@@ -116,9 +116,13 @@ function activeCount(plan) {
 }
 
 function setPlanToolsEnabled(on) {
-  if ($("plan-reset")) $("plan-reset").disabled = !on;
-  if ($("plan-apply")) $("plan-apply").disabled = !on;
-  if ($("plan-balance")) $("plan-balance").disabled = !on;
+  const apply = $("plan-apply");
+  if (apply && "disabled" in apply) apply.disabled = !on;
+  // optional legacy controls (may be hidden placeholders without disabled)
+  const reset = $("plan-reset");
+  if (reset && "disabled" in reset) reset.disabled = !on;
+  const balance = $("plan-balance");
+  if (balance && "disabled" in balance) balance.disabled = !on;
 }
 
 function slotDurMs(s) {
@@ -141,9 +145,8 @@ function updatePlanHint() {
   const avg = durs.length ? durs.reduce((a, b) => a + b, 0) / durs.length : 0;
   const min = durs.length ? Math.min(...durs) : 0;
   const max = durs.length ? Math.max(...durs) : 0;
-  el.textContent = `逻辑成片 ${n} 段 · 均长 ${(avg / 1000).toFixed(1)}s · 最短 ${(min / 1000).toFixed(1)}s / 最长 ${(
-    max / 1000
-  ).toFixed(1)}s`;
+  // Short status only — keep header clean
+  el.textContent = `${n} 段 · ${(avg / 1000).toFixed(1)}s均`;
 }
 
 function balancePlanDurations() {
@@ -714,7 +717,8 @@ function ensurePlanEventsBound() {
 
 function isLearnEnabled() {
   const el = $("plan-learn");
-  return !!(el && el.checked);
+  // Hidden placeholder is not a checkbox after UI simplify — never force learn
+  return !!(el && el.type === "checkbox" && el.checked);
 }
 
 async function applyPlanEdit() {
@@ -751,10 +755,12 @@ async function applyPlanEdit() {
     alert("请至少保留一个片段");
     return;
   }
-  $("plan-edit-hint").textContent = learn
-    ? `正在按 ${allTexts.length} 段时间轴重剪（并学习）…`
-    : `正在按 ${allTexts.length} 段时间轴重剪…`;
-  $("plan-apply").disabled = true;
+  if ($("plan-edit-hint")) {
+    $("plan-edit-hint").textContent = learn
+      ? `正在重剪 ${allTexts.length} 段（学习）…`
+      : `正在重剪 ${allTexts.length} 段…`;
+  }
+  if ($("plan-apply") && "disabled" in $("plan-apply")) $("plan-apply").disabled = true;
   try {
     const res = await fetch(`/api/jobs/${encodeURIComponent(currentJobId)}/plan`, {
       method: "PUT",
@@ -781,12 +787,11 @@ async function applyPlanEdit() {
     pollJob(currentJobId);
     loadHealth();
     if ($("plan-edit-hint")) {
-      $("plan-edit-hint").textContent =
-        `已提交重剪（${allTexts.length} 段）。请等进度到完成后预览会自动刷新；若仍旧请再点一次历史任务。`;
+      $("plan-edit-hint").textContent = `已提交重剪（${allTexts.length} 段），完成后自动刷新预览`;
     }
   } catch (e) {
     alert(String(e.message || e));
-    $("plan-apply").disabled = false;
+    if ($("plan-apply") && "disabled" in $("plan-apply")) $("plan-apply").disabled = false;
   }
 }
 
@@ -809,18 +814,19 @@ async function clearLearningData() {
 }
 
 function setupPlanTools() {
-  $("plan-reset")?.addEventListener("click", () => {
+  // Simplified toolbar: only 「保存并重剪」 is shown.
+  // Hidden legacy nodes keep null-safe hooks if re-enabled later.
+  $("plan-reset")?.addEventListener?.("click", () => {
     if (!planOriginal) return;
     planEdit = clonePlan(planOriginal);
     planDirty = true;
     queueRenderTracks();
   });
-  $("plan-balance")?.addEventListener("click", () => balancePlanDurations());
-  $("plan-apply")?.addEventListener("click", applyPlanEdit);
-  $("learn-clear")?.addEventListener("click", clearLearningData);
-  // remember user preference for learn toggle
+  $("plan-balance")?.addEventListener?.("click", () => balancePlanDurations());
+  $("plan-apply")?.addEventListener?.("click", applyPlanEdit);
+  $("learn-clear")?.addEventListener?.("click", clearLearningData);
   const learnEl = $("plan-learn");
-  if (learnEl) {
+  if (learnEl && learnEl.type === "checkbox") {
     try {
       learnEl.checked = localStorage.getItem("clipper_learn_on_reclip") === "1";
     } catch (_) {
@@ -830,11 +836,6 @@ function setupPlanTools() {
       try {
         localStorage.setItem("clipper_learn_on_reclip", learnEl.checked ? "1" : "0");
       } catch (_) {}
-      if ($("learn-hint")) {
-        $("learn-hint").textContent = learnEl.checked
-          ? "已开启：下次点「保存口播并重剪」会学习这次修改。"
-          : "已关闭：重剪只出片，不写入学习。需要时再勾选「学习这次重剪」。";
-      }
     });
   }
 }

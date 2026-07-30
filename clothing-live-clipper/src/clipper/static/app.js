@@ -416,7 +416,7 @@ function renderTracks(plan) {
             <span class="clip-badge">逻辑 #${idx + 1}</span>
             <button type="button" class="clip-x" title="${removed ? "恢复" : "删除"}">${removed ? "+" : "×"}</button>
           </div>
-          <textarea class="clip-text-edit" rows="4" placeholder="编辑这段口播词…">${escapeHtml(s.text || "")}</textarea>
+          <textarea class="clip-text-edit" rows="2" placeholder="编辑这段口播词…">${escapeHtml(s.text || "")}</textarea>
           <div class="clip-time-row">
             <label>开始(s)<input class="clip-t0s" type="number" step="0.1" min="0" value="${a}" /></label>
             <label>结束(s)<input class="clip-t1s" type="number" step="0.1" min="0" value="${b}" /></label>
@@ -932,7 +932,7 @@ function renderAsrCards() {
           <span class="clip-badge">口播 #${idx + 1}</span>
           <button type="button" class="clip-x asr-add-one" title="加入逻辑成片">＋</button>
         </div>
-        <textarea class="clip-text-edit" rows="5" placeholder="编辑这段口播词…">${escapeHtml(u.text || "")}</textarea>
+        <textarea class="clip-text-edit" rows="2" placeholder="编辑这段口播词…">${escapeHtml(u.text || "")}</textarea>
         <div class="clip-time-row">
           <label>开始(s)<input class="clip-t0s" type="number" step="0.1" min="0" value="${a}" /></label>
           <label>结束(s)<input class="clip-t1s" type="number" step="0.1" min="0" value="${b}" /></label>

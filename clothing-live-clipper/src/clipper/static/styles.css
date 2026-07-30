@@ -28,19 +28,16 @@ body {
   font-family: var(--font);
   color: var(--text);
   background: var(--bg2);
-  /* Single page scrollbar on the far right (no nested column scrapers) */
-  overflow-x: hidden;
-  overflow-y: auto;
+  overflow: hidden; /* app handles scroll in columns */
 }
 
 .jy-app {
-  min-height: 100vh;
-  height: auto;
-  max-height: none;
+  height: 100vh;
+  max-height: 100vh;
   display: flex;
   flex-direction: column;
-  min-width: 0;
-  overflow: visible;
+  min-height: 0;
+  overflow: hidden;
 }
 
 /* top */
@@ -145,29 +142,30 @@ body {
   grid-template-columns: minmax(300px, 340px) minmax(0, 1fr) minmax(320px, 360px);
   gap: 14px;
   padding: 14px;
-  overflow: visible;
-  align-items: start;
+  overflow: hidden;
 }
 
 .jy-left, .jy-right, .jy-center {
   min-height: 0;
-  max-height: none;
+  max-height: 100%;
   display: flex;
   flex-direction: column;
   gap: 14px;
-  overflow: visible;
+  overflow: hidden;
 }
 
-/* Columns no longer own a scrollbar — page body scrolls instead */
+/* each column scrolls as a whole when content is tall */
 .jy-left,
 .jy-right {
-  overflow: visible;
-  overscroll-behavior: auto;
-  padding-right: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
+  padding-right: 2px;
 }
 
 .jy-center {
-  overflow: visible;
+  overflow: hidden;
 }
 
 .jy-panel {
@@ -182,8 +180,8 @@ body {
   gap: 4px;
 }
 .jy-panel.grow {
-  flex: 0 0 auto;
-  min-height: 0;
+  flex: 1 1 auto;
+  min-height: 200px;
 }
 .jy-panel-head {
   display: flex;
@@ -281,8 +279,8 @@ body {
 .jy-error[hidden] { display: none !important; }
 
 .jy-transcript {
-  flex: 0 0 auto;
-  overflow: visible;
+  flex: 1;
+  overflow: auto;
   background: #f8fafc;
   border-radius: 12px;
   padding: 8px;
@@ -344,7 +342,7 @@ body {
 }
 
 .jy-timeline-panel {
-  flex: 0 0 auto;
+  flex: 1 1 auto;
   min-height: 0;
   background: var(--panel);
   border: 1px solid var(--line);
@@ -352,7 +350,7 @@ body {
   padding: 14px;
   display: flex;
   flex-direction: column;
-  overflow: visible; /* use page scrollbar, not inner slim track */
+  overflow: hidden; /* children scroll */
   box-shadow: var(--shadow);
   gap: 6px;
 }
@@ -577,14 +575,15 @@ body {
   }
 }
 .jy-tracks {
-  flex: 0 0 auto;
+  flex: 1 1 auto;
   min-height: 0;
   display: grid;
   gap: 14px;
   margin-bottom: 0;
-  overflow: visible;
-  overscroll-behavior: auto;
-  padding-right: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  overscroll-behavior: contain;
+  padding-right: 4px;
 }
 .jy-track {
   display: grid;
@@ -736,33 +735,30 @@ body {
 }
 .jy-clip.removed .clip-text-edit { pointer-events: none; }
 
-/* Page-level scrollbar (far right of browser) — slightly thicker for ease */
-html {
-  scrollbar-width: auto;
-  scrollbar-color: #94a3b8 #eef2f7;
-}
-html::-webkit-scrollbar {
-  width: 14px;
-}
-html::-webkit-scrollbar-thumb {
-  background: #94a3b8;
-  border-radius: 10px;
-  border: 3px solid #eef2f7;
-  background-clip: content-box;
-}
-html::-webkit-scrollbar-track {
-  background: #eef2f7;
-}
-/* Keep drawer/modal lists as the only nested scroll exceptions */
+/* nicer scrollbars for structure panel */
+.jy-tracks::-webkit-scrollbar,
+.jy-left::-webkit-scrollbar,
+.jy-right::-webkit-scrollbar,
+.jy-transcript::-webkit-scrollbar,
+.jy-jobs::-webkit-scrollbar,
 .tr-list::-webkit-scrollbar {
   width: 10px;
   height: 10px;
 }
-.tr-list::-webkit-scrollbar-thumb {
+.jy-tracks::-webkit-scrollbar-thumb,
+.jy-left::-webkit-scrollbar-thumb,
+.jy-right::-webkit-scrollbar-thumb,
+.jy-transcript::-webkit-scrollbar-thumb,
+.jy-jobs::-webkit-scrollbar-thumb,
+.tr-list::-webkit-scrollbar-thumb,
+.jy-track-body::-webkit-scrollbar-thumb {
   background: #c5cdd8;
   border-radius: 8px;
   border: 2px solid transparent;
   background-clip: content-box;
+}
+.jy-track-body::-webkit-scrollbar {
+  height: 10px;
 }
 
 .jy-kv {

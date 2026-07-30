@@ -410,7 +410,7 @@ function renderTracks(plan) {
         const a = (Number(s.t0_ms || 0) / 1000).toFixed(1);
         const b = (Number(s.t1_ms || 0) / 1000).toFixed(1);
         const removed = !!s.removed;
-        return `<div class="jy-clip expanded ${role} ${removed ? "removed" : ""}" draggable="true" data-role="${key}" data-idx="${idx}" data-id="${escapeHtml(s.clip_id || "")}">
+        return `<div class="jy-clip ${role} ${removed ? "removed" : ""}" draggable="true" data-role="${key}" data-idx="${idx}" data-id="${escapeHtml(s.clip_id || "")}">
           <div class="clip-top">
             <span class="clip-drag" title="拖动调整位置" draggable="false">⠿</span>
             <span class="clip-badge">逻辑 #${idx + 1}</span>
@@ -925,7 +925,7 @@ function renderAsrCards() {
       const a = (Number(u.t0_ms || 0) / 1000).toFixed(1);
       const b = (Number(u.t1_ms || 0) / 1000).toFixed(1);
       const checked = selectedAsr.has(idx) ? "checked" : "";
-      return `<div class="jy-clip expanded asr-card trust" draggable="true" data-source="asr" data-idx="${idx}">
+      return `<div class="jy-clip asr-card trust" draggable="true" data-source="asr" data-idx="${idx}">
         <div class="clip-top">
           <input type="checkbox" class="asr-check" ${checked} title="多选后批量加入成片" />
           <span class="clip-drag" title="拖到成片结构">⠿</span>
@@ -937,7 +937,6 @@ function renderAsrCards() {
           <label>开始(s)<input class="clip-t0s" type="number" step="0.1" min="0" value="${a}" /></label>
           <label>结束(s)<input class="clip-t1s" type="number" step="0.1" min="0" value="${b}" /></label>
         </div>
-        <div class="meta">拖到逻辑成片，或点 ＋ / 「+加入成片」</div>
         <div class="clip-tools">
           <button type="button" class="asr-add-golden">+加入成片</button>
         </div>

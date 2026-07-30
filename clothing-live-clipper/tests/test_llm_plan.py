@@ -87,12 +87,17 @@ def test_build_plan_messages_is_ids_only_schema():
     assert '"ids"' in messages[0]["content"]
     assert "keep\":[{" not in messages[0]["content"]
     assert "why" not in messages[0]["content"]
-    # Narrative sync: 3s hook + body→craft→scene
-    assert "上身效果" in messages[0]["content"] or "面料特写" in messages[0]["content"]
-    assert "全身效果" in messages[0]["content"]
+    # Hard DROP rules preserved + narrative optimization stacked
+    sys = messages[0]["content"]
+    assert "尺码" in sys and ("价格" in sys or "发货" in sys)
+    assert "直播" in sys or "控场" in sys
+    assert "上身" in sys or "面料特写" in sys
+    assert "全身效果" in sys
     user = messages[1]["content"]
     assert "只输出JSON" in user or "ids" in user
+    assert "尺码" in user
     assert "开场3秒" in user or "吸睛" in user
+    assert "硬删" in user or "硬规则" in sys
     assert "c|" in user or "c" in user
     assert compact
     assert id_map

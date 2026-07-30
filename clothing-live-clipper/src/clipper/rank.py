@@ -824,9 +824,11 @@ def _hook_open_score(c: Clip) -> float:
 
 def _logic_order_key(c: Clip) -> tuple:
     """
-    Fast-paced clothing short logic (rules fallback for LLM):
+    Fast-paced clothing short logic (rules fallback for LLM).
+
+    Hard excludes stay in score_clip / _eligible (size/price/ship/live/non-clothing).
+    This key only orders *already-eligible* clips:
     3s 吸睛(上身/面料特写) → 全身效果 → 细节做工 → 穿搭场景
-    priority: 全身效果 > 细节做工 > 穿搭场景 （价格已硬排除）
     """
     text = c.text or ""
     # 0 = reserved for selected opener; body of film:

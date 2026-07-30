@@ -87,13 +87,53 @@ def test_build_plan_messages_is_ids_only_schema():
     assert '"ids"' in messages[0]["content"]
     assert "keep\":[{" not in messages[0]["content"]
     assert "why" not in messages[0]["content"]
+    # Narrative sync: 3s hook + body→craft→scene
+    assert "上身效果" in messages[0]["content"] or "面料特写" in messages[0]["content"]
+    assert "全身效果" in messages[0]["content"]
     user = messages[1]["content"]
     assert "只输出JSON" in user or "ids" in user
+    assert "开场3秒" in user or "吸睛" in user
     assert "c|" in user or "c" in user
     assert compact
     assert id_map
     # compact carries text only (no bulky t0/t1 forced into model echo)
     assert all("id" in c and "text" in c for c in compact)
+
+
+def test_repair_narrative_opens_with_onbody_or_fabric():
+    lines = [
+        {"utt_id": "u0", "text": "家人们晚上好扣1", "t0_ms": 0, "t1_ms": 1500},
+        {"utt_id": "u1", "text": "通勤日常都适合上班穿", "t0_ms": 1500, "t1_ms": 4500},
+        {"utt_id": "u2", "text": "细节蕾丝拼接做工精细", "t0_ms": 4500, "t1_ms": 7500},
+        {"utt_id": "u3", "text": "收腰版型上身显瘦遮肉", "t0_ms": 7500, "t1_ms": 11000},
+        {"utt_id": "u4", "text": "面料超级软还不透气亲肤", "t0_ms": 11000, "t1_ms": 14500},
+        {"utt_id": "u5", "text": "小个子梨形也能穿", "t0_ms": 14500, "t1_ms": 17500},
+    ]
+    clauses = expand_lines_to_clauses(lines)
+    # Simulate model picking scene first — repair must promote hook + body→craft→scene
+    obj = lp._repair_keep_ids(
+        {
+            "ids": [
+                next(c["id"] for c in clauses if "通勤" in c["text"]),
+                next(c["id"] for c in clauses if "蕾丝" in c["text"]),
+                next(c["id"] for c in clauses if "显瘦" in c["text"]),
+                next(c["id"] for c in clauses if "面料" in c["text"]),
+                next(c["id"] for c in clauses if "小个子" in c["text"]),
+            ]
+        },
+        clauses,
+    )
+    keep = obj["keep"]
+    assert keep
+    first = keep[0]["text"]
+    assert any(k in first for k in ("显瘦", "版型", "上身", "面料", "软", "收腰")), first
+    # After opener, body/craft should appear before pure scene if present
+    texts = [k["text"] for k in keep]
+    body_i = next((i for i, t in enumerate(texts) if "显瘦" in t or "版型" in t), None)
+    scene_i = next((i for i, t in enumerate(texts) if "通勤" in t or "小个子" in t), None)
+    if body_i is not None and scene_i is not None and body_i > 0:
+        assert body_i <= scene_i
+    assert obj.get("_narrative") == "hook3s_body_craft_scene"
 
 
 def test_normalize_llm_keep_obj_ids_only_and_numbers():
@@ -493,7 +533,7 @@ def test_call_llm_for_plan_uses_trim_and_lower_tokens(monkeypatch):
     assert "候选" in user_content
     assert "all_clauses" not in user_content
     assert "ids" in user_content
-    assert "版型" in user_content and "面料" in user_content and ("适用人群" in user_content or "人群" in user_content)
+    assert "全身效果" in user_content or "上身效果" in user_content or "面料" in user_content
     assert "60" in user_content
     assert obj.get("_meta", {}).get("clauses_sent", 10**9) <= lp.LIGHT_MAX_CLAUSES
     assert obj.get("_meta", {}).get("submit_mode") == "stable_ids_only_asr_selected_clauses"

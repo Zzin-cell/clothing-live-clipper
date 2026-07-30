@@ -33,11 +33,12 @@ SYSTEM_PROMPT = """你是服装带货短视频剪辑导演（抖音/快手完播
 不要只看前几句；要用全量口播信息做提炼。
 
 ====================
-一、开场钩子（前 3 秒，必选 1 种，只留 1 句最强）
+一、开场钩子（前 3 秒，只留 1 句最吸睛）
 ====================
-1) 视觉冲击型：全身穿搭成品、显瘦对比、面料特写、色差/黑白对比
-2) 痛点直击型：一句话戳穿搭痛点（微胖显壮、小个子压身高、显廉价、夏天闷汗、遮肉遮胯）
-3) 效果悬念型：一句点出穿上效果/适用感（禁止谈价格/发货）
+优先直接上「最吸睛」画面对应的口播（禁止问候/价格）：
+1) 上身效果冲击：全身显瘦/收腰/遮肉/比例（首选）
+2) 面料特写冲击：软、垂、不透、凉感、肌理（次选）
+不要用痛点说教、福利价开场。
 
 开场避雷（一律 drop）：
 - 主播打招呼、晚上好、家人们、调试镜头、对焦、收音
@@ -55,28 +56,25 @@ SYSTEM_PROMPT = """你是服装带货短视频剪辑导演（抖音/快手完播
 ====================
 三、内容优先级（从高到低）
 ====================
-上身效果 ＞ 细节(含面料/适用人群) ＞ 对比体验
-- 上身效果：显瘦、收腰、版型、长短、遮肉、梨形/小个子友好
-- 细节可包含：
-  · 面料：软、垂感、透气、不闷、冰凉、抗皱、不透、亲肤
-  · 适用人群：微胖/梨形/小个子/大码友好/通勤/日常/季节场景
-  · 工艺细点：肌理、刺绣、扣子、拉链、走线、领口、腰线
+全身效果 ＞ 细节做工 ＞ 穿搭场景
+- 全身/上身效果：显瘦、收腰、版型、长短、遮肉、比例
+- 细节做工：面料肌理、垂感、透气、不透、刺绣、走线、领口腰线
+- 穿搭场景：通勤/日常/季节、适用人群、搭配情境
 - 严禁：价格、发货、物流、包邮、预售、尺码报数
 
 口播若提到画面类型，优先保留对应信息：
 - 全身/全景：版型、长短、显瘦、适配人群
 - 半身/近景：领口、肩线、腰线、遮副乳
 - 细节特写：面料肌理、刺绣、扣子、拉链、走线、透气网眼
-- 对比：穿前穿后、宽松显瘦、两色上身
+- 场景：通勤、上班、日常、夏天、好搭
 
 ====================
 四、成片顺序（严格按此组织 keep 顺序）
 ====================
-1) 0–3s 钩子（视觉冲击 / 痛点 / 效果悬念；禁止价格福利）
-2) 版型/上身效果
-3) 面料与工艺细节
-4) 适用人群（谁穿好看/好搭）
-5) 对比/穿着体验 + 自然收束
+1) 0–3s：最吸睛上身效果 或 面料特写（一句打满）
+2) 全身效果：版型/上身/显瘦遮肉
+3) 细节做工：面料/工艺细点
+4) 穿搭场景：适用人群 + 场景/体验收束
 目标成片观感约 55–65 秒（默认 60 秒@倍速后），像短视频不像直播。
 
 不要输出“黄金/信任/收尾”分区标题；输出一条通顺时间线即可。
@@ -107,9 +105,9 @@ SYSTEM_PROMPT = """你是服装带货短视频剪辑导演（抖音/快手完播
   "product_summary": "一句话主卖点",
   "hook_type": "visual|pain|effect",
   "main_points": ["主卖点1","版型点","面料/适用人群","细节点"],
-  "logic": ["钩子","版型上身","细节","对比体验","收束"],
+  "logic": ["3s吸睛钩子","全身效果","细节做工","穿搭场景","收束"],
   "keep": [
-    {"id":"c00012","t0_ms":12300,"t1_ms":15800,"text":"...","why":"3秒痛点钩子","point":"显瘦","complete":true}
+    {"id":"c00012","t0_ms":12300,"t1_ms":15800,"text":"...","why":"3s上身效果/面料特写","point":"显瘦","complete":true}
   ],
   "drop_ids": ["c00001","c00002"],
   "notes": "如何保证完整逻辑、删了哪些半句/价格发货"
@@ -140,11 +138,11 @@ SYSTEM_PROMPT_LIGHT = """你是服装短视频剪辑导演（成品要像短视�
 - 空泛重复、话术复读、无货盘信息的情绪句
 
 【结构与节奏】
-顺序：0–3s 钩子(视觉/痛点/效果，禁价格) → 版型上身 → 面料/细节 → 适用人群 → 体验对比 → 自然收束
+顺序：0–3s 最吸睛(上身效果/面料特写，禁价格问候) → 全身效果 → 细节做工 → 穿搭场景(含人群) → 自然收束
 信息密度要高，像成片口播；完整表达优先于硬凑时长（可短 3–8 秒，禁静音尾巴）
 
 JSON（id 必须原样复制输入里的 id，如 c12 / c00012，禁止乱写长串0）：
-{"product_summary":"...","hook_type":"visual|pain|effect","main_points":["版型","面料","适用人群"],"logic":["钩子","版型","面料","人群","收束"],"keep":[{"id":"c12","t0_ms":0,"t1_ms":1000,"text":"...","why":"...","point":"版型","complete":true}],"drop_ids":["c1"],"notes":"..."}
+{"product_summary":"...","hook_type":"visual|effect","main_points":["全身效果","细节做工","穿搭场景"],"logic":["3s吸睛","全身效果","细节做工","穿搭场景","收束"],"keep":[{"id":"c12","t0_ms":0,"t1_ms":1000,"text":"...","why":"...","point":"版型","complete":true}],"drop_ids":["c1"],"notes":"..."}
 """
 
 
@@ -591,16 +589,19 @@ def _build_plan_messages(
     # Line format beats nested JSON for small models (less echo / faster).
     user_text = (
         f"目标约{int(target_seconds)}s。从候选选保留id并按播放顺序排列（约8-16个）。"
-        "优先版型/面料/适用人群；删除直播/尺码/价格/发货。\n"
+        "第1个id必须是开场3秒最吸睛：上身效果或面料特写。"
+        "其后顺序：全身效果→细节做工→穿搭场景。删除直播/尺码/价格/发货。\n"
         "候选:\n"
         + "\n".join(lines)
-        + '\n只输出JSON:{"ids":["c2","c3"],"hook":"effect"}'
+        + '\n只输出JSON:{"ids":["c2","c3"],"hook":"visual"}'
     )
     system = (
         "你是服装短视频剪辑助手。只输出一个JSON对象。"
-        "ids必须来自候选且原样复制；覆盖版型+面料+适用人群；"
-        "删除直播控场/尺码/价格/发货；顺序钩子→版型→面料→人群→收束。"
-        '格式:{"ids":["c2","c3","c4"],"hook":"effect"}'
+        "ids必须来自候选且原样复制；"
+        "开场3秒=最吸睛上身效果或面料特写；"
+        "再按全身效果→细节做工→穿搭场景(含适用人群)；"
+        "删除直播控场/尺码/价格/发货。"
+        '格式:{"ids":["c2","c3","c4"],"hook":"visual"}'
     )
     messages = [
         {"role": "system", "content": system},
@@ -929,13 +930,51 @@ def _repair_keep_ids(obj: dict[str, Any], clauses: list[dict[str, Any]]) -> dict
     repaired = False
 
     def _bucket(tx: str) -> str:
-        if any(k in tx for k in _FIT_MARKERS):
-            return "fit"
-        if any(k in tx for k in _FABRIC_MARKERS):
+        """Narrative buckets for reorder: body > craft > scene."""
+        t = tx or ""
+        # Detail/craft markers (before pure fabric so 蕾丝/拼接归细节做工)
+        craft_markers = (
+            "细节", "蕾丝", "刺绣", "拼接", "走线", "扣子", "拉链", "领口", "腰线",
+            "肩线", "肌理", "做工", "车线", "滚边",
+        )
+        if any(k in t for k in craft_markers):
+            return "craft"
+        if any(k in t for k in _FIT_MARKERS) or any(
+            k in t for k in ("上身", "显瘦", "全身", "遮肉", "比例", "版型", "收腰", "修身")
+        ):
+            return "body"
+        if any(k in t for k in _FABRIC_MARKERS):
+            # Fabric can open (特写) or sit in craft; body reorder treats fabric as craft stage
             return "fabric"
-        if any(k in tx for k in _AUDIENCE_MARKERS):
-            return "audience"
+        if any(k in t for k in _AUDIENCE_MARKERS) or any(
+            k in t for k in ("通勤", "日常", "上班", "夏天", "秋冬", "场景", "搭配", "好搭")
+        ):
+            return "scene"
         return "other"
+
+    def _hook_attract_score(tx: str) -> float:
+        """Higher = better first 3s (on-body impact or fabric close-up)."""
+        t = tx or ""
+        if (
+            _is_control(t)
+            or _is_size(t)
+            or _is_price_or_shipping(t)
+            or _is_persona_or_hype(t)
+        ):
+            return -100.0
+        s = 0.0
+        # Prefer on-body / full-look impact first
+        if any(k in t for k in ("显瘦", "收腰", "遮肉", "上身", "全身", "版型", "修身", "比例", "高腰")):
+            s += 50.0
+        if any(k in t for k in ("面料", "特写", "超软", "软", "垂感", "不透", "凉感", "冰丝", "亲肤", "透气")):
+            s += 42.0
+        if any(k in t for k in ("对比", "两色", "成品", "穿上就")):
+            s += 18.0
+        s += min(20.0, float(_value_score(t)) * 2.0)
+        # Pain-only openers demoted relative to visual product hooks
+        if any(k in t for k in ("闷汗", "显壮", "显矮", "显土")) and s < 40:
+            s += 8.0
+        return s
 
     def _total_ms() -> int:
         return sum(max(0, int(x.get("t1_ms") or 0) - int(x.get("t0_ms") or 0)) for x in fixed)
@@ -977,11 +1016,11 @@ def _repair_keep_ids(obj: dict[str, Any], clauses: list[dict[str, Any]]) -> dict
         repaired = True
         return True
 
-    # 1) Force-cover fit / fabric / audience whenever ASR has them
+    # 1) Force-cover body / fabric-craft / scene whenever ASR has them
     for need, markers, point in (
-        ("fit", _FIT_MARKERS, "版型"),
-        ("fabric", _FABRIC_MARKERS, "面料"),
-        ("audience", _AUDIENCE_MARKERS, "适用人群"),
+        ("fit", _FIT_MARKERS, "全身效果"),
+        ("fabric", _FABRIC_MARKERS, "细节做工"),
+        ("audience", _AUDIENCE_MARKERS, "穿搭场景"),
     ):
         cov = _coverage()
         if cov.get(need):
@@ -1008,11 +1047,11 @@ def _repair_keep_ids(obj: dict[str, Any], clauses: list[dict[str, Any]]) -> dict
             b = _bucket(tx)
             cov = _coverage()
             gap = 0
-            if b == "fit" and not cov["fit"]:
+            if b in ("body", "fit") and not cov["fit"]:
                 gap = 3
-            elif b == "fabric" and not cov["fabric"]:
+            elif b in ("fabric", "craft") and not cov["fabric"]:
                 gap = 3
-            elif b == "audience" and not cov["audience"]:
+            elif b in ("scene", "audience") and not cov["audience"]:
                 gap = 3
             return (gap, _value_score(tx))
 
@@ -1023,7 +1062,14 @@ def _repair_keep_ids(obj: dict[str, Any], clauses: list[dict[str, Any]]) -> dict
             tx = str(c.get("text") or "")
             if _value_score(tx) < 2 and _bucket(tx) == "other":
                 continue
-            _add_clause(c, why="duration_fill", point=_bucket(tx) if _bucket(tx) != "other" else "卖点")
+            b = _bucket(tx)
+            point = {
+                "body": "全身效果",
+                "fabric": "细节做工",
+                "craft": "细节做工",
+                "scene": "穿搭场景",
+            }.get(b, "卖点")
+            _add_clause(c, why="duration_fill", point=point)
 
     # Always top-up hard toward ~60s final source budget
     # 1.4x playback → need ~78–90s source for ~56–64s final
@@ -1037,13 +1083,38 @@ def _repair_keep_ids(obj: dict[str, Any], clauses: list[dict[str, Any]]) -> dict
             if _value_score(tx) < 1:
                 continue
             if any(k in tx for k in ("面料", "版型", "显瘦", "上身", "适合", "软", "垂", "透气", "遮肉", "穿")):
-                _add_clause(c, why="duration_fill_2", point=_bucket(tx) if _bucket(tx) != "other" else "卖点")
+                b = _bucket(tx)
+                point = {
+                    "body": "全身效果",
+                    "fabric": "细节做工",
+                    "craft": "细节做工",
+                    "scene": "穿搭场景",
+                }.get(b, "卖点")
+                _add_clause(c, why="duration_fill_2", point=point)
 
-    # chronological for natural watch order
-    fixed.sort(key=lambda x: int(x.get("t0_ms") or 0))
+    # Narrative order (not source chronology):
+    # opener 3s (best on-body/fabric) → body → craft/fabric → scene → other
+    if fixed:
+        opener_idx = max(range(len(fixed)), key=lambda i: _hook_attract_score(str(fixed[i].get("text") or "")))
+        opener = fixed.pop(opener_idx)
+        opener = dict(opener)
+        opener["why"] = "3s_hook_onbody_or_fabric"
+        if not opener.get("point"):
+            opener["point"] = "吸睛钩子"
+        stage_rank = {"body": 0, "fabric": 1, "craft": 1, "scene": 2, "audience": 2, "other": 3, "fit": 0}
+        rest = sorted(
+            fixed,
+            key=lambda x: (
+                stage_rank.get(_bucket(str(x.get("text") or "")), 3),
+                -_value_score(str(x.get("text") or "")),
+                int(x.get("t0_ms") or 0),
+            ),
+        )
+        fixed = [opener, *rest]
     obj["keep"] = fixed
     cov_final = _coverage()
     obj["_coverage"] = cov_final
+    obj["_narrative"] = "hook3s_body_craft_scene"
     if repaired or len(fixed) != len(keep):
         obj["_keep_repaired"] = True
         obj["_keep_raw_n"] = len(keep)
@@ -1387,6 +1458,7 @@ def plan_from_local_clauses(
         "input_clauses_raw": trim_stats.get("clauses_raw"),
         "clauses_sent": trim_stats.get("clauses_sent"),
         "trim_stats": trim_stats,
+        "narrative": "hook3s_body_craft_scene",
     }
     plan = llm_obj_to_timeline(
         obj,

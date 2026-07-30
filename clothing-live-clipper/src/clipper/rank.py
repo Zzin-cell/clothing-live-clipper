@@ -774,8 +774,19 @@ _PAIN_HOOK_WORDS = (
 _WELFARE_HOOK_WORDS = (
     "清仓", "限时", "限量", "现货", "平替", "专柜", "只要", "直播价", "秒杀", "福利",
 )
+# First 3s: only high-impact on-body / fabric close-up language
 _VISUAL_HOOK_WORDS = (
-    "全身", "上身效果", "显瘦", "对比", "特写", "黑白", "两色", "成品", "穿上就",
+    "全身", "上身效果", "上身", "显瘦", "收腰", "遮肉", "修身", "版型",
+    "面料", "特写", "超软", "垂感", "不透", "凉感", "冰丝", "亲肤",
+    "对比", "两色", "成品", "穿上就", "比例", "高腰",
+)
+_CRAFT_DETAIL_WORDS = (
+    "细节", "做工", "蕾丝", "刺绣", "拼接", "走线", "扣子", "拉链", "领口", "腰线",
+    "肩线", "肌理", "车线", "滚边", "工艺",
+)
+_SCENE_WORDS = (
+    "适合", "适用", "人群", "微胖", "梨形", "小个子", "大码", "通勤", "日常", "上班",
+    "显白", "黄黑皮", "场景", "搭配", "好搭", "夏天", "秋冬", "季节",
 )
 _OPENING_BAN_WORDS = (
     "大家好", "晚上好", "早上好", "欢迎", "家人们", "老铁", "调试", "对一下", "听得到",
@@ -784,18 +795,26 @@ _OPENING_BAN_WORDS = (
 
 
 def _hook_open_score(c: Clip) -> float:
-    """Higher = better 3s opening hook candidate (visual/pain/welfare)."""
+    """Higher = better first-3s hook: on-body impact or fabric close-up only."""
     text = c.text or ""
     s = 0.0
-    if any(w in text for w in _PAIN_HOOK_WORDS):
+    # Prefer flashy product look, not pain rant or price welfare
+    if any(w in text for w in ("显瘦", "收腰", "遮肉", "上身", "全身", "版型", "修身", "比例", "高腰")):
+        s += 48.0
+    if any(w in text for w in ("面料", "特写", "超软", "软", "垂感", "不透", "凉感", "冰丝", "亲肤", "透气")):
         s += 40.0
     if any(w in text for w in _VISUAL_HOOK_WORDS):
-        s += 34.0
-    if any(w in text for w in _WELFARE_HOOK_WORDS) and not any(p in text for p in _SIZE_TEXT):
-        s += 22.0
+        s += 16.0
+    # Mild bonus for pain only if already visual; never open with pure welfare
+    if any(w in text for w in _PAIN_HOOK_WORDS):
+        s += 10.0 if s >= 30 else 2.0
+    if any(w in text for w in _WELFARE_HOOK_WORDS):
+        s -= 40.0
     if _looks_like_live_room(text) or any(w in text for w in _OPENING_BAN_WORDS):
         s -= 100.0
-    s += _hook_strength(c) * 0.25
+    if any(p in text for p in _PRICE_TEXT) or any(p in text for p in _SIZE_TEXT):
+        s -= 80.0
+    s += _hook_strength(c) * 0.30
     try:
         s += learned_text_score(text, for_hook=True) * 0.4
     except Exception:
@@ -806,39 +825,34 @@ def _hook_open_score(c: Clip) -> float:
 def _logic_order_key(c: Clip) -> tuple:
     """
     Fast-paced clothing short logic (rules fallback for LLM):
-    3s钩子 → 版型/上身 → 面料 → 适用人群 → 细节/体验 → 搭配后置
-    priority: 上身效果 > 面料 > 适用人群 （价格已硬排除）
+    3s 吸睛(上身/面料特写) → 全身效果 → 细节做工 → 穿搭场景
+    priority: 全身效果 > 细节做工 > 穿搭场景 （价格已硬排除）
     """
     text = c.text or ""
-    stage = _primary_stage(c)
-    if any(w in text for w in _PAIN_HOOK_WORDS) or any(w in text for w in _VISUAL_HOOK_WORDS):
-        stage = 0
-    elif _is_true_feature(c) and stage <= 1:
+    # 0 = reserved for selected opener; body of film:
+    # 1 全身效果, 2 细节做工, 3 穿搭场景, 4 弱体验/其他, 5 纯搭配换装
+    if any(w in text for w in ("版型", "显瘦", "收腰", "遮肉", "上身", "全身", "修身", "高腰", "比例")):
         stage = 1
+    elif ClaimType.FIT in c.claim_types or (_is_true_feature(c) and ClaimType.SELLING_POINT in c.claim_types):
+        stage = 1
+    elif any(w in text for w in _CRAFT_DETAIL_WORDS) or ClaimType.DETAIL in c.claim_types:
+        stage = 2
     elif ClaimType.FABRIC in c.claim_types or any(
-        w in text for w in ("面料", "布料", "材质", "垂感", "透气", "不透", "凉感", "亲肤", "不闷")
+        w in text for w in ("面料", "布料", "材质", "垂感", "透气", "不透", "凉感", "亲肤", "不闷", "软")
     ):
         stage = 2
-    elif any(
-        w in text
-        for w in (
-            "适合", "适用", "人群", "微胖", "梨形", "小个子", "大码", "通勤", "日常", "显白",
-            "黄黑皮", "黑皮", "白皮", "皮肤", "姐妹可以穿", "胯宽", "肚子",
-        )
-    ):
+    elif any(w in text for w in _SCENE_WORDS):
         stage = 3
-    elif ClaimType.DETAIL in c.claim_types or any(
-        w in text for w in ("细节", "蕾丝", "走线", "扣子", "拉链", "拼接")
-    ):
-        stage = 4
     elif _is_wear_experience(c):
+        stage = 3
+    else:
         stage = 4
-    if _is_outfit_or_change(c):
-        stage = max(stage, 5)
+    if _is_outfit_or_change(c) and stage >= 3:
+        stage = max(stage, 4)
 
     uniq = -_unique_feature_boost(text)
     hook = -_hook_strength(c)
-    open_s = -_hook_open_score(c) if stage == 0 else 0.0
+    open_s = -_hook_open_score(c)  # used when picking opener; low stage uses body scores
     try:
         learn = -learned_text_score(text, for_hook=(stage <= 1))
     except Exception:
@@ -907,7 +921,7 @@ def build_timeline_plan(
             ),
         }
 
-    # 3s-style opener: pain / visual / strongest feature (no price welfare)
+    # 3s opener: strongest on-body look or fabric close-up (no price / live cues)
     openers = [c for c in ordered if not _is_outfit_or_change(c)]
     openers = sorted(openers, key=_hook_open_score, reverse=True)
     if not openers:
@@ -931,37 +945,50 @@ def build_timeline_plan(
             sim = max((_similarity(c.text or "", p) for p in selected_texts), default=0.0)
             if sim >= 0.92 and total > aim * 0.55:
                 continue
-            stage = _primary_stage(c)
+            # Narrative progress: body → craft → scene (not source stage ids)
+            text = c.text or ""
+            if any(w in text for w in ("版型", "显瘦", "收腰", "遮肉", "上身", "全身", "修身")):
+                narr = 1
+            elif any(w in text for w in _CRAFT_DETAIL_WORDS) or any(
+                w in text for w in ("面料", "布料", "垂感", "透气", "不透", "软", "材质")
+            ):
+                narr = 2
+            elif any(w in text for w in _SCENE_WORDS):
+                narr = 3
+            else:
+                narr = 4
             stage_pen = 30.0 if (_is_outfit_or_change(c) and total < aim * 0.45) else 0.0
             chrono = 0.0
             if last_t1 is not None:
                 gap = c.t0_ms - last_t1
                 if 0 <= gap <= 12000:
-                    chrono = 40.0 * (1.0 - gap / 12000.0)
+                    chrono = 28.0 * (1.0 - gap / 12000.0)  # softer chrono; narrative first
                 elif 0 <= gap <= 45000:
-                    chrono = 15.0 * (1.0 - gap / 45000.0)
+                    chrono = 10.0 * (1.0 - gap / 45000.0)
                 elif gap < 0:
-                    chrono = -18.0
+                    chrono = -12.0
                 else:
-                    chrono = -4.0
+                    chrono = -2.0
             try:
                 learn = learned_text_score(c.text or "", for_hook=(total < aim * 0.40)) * 1.8
             except Exception:
                 learn = 0.0
             progress = total / max(1, aim)
-            desired = 0 if progress < 0.2 else 1 if progress < 0.4 else 2 if progress < 0.55 else 3 if progress < 0.75 else 4
-            stage_fit = -abs(stage - desired) * 8.0
-            text = c.text or ""
+            # After opener: body (~20–45%) → craft (~45–70%) → scene (~70%+)
+            desired = 1 if progress < 0.45 else 2 if progress < 0.70 else 3
+            stage_fit = -abs(narr - desired) * 10.0
             cover_boost = 0.0
-            if not cov["fit"] and any(w in text for w in ("版型", "显瘦", "收腰", "遮肉", "上身")):
-                cover_boost += 28.0
-            if not cov["fabric"] and any(w in text for w in ("面料", "布料", "材质", "垂感", "透气", "不透", "软")):
+            if not cov["fit"] and any(w in text for w in ("版型", "显瘦", "收腰", "遮肉", "上身", "全身")):
+                cover_boost += 30.0
+            if not cov["fabric"] and any(
+                w in text for w in ("面料", "布料", "材质", "垂感", "透气", "不透", "软", "细节", "蕾丝")
+            ):
                 cover_boost += 28.0
             if not cov["audience"] and any(
                 w in text
                 for w in (
                     "适合", "适用", "微胖", "梨形", "小个子", "大码", "通勤", "日常", "显白",
-                    "黄黑皮", "黑皮", "白皮", "皮肤", "姐妹可以穿", "胯宽", "肚子",
+                    "黄黑皮", "黑皮", "白皮", "皮肤", "姐妹可以穿", "胯宽", "肚子", "上班", "场景",
                 )
             ):
                 cover_boost += 32.0

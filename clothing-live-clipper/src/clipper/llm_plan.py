@@ -1328,21 +1328,39 @@ def llm_obj_to_timeline(
     def total_ms() -> int:
         return sum(max(0, s.t1_ms - s.t0_ms) for s in slots)
 
+    def _banned_content(tx: str) -> bool:
+        """Hard product bans — never use for duration fill or path padding."""
+        t = tx or ""
+        return (
+            _is_control(t)
+            or _is_size(t)
+            or _is_price_or_shipping(t)
+            or _is_persona_or_hype(t)
+        )
+
     def _fillable_tx(tx: str, *, relax: bool) -> bool:
+        """Only real clothing sell lines may pad duration. Never live/price/size."""
         if not tx or len(tx.strip()) < 2:
             return False
-        if (
-            _is_control(tx)
-            or _is_size(tx)
-            or _is_price_or_shipping(tx)
-            or _is_persona_or_hype(tx)
-        ):
+        if _banned_content(tx):
+            return False
+        # Positive clothing signal required (even when relaxing score threshold)
+        clothing_hit = any(
+            k in tx
+            for k in (
+                *_FIT_MARKERS,
+                *_FABRIC_MARKERS,
+                *_AUDIENCE_MARKERS,
+                "上身", "穿上", "显瘦", "遮肉", "面料", "布料", "版型", "垂感",
+                "透气", "不透", "亲肤", "软", "凉感", "细节", "蕾丝", "拼接",
+                "通勤", "日常", "适合", "好看", "好穿", "舒服", "气质",
+            )
+        )
+        if not clothing_hit:
             return False
         if relax:
-            # last resort for hitting 50s: any non-banned clothing-ish line
-            return _value_score(tx) >= 1 or any(
-                k in tx for k in ("穿", "衣", "裙", "裤", "软", "透", "瘦", "腰", "色", "搭")
-            )
+            # still clothing-only; just allow slightly weaker scores
+            return _value_score(tx) >= 1
         return _value_score(tx) >= 2
 
     # Proactive fill BEFORE trim — must clear 50s-final floor when material exists

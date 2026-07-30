@@ -1015,10 +1015,17 @@ def build_timeline_plan(
         last_t1 = best.t1_ms
         selected_texts.append(best.text or "")
 
-    # Keep filling until soft_min (>=50s final source) with any eligible leftovers
+    def _duration_fill_ok(c: Clip) -> bool:
+        """Pad duration only with clothing-useful lines; never live/price/size."""
+        if not _eligible(c) or c.score <= 0:
+            return False
+        # Prefer true product content over weak leftovers
+        return _is_true_feature(c) or _is_wear_experience(c) or c.score >= 6
+
+    # Keep filling until soft_min (>=50s final source) with clothing leftovers only
     if total < soft_min:
         leftovers = sorted(
-            [c for c in ordered if c.clip_id not in used],
+            [c for c in ordered if c.clip_id not in used and _duration_fill_ok(c)],
             key=lambda c: (-c.score, c.t0_ms),
         )
         for c in leftovers:
@@ -1031,10 +1038,10 @@ def build_timeline_plan(
             total += c.duration_ms
             selected_texts.append(c.text or "")
 
-    # Final push: expand to pool (not only core) until floor
+    # Final push: expand to eligible pool until floor (still clothing-only)
     if total < soft_min:
         leftovers = sorted(
-            [c for c in pool if c.clip_id not in used and c.score > 0],
+            [c for c in pool if c.clip_id not in used and _duration_fill_ok(c)],
             key=lambda c: (-c.score, c.t0_ms),
         )
         for c in leftovers:
@@ -1049,7 +1056,9 @@ def build_timeline_plan(
 
     if total < min_plan:
         warnings.append(f"short_source_ms={total}")
-        leftovers = [c for c in pool if c.clip_id not in used and c.score > 0]
+        leftovers = [
+            c for c in pool if c.clip_id not in used and _duration_fill_ok(c)
+        ]
         for c in leftovers:
             if total >= soft_min or len(selected) >= max_slots:
                 break

@@ -105,6 +105,39 @@ def test_build_plan_messages_is_ids_only_schema():
     assert all("id" in c and "text" in c for c in compact)
 
 
+def test_duration_fill_never_keeps_live_or_shipping():
+    lines = [
+        {"utt_id": "u0", "text": "家人们晚上好扣1点关注", "t0_ms": 0, "t1_ms": 2000},
+        {"utt_id": "u1", "text": "今天199包邮当天发货", "t0_ms": 2000, "t1_ms": 5000},
+        {"utt_id": "u2", "text": "准备一下321里面去拍", "t0_ms": 5000, "t1_ms": 8000},
+        {"utt_id": "u3", "text": "收腰版型上身显瘦遮肉", "t0_ms": 8000, "t1_ms": 14000},
+        {"utt_id": "u4", "text": "面料超级软还不透气亲肤", "t0_ms": 14000, "t1_ms": 20000},
+        {"utt_id": "u5", "text": "小个子梨形通勤也适合", "t0_ms": 20000, "t1_ms": 26000},
+        {"utt_id": "u6", "text": "建议穿M码偏大", "t0_ms": 26000, "t1_ms": 28000},
+        {"utt_id": "u7", "text": "垂感很好日常穿舒服", "t0_ms": 28000, "t1_ms": 34000},
+        {"utt_id": "u8", "text": "细节蕾丝拼接做工精细", "t0_ms": 34000, "t1_ms": 40000},
+        {"utt_id": "u9", "text": "链接小黄车去拍下", "t0_ms": 40000, "t1_ms": 43000},
+    ]
+    # stretch with more clothing lines so fill has material without banned lines
+    for i in range(10, 30):
+        lines.append(
+            {
+                "utt_id": f"u{i}",
+                "text": f"上身效果真的显瘦很舒服不闷{i}",
+                "t0_ms": 40000 + (i - 9) * 3000,
+                "t1_ms": 40000 + (i - 9) * 3000 + 2800,
+            }
+        )
+    plan, obj = lp.plan_from_asr_with_llm(lines, target_seconds=60, playback_speed=1.4)
+    blob = " ".join(s.text for s in plan.golden)
+    assert "扣1" not in blob and "家人们" not in blob
+    assert "发货" not in blob and "包邮" not in blob and "199" not in blob
+    assert "准备" not in blob and "321" not in blob
+    assert "小黄车" not in blob and "链接" not in blob
+    assert "M码" not in blob
+    assert ("显瘦" in blob) or ("面料" in blob) or ("版型" in blob)
+
+
 def test_repair_narrative_opens_with_onbody_or_fabric():
     lines = [
         {"utt_id": "u0", "text": "家人们晚上好扣1", "t0_ms": 0, "t1_ms": 1500},

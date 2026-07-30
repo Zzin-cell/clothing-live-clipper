@@ -896,13 +896,14 @@ def build_timeline_plan(
     min_plan = getattr(settings, "source_min_plan_ms", None)
     max_plan = getattr(settings, "source_max_plan_ms", None)
     if min_plan is None:
-        min_plan = int(round(getattr(settings, "min_plan_ms", 55_000) * speed * 1.05))
+        min_plan = int(round(getattr(settings, "min_plan_ms", 50_000) * speed * 1.05))
     if max_plan is None:
         max_plan = int(round(getattr(settings, "max_plan_ms", 65_000) * speed * 1.10))
-    # Aim closer to 60s final (source ≈ target * speed). Soft-floor so short live
-    # still returns something, but keep selecting while useful content remains.
+    # Aim closer to 60s final (source ≈ target * speed).
+    # Hard-ish floor: >=50s final after speed (source >= 50s * speed).
+    floor_final_ms = 50_000
     aim = max(min_plan, min(max_plan, target_ms))
-    soft_min = max(int(aim * 0.72), int(42_000 * speed))  # try hard for ~>=30s final @1.4x
+    soft_min = max(int(aim * 0.90), int(floor_final_ms * speed))
 
     ordered = sorted(core, key=_logic_order_key)
 

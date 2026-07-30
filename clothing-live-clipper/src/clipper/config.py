@@ -119,8 +119,9 @@ class Settings:
     cta_s: int = 10
     min_clip_ms: int = 500
     max_clip_ms: int = 15_000
-    # Prefer filling plan toward target; allow slight overshoot in picker
-    min_plan_ms: int = 55_000
+    # Prefer filling plan toward target; allow slight overshoot in picker.
+    # Product floor: final cut must be at least ~50s (then soft target 60s).
+    min_plan_ms: int = 50_000
     max_plan_ms: int = 65_000
     # Playback speed of final cut. Plan selects longer source so final ≈ target after speed.
     # e.g. speed=1.4 → select ~84s source for ~60s output.

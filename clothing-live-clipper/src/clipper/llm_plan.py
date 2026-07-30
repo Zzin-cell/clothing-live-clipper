@@ -1076,11 +1076,11 @@ def _repair_keep_ids(obj: dict[str, Any], clauses: list[dict[str, Any]]) -> dict
             }.get(b, "卖点")
             _add_clause(c, why="duration_fill", point=point)
 
-    # Always top-up hard toward ~60s final source budget
-    # 1.4x playback → need ~78–90s source for ~56–64s final
+    # Always top-up hard toward ~60s final (source ≈ 70–90s @1.4x).
+    # Floor: final >= 50s → source >= ~70s @1.4x.
     _fill_duration(min_n=12, target_ms=90_000)
-    # Second pass: if still short, accept medium-value clothing lines too
-    if _total_ms() < 78_000:
+    # Second pass: if under 50s-final source floor, accept medium-value clothing lines
+    if _total_ms() < 70_000:
         for c in sorted(clauses, key=lambda x: int(x.get("t0_ms") or 0)):
             if _total_ms() >= 88_000 or len(fixed) >= 28:
                 break
@@ -1310,8 +1310,9 @@ def llm_obj_to_timeline(
     # duration trim toward target source length for ~60s final after speed
     sp = playback_speed if playback_speed and playback_speed > 0 else 1.4
     aim = int(round(target_seconds * 1000 * sp))
-    # Prefer filling near aim; only allow mildly short when content truly insufficient
-    min_ms = int(aim * 0.90)
+    # Product floor: final >= 50s → source >= 50s * playback_speed
+    floor_src_ms = int(round(50_000 * sp))
+    min_ms = max(floor_src_ms, int(aim * 0.90))
     max_ms = int(aim * 1.12)
 
     def total_ms() -> int:
@@ -1494,7 +1495,8 @@ def plan_from_asr_with_llm(
     """
     sp = playback_speed if playback_speed and playback_speed > 0 else 1.4
     aim_src = int(round(target_seconds * 1000 * sp))  # ~84s for 60s@1.4x
-    min_ok_src = int(aim_src * 0.72)  # ~60s source => ~43s final; still short but better floor
+    # Prefer candidates that can make final >= 50s after speed
+    min_ok_src = max(int(round(50_000 * sp)), int(aim_src * 0.85))
 
     cloud_err: str | None = None
     plan: TimelinePlan | None = None

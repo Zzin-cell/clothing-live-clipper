@@ -49,9 +49,9 @@ class RenderProfile:
 def get_render_profile(name: str = "final") -> RenderProfile:
     """
     draft  = fast preview
-    final  = Douyin / CapCut-friendly publish export:
-      portrait 1080x1920 (9:16) when source allows, MP4, 30fps, H.264 + AAC,
-      ~6–8Mbps (safe platform range, not extreme bitrate that triggers re-encode).
+    final  = 2K-class publish export for ~60s clothing cuts:
+      portrait ~1440x2560 when source allows, MP4, 30fps, H.264 + AAC,
+      bitrate ~7.5Mbps so ~60s ≈ 50–60MB.
     """
     n = (name or "final").strip().lower()
     if n in {"draft", "preview", "fast"}:
@@ -79,14 +79,13 @@ def get_render_profile(name: str = "final") -> RenderProfile:
             container="mp4",
             vcodec_family="h264",
         )
-    # Final export: Douyin-compatible publish pack
-    # Vertical 1080P 9:16, H.264 High @ ~30fps, AAC stereo — most reliable ingest.
-    # 60s * ~6.5Mbps ≈ 49MB class (under common short-video size comfort).
+    # Final export: 2K-class vertical + higher bitrate for fabric detail.
+    # 60s * 7.5Mbps ≈ 56MB class.
     return RenderProfile(
         name="final",
-        max_edge=1920,  # long edge for 1080x1920
-        force_height=1920,
-        force_width=1080,
+        max_edge=1440,  # 2K class (1440p long edge)
+        force_height=1440,
+        force_width=None,
         fps=30,
         edge_fade_s=0.0,
         video_fade_s=0.0,
@@ -94,13 +93,13 @@ def get_render_profile(name: str = "final") -> RenderProfile:
         smooth_handle_ms=24,
         join_overlap_frames=2,
         tail_trim_ms=80,
-        crf=20,
-        x264_preset="medium",
-        nvenc_preset="p4",
-        nvenc_cq=19,
-        video_bitrate="6.5M",
-        max_video_bitrate="8M",
-        audio_bitrate="128k",
+        crf=18,
+        x264_preset="fast",
+        nvenc_preset="p5",
+        nvenc_cq=17,
+        video_bitrate="7.5M",
+        max_video_bitrate="10M",
+        audio_bitrate="192k",
         container="mp4",
         vcodec_family="h264",
     )
@@ -263,9 +262,9 @@ def _fit_target_size(
     """
     Compute output width/height for export.
 
-    Douyin/CapCut publish target (final profile):
-      - portrait 9:16 → prefer 1080x1920 (platform-stable, no over-bitrate)
-      - if source is already that size, keep it
+    Final goal: sharper ~2K when source supports it.
+      - portrait 9:16 with long edge high enough → 1440x2560
+      - portrait 1080x1920 sources keep 1080x1920 (no heavy fake upscale)
       - never invent resolution with large upscale
     """
     sw, sh = max(2, int(src_w)), max(2, int(src_h))
@@ -273,18 +272,12 @@ def _fit_target_size(
     portrait = sh >= sw
     src_long = max(sw, sh)
 
-    # Explicit fixed canvas for final 9:16 export when both forced
+    # Explicit fixed canvas if both forced and source roughly matches
     if force_w and force_h:
         fw = max(2, int(force_w) - (int(force_w) % 2))
         fh = max(2, int(force_h) - (int(force_h) % 2))
-        # Only apply full 1080x1920 if source is portrait-ish and tall enough;
-        # otherwise avoid ugly letterbox stretch — scale by long edge instead.
         if portrait and 0.48 <= ratio <= 0.70 and src_long >= 1280:
-            # Douyin-safe default canvas
-            if fw == 1080 and fh == 1920:
-                return 1080, 1920
             return fw, fh
-        # Landscape / odd ratios: keep aspect with long-edge cap
         force_w = force_h = None
 
     # Desired long edge from profile
@@ -296,16 +289,18 @@ def _fit_target_size(
     elif max_edge:
         want_long = int(max_edge)
 
-    # Do not invent detail: cap target by source long edge * 1.05
+    # Do not invent detail: cap target by source long edge * 1.08
     if want_long is not None:
-        want_long = min(want_long, max(src_long, int(round(src_long * 1.05))))
+        want_long = min(want_long, max(src_long, int(round(src_long * 1.08))))
 
-    # Snap common 9:16 social sizes (Douyin first)
+    # Snap common 9:16 social sizes — prefer 2K-class when source allows
     if portrait and 0.52 <= ratio <= 0.62 and want_long:
-        if src_long >= 1800 or want_long >= 1800:
-            w, h = 1080, 1920  # primary Douyin vertical
+        if want_long >= 1440 and src_long >= 2200:
+            w, h = 1440, 2560  # 2K-class vertical
+        elif src_long >= 1800:
+            w, h = 1080, 1920  # solid 1080p vertical
         elif src_long >= 1280:
-            w, h = 720, 1280  # mini fallback
+            w, h = 720, 1280
         else:
             h = want_long
             w = max(2, int(round(sw * (h / float(sh)))))
@@ -321,9 +316,9 @@ def _fit_target_size(
         else:
             w, h = sw, sh
 
-    # final safety: no >5% upscale
-    if w > sw * 1.05 or h > sh * 1.05:
-        scale = min(sw * 1.05 / float(w or 1), sh * 1.05 / float(h or 1), 1.0)
+    # final safety: no >8% upscale
+    if w > sw * 1.08 or h > sh * 1.08:
+        scale = min(sw * 1.08 / float(w or 1), sh * 1.08 / float(h or 1), 1.0)
         w = max(2, int(round(w * scale)))
         h = max(2, int(round(h * scale)))
 

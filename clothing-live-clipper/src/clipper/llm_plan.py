@@ -333,6 +333,22 @@ _CONTROL_MARKERS = (
     "定义我的标签", "不要随便定义", "甄姐的标签", "标签不是随意", "摸不着拆不透",
     "我的标签", "定义标签", "随便定义",
 )
+
+# Douyin / short-video compliance risk lines (not clothing value) — hard drop
+_POLICY_RISK_MARKERS = (
+    # 绝对化/极限承诺（平台易判定夸大）
+    "最好", "最佳", "第一", "顶级", "国家级", "全网最低", "史上最低", "永久",
+    "根治", "包治", "特效", "神奇", "神器", "保证瘦", "一定瘦", "三天瘦",
+    "一穿就瘦", "瞬间瘦", "永久显瘦", "百分百", "100%", "绝对",
+    # 医疗/效果承诺（穿搭非医疗器械）
+    "治疗", "疗效", "处方", "医院同款", "医用", "防癌", "消炎",
+    # 引流站外/导流（违规高发）
+    "加微信", "加我微信", "薇信", "vx", "v信", "威信", "私信领", "私聊发",
+    "扫码进群", "扫码加", "外部链接", "复制口令", "淘口令", "去淘宝",
+    "点头像", "主页链接", "主页买", "评论区扣", "扣链接",
+    # 比价引战/假货暗示
+    "假货", "高仿", "专柜代购假", "走私", "水货",
+)
 _SIZE_MARKERS = (
     "尺码", "M码", "L码", "m码", "S码", "s码", "XL", "胸围", "腰围", "偏大", "偏小", "建议穿",
     "斤穿", "斤", "码穿",
@@ -429,6 +445,22 @@ def _is_persona_or_hype(text: str) -> bool:
     return False
 
 
+def _is_policy_risk(text: str) -> bool:
+    """Douyin-risk hype / medical claims / off-platform diversion."""
+    t = text or ""
+    if any(k in t for k in _POLICY_RISK_MARKERS):
+        return True
+    # “第X”绝对排名
+    if re.search(r"第\s*[一二三1-3]\s*(名|名品牌|品牌)?", t) and any(
+        k in t for k in ("全国", "全网", "行业", "销量", "品质")
+    ):
+        return True
+    # wx / QQ 引流变体
+    if re.search(r"(加|加下|加我).{0,4}(微信|vx|v信|薇信|威信|扣扣|qq|QQ)", t, flags=re.I):
+        return True
+    return False
+
+
 def _is_price_or_shipping(text: str) -> bool:
     t = text or ""
     if any(x in t for x in _PRICE_SHIP_MARKERS):
@@ -464,7 +496,10 @@ def _value_score(text: str) -> int:
             s += 2
     if 4 <= len(t) <= 40:
         s += 1
-    if _is_control(t) or _is_size(t) or _is_price_or_shipping(t) or _is_persona_or_hype(t):
+    if (
+        _is_control(t) or _is_size(t) or _is_price_or_shipping(t) or _is_persona_or_hype(t) or _is_policy_risk(t)
+        or _is_policy_risk(t)
+    ):
         s -= 80
     if len(t) < 2:
         s -= 20
@@ -528,10 +563,7 @@ def select_clauses_for_llm(
                 continue
             text = str(c.get("text") or "")
             if (
-                _is_control(text)
-                or _is_size(text)
-                or _is_price_or_shipping(text)
-                or _is_persona_or_hype(text)
+                _is_control(text) or _is_size(text) or _is_price_or_shipping(text) or _is_persona_or_hype(text) or _is_policy_risk(text)
             ):
                 continue
             top.append(c)
@@ -917,6 +949,7 @@ def _repair_keep_ids(obj: dict[str, Any], clauses: list[dict[str, Any]]) -> dict
             or _is_size(_tx)
             or _is_control(_tx)
             or _is_persona_or_hype(_tx)
+            or _is_policy_risk(_tx)
         ):
             continue
         used.add(sid)
@@ -961,10 +994,7 @@ def _repair_keep_ids(obj: dict[str, Any], clauses: list[dict[str, Any]]) -> dict
         """Higher = better first 3s (on-body impact or fabric close-up)."""
         t = tx or ""
         if (
-            _is_control(t)
-            or _is_size(t)
-            or _is_price_or_shipping(t)
-            or _is_persona_or_hype(t)
+            _is_control(t) or _is_size(t) or _is_price_or_shipping(t) or _is_persona_or_hype(t) or _is_policy_risk(t)
         ):
             return -100.0
         s = 0.0
@@ -1000,10 +1030,7 @@ def _repair_keep_ids(obj: dict[str, Any], clauses: list[dict[str, Any]]) -> dict
         tx = str(c.get("text") or "")
         if (
             not tx
-            or _is_control(tx)
-            or _is_size(tx)
-            or _is_price_or_shipping(tx)
-            or _is_persona_or_hype(tx)
+            or _is_control(tx) or _is_size(tx) or _is_price_or_shipping(tx) or _is_persona_or_hype(tx) or _is_policy_risk(tx)
         ):
             return False
         used.add(sid)
@@ -1039,6 +1066,7 @@ def _repair_keep_ids(obj: dict[str, Any], clauses: list[dict[str, Any]]) -> dict
             and not _is_size(str(c.get("text") or ""))
             and not _is_price_or_shipping(str(c.get("text") or ""))
             and not _is_persona_or_hype(str(c.get("text") or ""))
+            and not _is_policy_risk(str(c.get("text") or ""))
         ]
         cands.sort(key=lambda c: _value_score(str(c.get("text") or "")), reverse=True)
         for c in cands[:2]:
@@ -1269,7 +1297,7 @@ def llm_obj_to_timeline(
         if any(x in text for x in ("加购", "小黄车", "上链接", "点链接")):
             return
         # hard drop price / shipping / live-control / persona even if LLM kept them
-        if _is_price_or_shipping(text) or _is_control(text) or _is_size(text) or _is_persona_or_hype(text):
+        if _is_price_or_shipping(text) or _is_control(text) or _is_size(text) or _is_persona_or_hype(text) or _is_policy_risk(text):
             return
         # always take full clause window first (avoid mid-clause cutoff)
         t0 = int(src["t0_ms"])
@@ -1332,10 +1360,7 @@ def llm_obj_to_timeline(
         """Hard product bans — never use for duration fill or path padding."""
         t = tx or ""
         return (
-            _is_control(t)
-            or _is_size(t)
-            or _is_price_or_shipping(t)
-            or _is_persona_or_hype(t)
+            _is_control(t) or _is_size(t) or _is_price_or_shipping(t) or _is_persona_or_hype(t) or _is_policy_risk(t)
         )
 
     def _fillable_tx(tx: str, *, relax: bool) -> bool:

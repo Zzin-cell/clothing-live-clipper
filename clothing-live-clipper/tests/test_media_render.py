@@ -26,19 +26,20 @@ def test_get_render_profile_draft_smaller_and_no_handles():
     assert f.join_overlap_frames >= 1
     assert d.video_fade_s == 0.0 and f.video_fade_s == 0.0
     assert d.tail_trim_ms >= 0 and f.tail_trim_ms >= 0
-    # final export: 2K-class / MP4 / 30fps / H.264 / higher recommend bitrate
+    # final export: Douyin-safe 1080x1920 / MP4 / 30fps / H.264
     assert f.fps == 30
-    assert (f.force_height or 0) >= 1440 or (f.max_edge or 0) >= 1440
+    assert (f.force_height or 0) >= 1920 or (f.max_edge or 0) >= 1920
+    assert (f.force_width or 0) in {0, 1080} or f.force_width == 1080
     assert f.container == "mp4"
     assert f.vcodec_family == "h264"
-    assert f.video_bitrate  # recommend bitrate mode (~7.5M for 50-60MB/60s)
-    # 60s * 7.5Mbps ≈ 56MB class
+    assert f.video_bitrate  # recommend bitrate mode (~6.5M)
     br = str(f.video_bitrate).lower().replace("m", "")
-    assert float(br) >= 6.0
+    assert 4.0 <= float(br) <= 10.0
     name, extra = pick_video_encoder(profile=f)
     assert name in {"libx264", "h264_nvenc"}
     joined = " ".join(str(x) for x in extra)
     assert ("b:v" in joined) or ("crf" in joined) or ("cq" in joined)
+    assert "high" in joined  # H.264 High profile for platform compatibility
 
 
 def test_join_overlap_source_ms_two_frames():

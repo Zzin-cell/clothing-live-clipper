@@ -44,6 +44,18 @@ _SIZE_TEXT = (
     "胸大", "胸小", "卡满", "网袋胸", "罩杯",
 )
 
+# Douyin compliance: absolute claims / medical / off-platform diversion
+_POLICY_RISK_TEXT = (
+    "最好", "最佳", "第一", "顶级", "国家级", "全网最低", "史上最低", "永久",
+    "根治", "包治", "特效", "神奇", "神器", "保证瘦", "一定瘦", "三天瘦",
+    "一穿就瘦", "瞬间瘦", "永久显瘦", "百分百", "100%", "绝对",
+    "治疗", "疗效", "处方", "医院同款", "医用", "防癌", "消炎",
+    "加微信", "加我微信", "薇信", "vx", "v信", "威信", "私信领", "私聊发",
+    "扫码进群", "扫码加", "外部链接", "复制口令", "淘口令", "去淘宝",
+    "点头像", "主页链接", "主页买", "评论区扣", "扣链接",
+    "假货", "高仿", "走私", "水货",
+)
+
 # Unique / rare product claims — rank to front of golden 20s
 _UNIQUE_FEATURE_WORDS = (
     "独家", "独创", "专利", "首创", "限定", "限量", "仅此", "独一无二",
@@ -95,6 +107,15 @@ def score_clip(clip: Clip) -> Clip:
         clip.score = 0.0
         clip.weight = 0.0
         clip.score_breakdown = {"size_excluded": 0.0, "raw": 0.0}
+        return clip
+
+    # Douyin risk: absolute/medical/off-platform — never keep in publish cut
+    if any(p in text for p in _POLICY_RISK_TEXT) or re.search(
+        r"(加|加下|加我).{0,4}(微信|vx|v信|薇信|威信|扣扣|qq|QQ)", text, flags=re.I
+    ):
+        clip.score = 0.0
+        clip.weight = 0.0
+        clip.score_breakdown = {"policy_risk_excluded": 0.0, "raw": 0.0}
         return clip
 
     if ClaimType.CHITCHAT in types and len(types) == 1:

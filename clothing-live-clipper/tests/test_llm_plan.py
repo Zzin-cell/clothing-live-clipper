@@ -105,6 +105,32 @@ def test_build_plan_messages_is_ids_only_schema():
     assert all("id" in c and "text" in c for c in compact)
 
 
+def test_policy_risk_dropped_from_plans():
+    from clipper.llm_plan import _is_policy_risk
+
+    assert _is_policy_risk("全网最低价保证瘦三天")
+    assert _is_policy_risk("加我微信私信领链接")
+    assert not _is_policy_risk("收腰版型上身显瘦遮肉")
+
+    lines = [
+        {"utt_id": "u1", "text": "收腰版型上身显瘦遮肉", "t0_ms": 0, "t1_ms": 4000},
+        {"utt_id": "u2", "text": "面料超级软还不透气亲肤", "t0_ms": 4000, "t1_ms": 8000},
+        {"utt_id": "u3", "text": "全网最低绝对第一最好穿", "t0_ms": 8000, "t1_ms": 11000},
+        {"utt_id": "u4", "text": "加我微信vx私信领优惠", "t0_ms": 11000, "t1_ms": 14000},
+        {"utt_id": "u5", "text": "小个子梨形通勤也适合", "t0_ms": 14000, "t1_ms": 18000},
+    ]
+    clauses = expand_lines_to_clauses(lines)
+    plan = llm_obj_to_timeline(
+        {"keep": [{"id": c["id"], "text": c["text"]} for c in clauses], "_clauses": clauses},
+        lines,
+        target_seconds=60,
+        playback_speed=1.0,
+    )
+    blob = " ".join(s.text for s in plan.golden)
+    assert "全网最低" not in blob and "微信" not in blob and "vx" not in blob
+    assert "显瘦" in blob or "面料" in blob
+
+
 def test_duration_fill_never_keeps_live_or_shipping():
     lines = [
         {"utt_id": "u0", "text": "家人们晚上好扣1点关注", "t0_ms": 0, "t1_ms": 2000},

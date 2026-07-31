@@ -384,6 +384,9 @@ _HOOK_FEATURE_WORDS = (
     "闭眼入", "垂感", "弹力", "不起球", "透气", "显白", "收腰", "修身",
     "面料", "布料", "材质", "天丝", "醋酸", "凉感", "雪纺", "纯棉",
     "版型", "高腰", "梨形", "显腿长", "不挑人", "好打理", "可机洗",
+    # on-body wearing effects (keep in cut — not size chart)
+    "不走光", "不漏光", "防走光", "不显肚子", "不显肚", "遮肚子", "遮肚",
+    "胃包", "拜拜肉", "蝴蝶袖", "副乳", "遮副乳", "不显胯", "收腹", "安全感",
     # wear experience
     "舒服", "舒适", "贴肤", "亲肤", "冰冰的", "凉凉的", "不闷", "不闷汗",
     "凉快", "轻盈", "松弛", "好穿", "穿着舒服", "上身舒服",
@@ -850,9 +853,17 @@ def _hook_open_score(c: Clip) -> float:
     """Higher = better opener: clothing product features first."""
     text = c.text or ""
     s = 0.0
-    # Put garment selling points first (fit / fabric / craft)
+    # Put garment selling points first (fit / fabric / craft / on-body effect)
     if any(w in text for w in ("版型", "面料", "布料", "材质", "显瘦", "收腰", "遮肉", "修身", "上身")):
         s += 52.0
+    if any(
+        w in text
+        for w in (
+            "不走光", "不漏光", "防走光", "不显肚子", "不显肚", "遮肚子", "遮肚",
+            "胃包", "拜拜肉", "蝴蝶袖", "副乳", "遮副乳", "不显胯", "收腹",
+        )
+    ):
+        s += 50.0
     if any(w in text for w in ("超软", "软", "垂感", "不透", "凉感", "冰丝", "亲肤", "透气", "不起球", "抗皱")):
         s += 46.0
     if any(w in text for w in ("细节", "蕾丝", "拼接", "做工", "走线", "领口", "腰线")):

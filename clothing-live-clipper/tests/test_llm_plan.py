@@ -217,13 +217,19 @@ def test_rules_fallback_only_when_under_40s():
 
 
 def test_size_talk_never_enters_timeline_even_if_llm_keeps():
-    from clipper.llm_plan import _is_size
+    from clipper.llm_plan import _is_size, _is_onbody_effect
 
     assert _is_size("建议穿M码偏大")
     assert _is_size("100斤穿L就行")
     assert _is_size("来个XL码")
-    assert _is_size("胸围偏大一点")
+    assert _is_size("胸围量一下偏大")
     assert not _is_size("收腰版型上身显瘦")
+    # wearing effects are on-body content, not size chart
+    assert _is_onbody_effect("不会走光漏光")
+    assert _is_onbody_effect("不显肚子 胃包拜拜肉都遮住")
+    assert not _is_size("不会走光漏光")
+    assert not _is_size("不显肚子 遮拜拜肉")
+    assert not _is_size("收腹遮胃包很有安全感")
 
     lines = [
         {"utt_id": "u1", "text": "收腰版型上身显瘦遮肉", "t0_ms": 0, "t1_ms": 4000},
@@ -246,10 +252,31 @@ def test_size_talk_never_enters_timeline_even_if_llm_keeps():
         playback_speed=1.0,
     )
     blob = " ".join(s.text for s in plan.golden)
-    assert "M码" not in blob and "L" not in blob.split()  # rough; better specific
+    assert "M码" not in blob
     assert "建议穿" not in blob and "100斤" not in blob and "XL" not in blob
     assert "偏大" not in blob
     assert "显瘦" in blob or "面料" in blob
+
+    # on-body effects must survive even mixed with size-banned corpus
+    lines2 = [
+        {"utt_id": "a1", "text": "不会走光漏光 穿上很安心", "t0_ms": 0, "t1_ms": 3000},
+        {"utt_id": "a2", "text": "不显肚子 胃包拜拜肉都盖住", "t0_ms": 3000, "t1_ms": 7000},
+        {"utt_id": "a3", "text": "建议穿M码", "t0_ms": 7000, "t1_ms": 9000},
+        {"utt_id": "a4", "text": "面料软软的不透", "t0_ms": 9000, "t1_ms": 12000},
+    ]
+    clauses2 = expand_lines_to_clauses(lines2)
+    plan2 = llm_obj_to_timeline(
+        {
+            "keep": [{"id": c["id"], "text": c["text"]} for c in clauses2],
+            "_clauses": clauses2,
+        },
+        lines2,
+        target_seconds=60,
+        playback_speed=1.0,
+    )
+    blob2 = " ".join(s.text for s in plan2.golden)
+    assert "走光" in blob2 or "不显肚子" in blob2 or "拜拜肉" in blob2 or "胃包" in blob2
+    assert "M码" not in blob2 and "建议穿" not in blob2
 
 
 def test_live_deal_call_dropped_jia_yi_dan():

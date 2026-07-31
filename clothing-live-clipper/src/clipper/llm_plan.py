@@ -353,22 +353,31 @@ _POLICY_RISK_MARKERS = (
     "假货", "高仿", "专柜代购假", "走私", "水货",
 )
 _SIZE_MARKERS = (
-    # 尺码顾问 / 报码（成片一律不要）
+    # 真·尺码顾问 / 报码（成片一律不要）——不含「不显肚子/不走光」等上身效果
     "尺码", "尺碼", "选码", "選碼", "报尺码", "報尺碼", "码数", "碼數", "试码", "試碼",
-    "建议穿", "建議穿", "该穿", "該穿", "推荐穿", "推薦穿", "适合穿", "適合穿",
-    "偏大", "偏小", "紧身", "紧了", "松了", "大一码", "小一码", "大一號", "小一號",
+    "建议穿", "建議穿", "该穿什么", "該穿什麼", "推荐穿什么码", "推薦穿什麼碼",
+    "偏大一码", "偏小一码", "大一码", "小一码", "大一號", "小一號",
     "加大码", "加大碼", "均码", "均碼", "中码", "中碼", "小码", "小碼", "大码穿", "大碼穿",
-    # 字母码（含 ASR 大小写/口误）
-    "M码", "L码", "S码", "m码", "l码", "s码", "XL", "XXL", "xl", "xxl", "2XL", "3XL",
-    "XS", "xs", "穿M", "穿S", "穿L", "穿XL", "穿XXL", "穿m", "穿s", "穿l",
+    # 字母码（含 ASR）
+    "M码", "L码", "S码", "m码", "l码", "s码", "XL码", "XXL码", "xl码", "xxl码",
+    "2XL", "3XL", "穿M", "穿S", "穿L", "穿XL", "穿XXL", "穿m", "穿s", "穿l",
     "S/M", "M/L", "L/XL", "SM码", "ML码",
-    # 围度 / 尺寸表
+    # 围度表（量体报数）
     "胸围", "腰围", "臀围", "肩宽", "袖长", "衣长", "裤长", "裙长", "胸圍", "腰圍", "臀圍",
     # 体重报码口语
-    "斤穿", "斤的穿", "斤左右", "多少斤", "体重", "身高", "公斤",
+    "斤穿", "斤的穿", "多少斤", "体重选", "身高选",
     "码穿", "號穿", "哪个码", "哪個碼", "什么码", "什麼碼", "几码", "幾碼",
-    # 报码/罩杯口播
-    "胸大", "胸小", "罩杯", "卡满", "网袋胸", "内衣", "钢圈", "杯型", "下围", "下圍",
+    # 报罩杯/量体
+    "罩杯", "卡满", "网袋胸", "钢圈", "杯型", "下围", "下圍",
+)
+
+# 上身/穿着效果（可进成片，优先开场服装特点）
+_ONBODY_EFFECT_MARKERS = (
+    "不走光", "不漏光", "走光", "漏光", "防走光", "遮走光",
+    "不显肚子", "不显肚", "遮肚子", "遮肚", "藏肚子", "藏肚", "肚腩", "小肚子",
+    "胃包", "拜拜肉", "蝴蝶袖", "副乳", "遮副乳", "收副乳",
+    "不显胯", "遮胯", "提臀", "收腹", "显腿长", "显高", "显比例",
+    "不透底", "不透光", "安全感", "坐着也", "弯腰也不",
 )
 # 价格/发货/物流：一律剔除（含开场福利话术、ASR 谐音/繁体）
 _PRICE_SHIP_MARKERS = (
@@ -388,20 +397,20 @@ _PRICE_SHIP_MARKERS = (
     "拍一单", "拍一單", "再拍一单", "补一单", "补一單", "上一单", "上一單",
     "加一波", "冲一波", "秒了", "秒它", "锁单", "锁住", "锁一下",
 )
-# 成片要凸显的服装卖点（版型 / 面料 / 适用人群）
+# 成片要凸显的服装卖点（版型 / 上身效果 / 面料 / 适用人群）
 _FIT_MARKERS = (
     "版型", "显瘦", "收腰", "修身", "遮肉", "高腰", "不显胯", "上身", "穿上", "长短",
     "领口", "腰线", "肩线",
-)
+) + _ONBODY_EFFECT_MARKERS
 _FABRIC_MARKERS = (
     "面料", "布料", "材质", "软", "超软", "垂感", "透气", "不闷", "冰凉", "不透",
     "亲肤", "抗皱", "不起球", "弹力", "天丝", "醋酸", "雪纺", "纯棉", "凉感",
     "吸湿", "干爽", "不热", "凉快", "丝丝", "冰冰", "薄", "保护款", "高密", "高质",
 )
 _AUDIENCE_MARKERS = (
-    "适用", "适合", "人群", "微胖", "梨形", "小个子", "大码", "胖妹妹", "通勤",
+    "适用", "适合", "人群", "微胖", "梨形", "小个子", "大码友好", "胖妹妹", "通勤",
     "日常", "上班", "夏天", "秋冬", "显白", "黄黑皮", "黑皮", "白皮", "皮肤",
-    "姐妹可以穿", "谁穿", "什么人", "胯宽", "肚子", "比例",
+    "姐妹可以穿", "谁穿", "什么人", "胯宽", "比例",
 )
 _VALUE_MARKERS = _FIT_MARKERS + _FABRIC_MARKERS + _AUDIENCE_MARKERS + (
     "细节", "蕾丝", "刺绣", "拼接", "对比", "舒服", "好穿",
@@ -429,44 +438,52 @@ def _is_control(text: str) -> bool:
     return False
 
 
+def _is_onbody_effect(text: str) -> bool:
+    """Wearing-effect lines users want kept (not size chart)."""
+    t = text or ""
+    return any(k in t for k in _ONBODY_EFFECT_MARKERS)
+
+
 def _is_size(text: str) -> bool:
-    """Hard ban size-advice / chart / letter-size talk from all cut paths."""
+    """Hard ban size-advice / chart / letter-size talk from all cut paths.
+
+    Keep on-body effect talk (不走光/不显肚子/拜拜肉/胃包) — those are fit selling points.
+    """
     t = text or ""
     if not t:
         return False
+    # Explicit allow: clothing wearing effects first
+    if _is_onbody_effect(t) and not re.search(
+        r"(码|碼|號|号|M码|L码|S码|XL|XXL|建议穿|該穿|该穿|几斤|幾斤|\d+\s*斤)", t, flags=re.I
+    ):
+        # e.g. 不显肚子、防走光 — not size
+        return False
     if any(x in t for x in _SIZE_MARKERS):
         return True
-    # 胸大/胸小/卡满/推荐来三（ASR 报码）
-    if re.search(r"胸\s*(大|小)", t):
+    # 胸大/胸小 + 选码语境才删；纯「不显胸」上身效果不走这条
+    if re.search(r"胸\s*(大|小)", t) and any(
+        k in t for k in ("码", "碼", "号", "號", "罩杯", "卡", "网袋", "推荐来", "来三", "穿")
+    ):
         return True
-    # 字母码：M/L/S/XL 单独或「穿 M」
+    # 字母码：M/L/S/XL + 码/穿/号
     if re.search(r"(?<![A-Za-z0-9])(XS|S|M|L|XL|XXL|2XL|3XL)(?![A-Za-z0-9])", t, flags=re.I):
-        # 避免误伤普通英文句：要求中文语境或「码/穿/号」
-        if re.search(r"(码|碼|號|号|穿|尺|号)", t) or re.search(
-            r"(穿|选|選|要|拍|加)\s*(XS|S|M|L|XL|XXL)", t, flags=re.I
+        if re.search(r"(码|碼|號|号)", t) or re.search(
+            r"(穿|选|選|要|拍|加|来|來)\s*(XS|S|M|L|XL|XXL)", t, flags=re.I
         ):
             return True
         if re.search(r"(XS|S|M|L|XL|XXL)\s*(码|碼|號|号|/)", t, flags=re.I):
             return True
-    # 「100斤 / 110 斤穿 / 80到90」体重选码
+    # 「100斤 / 110 斤穿」体重选码
     if re.search(r"\d+\s*(斤|公斤|kg)", t, flags=re.I) and any(
-        k in t for k in ("穿", "码", "碼", "号", "號", "适合", "適合", "建议", "建議", "推荐", "推薦")
+        k in t for k in ("穿", "码", "碼", "号", "號", "建议", "建議", "推荐", "推薦", "适合穿", "適合穿")
     ):
         return True
-    # 「一米六 / 165 穿」身高选码
-    if re.search(r"(一米|1\s*米|\d{2,3}\s*cm|\d{3})", t, flags=re.I) and any(
-        k in t for k in ("穿", "码", "碼", "身高", "个子", "個子")
-    ):
-        if any(k in t for k in ("码", "碼", "穿", "号", "號", "建议", "建議")):
-            return True
-    # 「大一码 / 小一码 / 正常码」
-    if re.search(r"(大|小|正常|宽松|修身)?\s*一?\s*(码|碼|號|号)", t):
-        if any(k in t for k in ("大", "小", "正常", "宽松", "修身", "选", "選", "穿", "建议", "建議", "偏")):
-            return True
-    # 「来个 M / 来三 / 拍 L」
-    if re.search(r"(来|來|拍|加|选|選|要)\s*[一个個]?\s*(XS|S|M|L|XL|XXL|\d+)", t, flags=re.I):
-        if re.search(r"(码|碼|號|号|XS|S|M|L|XL)", t, flags=re.I):
-            return True
+    # 「大一码 / 小一码 / 正常码」真报码
+    if re.search(r"(偏?[大小]|正常)\s*一?\s*(码|碼|號|号)", t):
+        return True
+    # 「来个 M / 拍 L」
+    if re.search(r"(来|來|拍|加|选|選|要)\s*[一个個]?\s*(XS|S|M|L|XL|XXL)\b", t, flags=re.I):
+        return True
     return False
 
 
@@ -1055,6 +1072,9 @@ def _repair_keep_ids(obj: dict[str, Any], clauses: list[dict[str, Any]]) -> dict
         # Highest: concrete clothing features (what the garment is good at)
         if any(k in t for k in ("版型", "面料", "布料", "材质", "显瘦", "收腰", "遮肉", "修身", "上身")):
             s += 56.0
+        # On-body effect: 不走光/不显肚子/拜拜肉/胃包 — strong openers
+        if _is_onbody_effect(t):
+            s += 54.0
         if any(k in t for k in ("超软", "软", "垂感", "不透", "凉感", "冰丝", "亲肤", "透气", "不起球", "抗皱")):
             s += 48.0
         if any(k in t for k in ("细节", "蕾丝", "拼接", "做工", "走线", "领口", "腰线")):

@@ -62,14 +62,20 @@
 六、常见问题
 ------------
 Q：双击没反应？
-A：右键用「以管理员身份运行」安装配置；确认已装 Python 并勾选 PATH。
+A：确认已装 Python 3.10+（微软商店版也可以）；安装时勾选 PATH。  
+   仍不行：双击「首次安装配置.bat」看报错；日志在 tools\logs\。
+
+Q：提示找不到 Python？
+A：安装/重装 Python，勾选 Add python.exe to PATH；或安装后重开资源管理器再试。  
+   当前安装脚本支持 `py` 启动器与微软 Store 版 Python。
 
 Q：网页打不开？
-A：再点一次「启动小面.bat」；或运行「停止小面.bat」后再启动。
-   日志：tools\logs\uvicorn.err.log
+A：再点一次「启动小面.bat」；或运行「停止小面.bat」后再启动。  
+   日志：tools\logs\uvicorn.err.log、start_error.txt。  
+   启动脚本会自动清理 8787 端口、GPU 失败时回退 CPU。
 
 Q：一直规则兜底？
-A：检查右侧 API 是否测试成功；推荐 Qwen2.5-7B-Instruct。
+A：检查右侧 API 是否测试成功；推荐 Qwen/Qwen2.5-7B-Instruct。
 
 Q：如何完全卸载？
 A：运行「停止小面.bat」，删除整个解压文件夹，删除桌面快捷方式即可。

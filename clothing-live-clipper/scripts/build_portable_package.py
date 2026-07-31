@@ -119,7 +119,7 @@ start "" "http://127.0.0.1:8787/"
         (out / name).write_text(content.replace("\n", "\r\n"), encoding="utf-8")
 
     # copy guides to root for visibility
-    for name in ("使用说明-操作指南.txt", "注意事项.txt"):
+    for name in ("使用说明-操作指南.txt", "注意事项.txt", "先读我.txt"):
         src = PORTABLE_SCRIPTS / name
         if src.exists():
             shutil.copy2(src, out / name)
@@ -200,15 +200,20 @@ def main() -> int:
             print("copy model", name)
             shutil.copytree(s, OUT / "models" / name, dirs_exist_ok=True)
 
-    # README at root
-    (OUT / "先读我.txt").write_text(
-        "只需双击「启动小面.bat」：\n"
-        "  · 第一次会自动安装配置（需联网）\n"
-        "  · 然后自动启动服务并打开网页\n"
-        "  · 在右侧填写 API 后即可上传切片\n"
-        "详细见：使用说明-操作指南.txt\n",
-        encoding="utf-8",
-    )
+    # 先读我优先用 pack/portable 同步文案
+    readme_src = PORTABLE_SCRIPTS / "先读我.txt"
+    if readme_src.exists():
+        shutil.copy2(readme_src, OUT / "先读我.txt")
+    else:
+        (OUT / "先读我.txt").write_text(
+            "只需双击「启动小面.bat」：\n"
+            "  · 第一次会自动安装配置（需联网）\n"
+            "  · 会自动排查修复常见问题\n"
+            "  · 然后自动启动服务并打开网页\n"
+            "  · 在右侧填写 API 后即可上传切片\n"
+            "详细见：使用说明-操作指南.txt\n",
+            encoding="utf-8",
+        )
 
     print("zip ->", ZIP_PATH)
     zip_dir(OUT, ZIP_PATH)

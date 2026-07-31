@@ -75,28 +75,95 @@ function Download-File {
   return $false
 }
 
+function Test-PythonExe([string]$exe) {
+  if (-not $exe) { return $null }
+  if (-not (Test-Path $exe)) { return $null }
+  try {
+    $out = & $exe -c "import sys; v=sys.version_info; print('%d.%d' % (v.major, v.minor)); raise SystemExit(0 if v.major==3 and v.minor>=10 else 2)" 2>$null
+    if ($LASTEXITCODE -eq 0 -and $out) { return $out.ToString().Trim() }
+  } catch {}
+  return $null
+}
+
 function Get-PythonCommand {
-  $candidates = @("py -3.12", "py -3.11", "py -3.10", "py -3", "python", "python3")
-  foreach ($c in $candidates) {
+  # 1) py launcher list (-0p)
+  $pyLauncher = Get-Command py.exe -ErrorAction SilentlyContinue
+  if ($pyLauncher) {
     try {
-      $code = 'import sys; v=sys.version_info; print("%d.%d"%(v.major,v.minor)); raise SystemExit(0 if v.major==3 and v.minor>=10 else 2)'
-      $out = & cmd.exe /c "$c -c `"$code`"" 2>$null
-      if ($LASTEXITCODE -eq 0 -and $out) {
-        Log ("Found Python " + $out.ToString().Trim() + " via " + $c)
-        return @{ Kind = "cmd"; Cmd = $c }
+      $lines = & py.exe -0p 2>$null
+      foreach ($line in $lines) {
+        if ($line -match "([A-Za-z]:\\[^\s]+python\.exe)") {
+          $p = $Matches[1]
+          $ver = Test-PythonExe $p
+          if ($ver) {
+            Log ("Found Python " + $ver + " via py -0p: " + $p)
+            return @{ Kind = "path"; Cmd = $p }
+          }
+        }
       }
     } catch {}
+    foreach ($arg in @("-3.12", "-3.11", "-3.10", "-3")) {
+      try {
+        $out = & py.exe $arg -c "import sys; v=sys.version_info; print('%d.%d' % (v.major, v.minor)); import sys as s; s.exit(0 if v.major==3 and v.minor>=10 else 2)" 2>$null
+        if ($LASTEXITCODE -eq 0 -and $out) {
+          $exe = & py.exe $arg -c "import sys; print(sys.executable)" 2>$null
+          if ($exe -and (Test-Path "$exe")) {
+            Log ("Found Python " + $out.ToString().Trim() + " via py " + $arg)
+            return @{ Kind = "path"; Cmd = "$exe".Trim() }
+          }
+          return @{ Kind = "py"; Arg = $arg }
+        }
+      } catch {}
+    }
   }
-  $paths = @(
+  # 2) PATH python
+  foreach ($name in @("python.exe", "python3.exe")) {
+    $cmd = Get-Command $name -ErrorAction SilentlyContinue
+    if ($cmd -and $cmd.Source -and (Test-Path $cmd.Source)) {
+      # skip WindowsApps stub if it is zero-size or redirects poorly
+      $ver = Test-PythonExe $cmd.Source
+      if ($ver) {
+        Log ("Found Python " + $ver + " via PATH: " + $cmd.Source)
+        return @{ Kind = "path"; Cmd = $cmd.Source }
+      }
+    }
+  }
+  # 3) common install locations + WindowsApps real package
+  $paths = @()
+  $paths += @(
+    "$env:LOCALAPPDATA\Programs\Python\Python313\python.exe",
     "$env:LOCALAPPDATA\Programs\Python\Python312\python.exe",
     "$env:LOCALAPPDATA\Programs\Python\Python311\python.exe",
     "$env:LOCALAPPDATA\Programs\Python\Python310\python.exe",
+    "C:\Python313\python.exe",
     "C:\Python312\python.exe",
     "C:\Python311\python.exe"
   )
+  $wa = Join-Path $env:LOCALAPPDATA "Microsoft\WindowsApps"
+  if (Test-Path $wa) {
+    Get-ChildItem -Path $wa -Filter "PythonSoftwareFoundation.Python.*" -Directory -ErrorAction SilentlyContinue | ForEach-Object {
+      $p = Join-Path $_.FullName "python.exe"
+      if (Test-Path $p) { $paths += $p }
+    }
+    # nested package path often used by Store Python
+    Get-ChildItem -Path $wa -Recurse -Filter python.exe -ErrorAction SilentlyContinue | Select-Object -First 8 | ForEach-Object {
+      $paths += $_.FullName
+    }
+  }
+  # Program Files WindowsApps package (if accessible)
+  $pfwa = "C:\Program Files\WindowsApps"
+  if (Test-Path $pfwa) {
+    try {
+      Get-ChildItem -Path $pfwa -Filter "PythonSoftwareFoundation.Python.*" -Directory -ErrorAction SilentlyContinue | ForEach-Object {
+        $p = Join-Path $_.FullName "python.exe"
+        if (Test-Path $p) { $paths += $p }
+      }
+    } catch {}
+  }
   foreach ($p in $paths) {
-    if (Test-Path $p) {
-      Log ("Found Python path: " + $p)
+    $ver = Test-PythonExe $p
+    if ($ver) {
+      Log ("Found Python " + $ver + " path: " + $p)
       return @{ Kind = "path"; Cmd = $p }
     }
   }
@@ -118,10 +185,12 @@ function Ensure-Venv($pyInfo) {
       SoftFail "Removing broken venv"
       Remove-Item -Recurse -Force $PyVenv -ErrorAction SilentlyContinue
     }
-    if ($pyInfo.Kind -eq "cmd") {
-      & cmd.exe /c "$($pyInfo.Cmd) -m venv `"$PyVenv`""
-    } else {
+    if ($pyInfo.Kind -eq "path") {
       & $pyInfo.Cmd -m venv $PyVenv
+    } elseif ($pyInfo.Kind -eq "py") {
+      & py.exe $pyInfo.Arg -m venv $PyVenv
+    } else {
+      & python.exe -m venv $PyVenv
     }
   }
   if (-not (Test-Path $PyExe)) { return $false }

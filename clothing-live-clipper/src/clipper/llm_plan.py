@@ -353,10 +353,22 @@ _POLICY_RISK_MARKERS = (
     "假货", "高仿", "专柜代购假", "走私", "水货",
 )
 _SIZE_MARKERS = (
-    "尺码", "M码", "L码", "m码", "S码", "s码", "XL", "胸围", "腰围", "偏大", "偏小", "建议穿",
-    "斤穿", "斤", "码穿",
-    # 报码/罩杯口播（用户截图：胸大/胸小/卡满）
-    "胸大", "胸小", "罩杯", "卡满", "网袋胸", "内衣", "钢圈", "杯型",
+    # 尺码顾问 / 报码（成片一律不要）
+    "尺码", "尺碼", "选码", "選碼", "报尺码", "報尺碼", "码数", "碼數", "试码", "試碼",
+    "建议穿", "建議穿", "该穿", "該穿", "推荐穿", "推薦穿", "适合穿", "適合穿",
+    "偏大", "偏小", "紧身", "紧了", "松了", "大一码", "小一码", "大一號", "小一號",
+    "加大码", "加大碼", "均码", "均碼", "中码", "中碼", "小码", "小碼", "大码穿", "大碼穿",
+    # 字母码（含 ASR 大小写/口误）
+    "M码", "L码", "S码", "m码", "l码", "s码", "XL", "XXL", "xl", "xxl", "2XL", "3XL",
+    "XS", "xs", "穿M", "穿S", "穿L", "穿XL", "穿XXL", "穿m", "穿s", "穿l",
+    "S/M", "M/L", "L/XL", "SM码", "ML码",
+    # 围度 / 尺寸表
+    "胸围", "腰围", "臀围", "肩宽", "袖长", "衣长", "裤长", "裙长", "胸圍", "腰圍", "臀圍",
+    # 体重报码口语
+    "斤穿", "斤的穿", "斤左右", "多少斤", "体重", "身高", "公斤",
+    "码穿", "號穿", "哪个码", "哪個碼", "什么码", "什麼碼", "几码", "幾碼",
+    # 报码/罩杯口播
+    "胸大", "胸小", "罩杯", "卡满", "网袋胸", "内衣", "钢圈", "杯型", "下围", "下圍",
 )
 # 价格/发货/物流：一律剔除（含开场福利话术、ASR 谐音/繁体）
 _PRICE_SHIP_MARKERS = (
@@ -418,14 +430,43 @@ def _is_control(text: str) -> bool:
 
 
 def _is_size(text: str) -> bool:
+    """Hard ban size-advice / chart / letter-size talk from all cut paths."""
     t = text or ""
+    if not t:
+        return False
     if any(x in t for x in _SIZE_MARKERS):
         return True
     # 胸大/胸小/卡满/推荐来三（ASR 报码）
-    if re.search(r"胸\s*(大|小)", t) and any(k in t for k in ("卡", "网袋", "推荐", "推荐什么", "来三", "码")):
+    if re.search(r"胸\s*(大|小)", t):
         return True
-    if "胸大" in t or "胸小" in t:
+    # 字母码：M/L/S/XL 单独或「穿 M」
+    if re.search(r"(?<![A-Za-z0-9])(XS|S|M|L|XL|XXL|2XL|3XL)(?![A-Za-z0-9])", t, flags=re.I):
+        # 避免误伤普通英文句：要求中文语境或「码/穿/号」
+        if re.search(r"(码|碼|號|号|穿|尺|号)", t) or re.search(
+            r"(穿|选|選|要|拍|加)\s*(XS|S|M|L|XL|XXL)", t, flags=re.I
+        ):
+            return True
+        if re.search(r"(XS|S|M|L|XL|XXL)\s*(码|碼|號|号|/)", t, flags=re.I):
+            return True
+    # 「100斤 / 110 斤穿 / 80到90」体重选码
+    if re.search(r"\d+\s*(斤|公斤|kg)", t, flags=re.I) and any(
+        k in t for k in ("穿", "码", "碼", "号", "號", "适合", "適合", "建议", "建議", "推荐", "推薦")
+    ):
         return True
+    # 「一米六 / 165 穿」身高选码
+    if re.search(r"(一米|1\s*米|\d{2,3}\s*cm|\d{3})", t, flags=re.I) and any(
+        k in t for k in ("穿", "码", "碼", "身高", "个子", "個子")
+    ):
+        if any(k in t for k in ("码", "碼", "穿", "号", "號", "建议", "建議")):
+            return True
+    # 「大一码 / 小一码 / 正常码」
+    if re.search(r"(大|小|正常|宽松|修身)?\s*一?\s*(码|碼|號|号)", t):
+        if any(k in t for k in ("大", "小", "正常", "宽松", "修身", "选", "選", "穿", "建议", "建議", "偏")):
+            return True
+    # 「来个 M / 来三 / 拍 L」
+    if re.search(r"(来|來|拍|加|选|選|要)\s*[一个個]?\s*(XS|S|M|L|XL|XXL|\d+)", t, flags=re.I):
+        if re.search(r"(码|碼|號|号|XS|S|M|L|XL)", t, flags=re.I):
+            return True
     return False
 
 
@@ -638,11 +679,10 @@ def _build_plan_messages(
     # Hard DROP rules stay first; narrative order is additive optimization.
     user_text = (
         f"目标约{int(target_seconds)}s。从候选选保留id并按播放顺序排列（约8-16个）。"
-        "【硬删·不可保留】尺码报码/胸围建议穿、价格拨分包邮、发货物流、加一单催单、"
-        "直播控场(家人们/扣1/准备一下/321)、人设标签灌鸡汤、与服装无关闲聊。"
-        "【结构·最重要】开头必须先放服装特点（版型/上身/面料/细节），"
-        "前几句就要讲清楚这件衣服好在哪；不要寒暄开场。"
-        "顺序：服装特点(版型+面料)→全身效果→细节做工→穿搭场景(含适用人群)。\n"
+        "【硬删·绝对禁止】任何尺码内容：M/L/S/XL、偏大偏小、胸围腰围、建议穿、几斤穿、什么码；"
+        "价格拨分包邮、发货物流、加一单催单、直播控场(家人们/扣1/321)、人设鸡汤、无关闲聊。"
+        "【结构】开头先放服装特点（版型/上身/面料），再全身效果→细节→穿搭场景。"
+        "禁止选尺码句，即使候选里有也不要。\n"
         "候选:\n"
         + "\n".join(lines)
         + '\n只输出JSON:{"ids":["c2","c3"],"hook":"visual"}'
@@ -650,8 +690,8 @@ def _build_plan_messages(
     system = (
         "你是服装短视频剪辑助手。只输出一个JSON对象。"
         "ids必须来自候选且原样复制。"
-        "硬规则：删尺码/价格发货/加一单/直播控场/人设鸡汤/无关闲聊。"
-        "开头先放服装特点（版型/面料/上身效果），再全身效果→细节→穿搭场景。"
+        "硬规则：禁止尺码(字母码/围度/建议穿/几斤)；禁止价格发货加一单直播控场。"
+        "开头先服装特点（版型/面料/上身），再全身效果→细节→穿搭场景。"
         '格式:{"ids":["c2","c3","c4"],"hook":"visual"}'
     )
     messages = [
@@ -1323,12 +1363,16 @@ def llm_obj_to_timeline(
         text = str(src.get("text") or "").strip()
         if not text:
             return
-        if any(x in text for x in ("尺码", "M码", "L码", "m码", "胸围", "腰围", "偏大", "偏小", "胸大", "胸小", "卡满")):
+        # hard drop size / price / shipping / live-control / persona even if LLM kept them
+        if (
+            _is_size(text)
+            or _is_price_or_shipping(text)
+            or _is_control(text)
+            or _is_persona_or_hype(text)
+            or _is_policy_risk(text)
+        ):
             return
         if any(x in text for x in ("加购", "小黄车", "上链接", "点链接")):
-            return
-        # hard drop price / shipping / live-control / persona even if LLM kept them
-        if _is_price_or_shipping(text) or _is_control(text) or _is_size(text) or _is_persona_or_hype(text) or _is_policy_risk(text):
             return
         # always take full clause window first (avoid mid-clause cutoff)
         t0 = int(src["t0_ms"])
@@ -1556,6 +1600,20 @@ def llm_obj_to_timeline(
             warnings.append("dropped_incomplete_tail")
         else:
             warnings.append("kept_incomplete_tail_for_duration")
+
+    # Final safety net: strip any residual size/price/live lines before publish plan
+    cleaned: list[PlanSlot] = []
+    dropped_size_n = 0
+    for s in slots:
+        tx = str(s.text or "")
+        if _is_size(tx) or _is_price_or_shipping(tx) or _is_control(tx) or _is_persona_or_hype(tx) or _is_policy_risk(tx):
+            if _is_size(tx):
+                dropped_size_n += 1
+            continue
+        cleaned.append(s)
+    if dropped_size_n:
+        warnings.append(f"policy:size_stripped_n={dropped_size_n}")
+    slots = cleaned
 
     # Keep rough narrative order preference: fit/fabric/audience mixed but opener first already from keep
     return TimelinePlan(

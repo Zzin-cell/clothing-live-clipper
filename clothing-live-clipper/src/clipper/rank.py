@@ -41,11 +41,12 @@ _PRICE_TEXT = (
 
 # Hard size advice — never keep in final cut
 _SIZE_TEXT = (
-    "尺码", "选码", "偏大", "偏小", "腰围", "胸围", "臀围", "肩宽", "均码",
-    "加大码", "码数", "建议穿", "该穿", "斤穿", "身高", "体重", "试码",
-    "报尺码", "穿M", "穿S", "穿L", "穿XL", "穿XXL", "S码", "M码", "L码",
-    "XL码", "XXL码", "袖长", "衣长", "裤长", "能穿吗", "能不能穿",
-    "胸大", "胸小", "卡满", "网袋胸", "罩杯",
+    "尺码", "尺碼", "选码", "選碼", "偏大", "偏小", "腰围", "胸围", "臀围", "肩宽", "均码", "均碼",
+    "加大码", "加大碼", "码数", "碼數", "建议穿", "建議穿", "该穿", "該穿", "推荐穿", "推薦穿",
+    "斤穿", "身高", "体重", "試碼", "试码", "报尺码", "報尺碼",
+    "穿M", "穿S", "穿L", "穿XL", "穿XXL", "S码", "M码", "L码", "XL码", "XXL码",
+    "袖长", "衣长", "裤长", "裙长", "能穿吗", "能不能穿", "哪个码", "什麼碼", "什么码", "几码", "幾碼",
+    "胸大", "胸小", "卡满", "网袋胸", "罩杯", "下围", "大一码", "小一码", "中码", "小码",
 )
 
 # Douyin compliance: absolute claims / medical / off-platform diversion
@@ -119,6 +120,21 @@ def score_clip(clip: Clip) -> Clip:
     # Hard policy: never put size chart / sizing advice into final cut
     if ClaimType.SIZE in types or any(p in text for p in _SIZE_TEXT):
         # pure size always out; mixed size+feature still out (user: 去除尺码)
+        clip.score = 0.0
+        clip.weight = 0.0
+        clip.score_breakdown = {"size_excluded": 0.0, "raw": 0.0}
+        return clip
+    # letter size / weight pick-size slang
+    if re.search(r"(?<![A-Za-z0-9])(XS|S|M|L|XL|XXL|2XL|3XL)(?![A-Za-z0-9])", text, flags=re.I) and re.search(
+        r"(码|碼|號|号|穿|选|選|拍|加|来|來)", text
+    ):
+        clip.score = 0.0
+        clip.weight = 0.0
+        clip.score_breakdown = {"size_excluded": 0.0, "raw": 0.0}
+        return clip
+    if re.search(r"\d+\s*(斤|公斤|kg)", text, flags=re.I) and any(
+        k in text for k in ("穿", "码", "碼", "号", "號", "适合", "適合", "建议", "建議")
+    ):
         clip.score = 0.0
         clip.weight = 0.0
         clip.score_breakdown = {"size_excluded": 0.0, "raw": 0.0}

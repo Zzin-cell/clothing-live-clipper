@@ -216,6 +216,42 @@ def test_rules_fallback_only_when_under_40s():
     assert plan2.total_duration_ms == 70_000
 
 
+def test_size_talk_never_enters_timeline_even_if_llm_keeps():
+    from clipper.llm_plan import _is_size
+
+    assert _is_size("建议穿M码偏大")
+    assert _is_size("100斤穿L就行")
+    assert _is_size("来个XL码")
+    assert _is_size("胸围偏大一点")
+    assert not _is_size("收腰版型上身显瘦")
+
+    lines = [
+        {"utt_id": "u1", "text": "收腰版型上身显瘦遮肉", "t0_ms": 0, "t1_ms": 4000},
+        {"utt_id": "u2", "text": "建议穿M码偏大一码", "t0_ms": 4000, "t1_ms": 7000},
+        {"utt_id": "u3", "text": "面料超级软还不透", "t0_ms": 7000, "t1_ms": 11000},
+        {"utt_id": "u4", "text": "100斤穿L完全可以", "t0_ms": 11000, "t1_ms": 14000},
+        {"utt_id": "u5", "text": "小个子梨形也适合", "t0_ms": 14000, "t1_ms": 18000},
+        {"utt_id": "u6", "text": "XL码的姐妹也可以", "t0_ms": 18000, "t1_ms": 21000},
+    ]
+    clauses = expand_lines_to_clauses(lines)
+    # Even if LLM wrongly keeps size ids, timeline must strip them
+    plan = llm_obj_to_timeline(
+        {
+            "keep": [{"id": c["id"], "text": c["text"]} for c in clauses],
+            "_clauses": clauses,
+            "_clauses_raw": clauses,
+        },
+        lines,
+        target_seconds=60,
+        playback_speed=1.0,
+    )
+    blob = " ".join(s.text for s in plan.golden)
+    assert "M码" not in blob and "L" not in blob.split()  # rough; better specific
+    assert "建议穿" not in blob and "100斤" not in blob and "XL" not in blob
+    assert "偏大" not in blob
+    assert "显瘦" in blob or "面料" in blob
+
+
 def test_live_deal_call_dropped_jia_yi_dan():
     from clipper.llm_plan import _is_control, _is_price_or_shipping
 

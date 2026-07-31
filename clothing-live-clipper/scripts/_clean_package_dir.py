@@ -35,10 +35,16 @@ JUNK_PREFIXES = (
     "_boot_",
     "_styles",
 )
+# REQUIRED by job_worker at runtime — never delete
+KEEP_RUNTIME_SCRIPTS = {
+    "agent_clip_video.py",
+    "filter_transcript_v2.py",
+    "asr_enhance.py",
+}
+
 JUNK_EXACT = {
     "migrate_env_llm_to_user.py",
     "make_share_package.py",  # old packer, not for end users
-    "agent_clip_video.py",
     "bench_gpu_asr.py",
     "bootstrap_learning_from_folder.py",
     "bootstrap_learning_posneg_pairs.py",
@@ -61,6 +67,8 @@ JUNK_EXACT = {
 
 def should_delete_file(path: Path) -> bool:
     name = path.name
+    if name in KEEP_RUNTIME_SCRIPTS:
+        return False
     if name in JUNK_EXACT:
         return True
     if name.startswith(JUNK_PREFIXES):
@@ -124,12 +132,25 @@ def main() -> int:
             removed_dirs += 1
             print("rmdir", rel)
 
-    # remove developer tools under scripts but keep none for users
+    # remove developer tools under scripts, but KEEP runtime ASR helpers
     scripts = PKG / "clothing-live-clipper" / "scripts"
     if scripts.exists():
         for p in scripts.iterdir():
-            if p.is_file() and (p.name.startswith("_") or p.name in JUNK_EXACT or p.suffix in {".ps1", ".bat"}):
+            if not p.is_file():
+                continue
+            if p.name in KEEP_RUNTIME_SCRIPTS:
+                continue
+            if p.name.startswith("_") or p.name in JUNK_EXACT or p.suffix in {".ps1", ".bat"}:
                 # end-users don't need dev scripts; pack/portable has installers
+                try:
+                    p.unlink()
+                    removed_files += 1
+                    print("rm scripts/", p.name)
+                except Exception as e:
+                    print("skip", p, e)
+        # also drop leftover non-runtime .py helpers in scripts/
+        for p in list(scripts.glob("*.py")):
+            if p.name not in KEEP_RUNTIME_SCRIPTS:
                 try:
                     p.unlink()
                     removed_files += 1

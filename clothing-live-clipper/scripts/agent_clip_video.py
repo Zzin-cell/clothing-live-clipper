@@ -211,17 +211,40 @@ def resolve_local_model() -> str:
     if env and (Path(env).exists() or env in known):
         return env
 
-    models_root = Path(r"C:\Users\MR\AppData\grok\models")
+    # Portable-friendly model roots (env first, then package models/, then legacy path)
+    roots: list[Path] = []
+    env_model = (os.environ.get("CLIPPER_LOCAL_WHISPER_MODEL") or "").strip()
+    # env may point to a model dir already handled above; still collect parent package models/
+    package_root = Path(__file__).resolve().parents[2]  # .../XiaomianCapCut or clothing-live-clipper parent
+    # scripts/ is under clothing-live-clipper → parents[1]=app, parents[2]=package root when nested
+    app_root = Path(__file__).resolve().parents[1]
+    for cand in (
+        Path(os.environ.get("CLIPPER_MODELS_ROOT") or ""),
+        package_root / "models",
+        app_root / "models",
+        Path.cwd() / "models",
+        Path(r"C:\Users\MR\AppData\grok\models"),
+    ):
+        if cand and str(cand) not in {str(x) for x in roots}:
+            roots.append(cand)
+
     quality = (os.environ.get("CLIPPER_ASR_QUALITY") or "high").strip().lower()
     use_gpu = _cuda_available()
     pointer = Path(__file__).resolve().parent / "local_whisper_model_path.txt"
 
+    def _find_in_roots(order: tuple[str, ...]) -> str | None:
+        for name in order:
+            for root in roots:
+                d = root / name
+                if (d / "model.bin").exists():
+                    return str(d)
+        return None
+
     # GPU / high quality: medium first
     if use_gpu or quality in {"high", "hq", "quality", "accurate", "gpu", "medium"}:
-        for name in ("whisper-medium", "whisper-small", "whisper-base", "whisper-tiny"):
-            d = models_root / name
-            if (d / "model.bin").exists():
-                return str(d)
+        found = _find_in_roots(("whisper-medium", "whisper-small", "whisper-base", "whisper-tiny"))
+        if found:
+            return found
         if pointer.exists():
             p = pointer.read_text(encoding="utf-8").strip()
             if p and Path(p).exists() and (Path(p) / "model.bin").exists():
@@ -229,10 +252,9 @@ def resolve_local_model() -> str:
         return (os.environ.get("CLIPPER_WHISPER_HUB_MODEL") or "medium").strip() or "medium"
 
     # CPU: prefer speed
-    for name in ("whisper-tiny", "whisper-base", "whisper-small", "whisper-medium"):
-        d = models_root / name
-        if (d / "model.bin").exists():
-            return str(d)
+    found = _find_in_roots(("whisper-tiny", "whisper-base", "whisper-small", "whisper-medium"))
+    if found:
+        return found
     if pointer.exists():
         p = pointer.read_text(encoding="utf-8").strip()
         if p and Path(p).exists() and (Path(p) / "model.bin").exists():

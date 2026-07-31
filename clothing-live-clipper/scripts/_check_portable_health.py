@@ -156,6 +156,10 @@ def main() -> int:
             PKG / "pack" / "portable" / "ensure_ready.ps1",
             PKG / "pack" / "portable" / "start_service.ps1",
             PKG / "clothing-live-clipper" / "src" / "clipper" / "web.py",
+            PKG / "clothing-live-clipper" / "src" / "clipper" / "job_worker.py",
+            PKG / "clothing-live-clipper" / "scripts" / "agent_clip_video.py",
+            PKG / "clothing-live-clipper" / "scripts" / "filter_transcript_v2.py",
+            PKG / "clothing-live-clipper" / "scripts" / "asr_enhance.py",
             PKG / "clothing-live-clipper" / "requirements.txt",
             PKG / "tools" / "ffmpeg" / "bin" / "ffmpeg.exe",
         ]

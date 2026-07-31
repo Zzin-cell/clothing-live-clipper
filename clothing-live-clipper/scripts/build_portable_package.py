@@ -47,12 +47,18 @@ SKIP_DIR_NAMES = {
     ".superpowers",
 }
 SKIP_SUFFIX = {".pyc", ".pyo", ".log", ".tmp", ".part"}
+# Runtime scripts REQUIRED by job_worker / ASR pipeline — never strip these
+KEEP_RUNTIME_SCRIPTS = {
+    "agent_clip_video.py",  # extract_wav / asr_local / resolve_local_model
+    "filter_transcript_v2.py",
+    "asr_enhance.py",
+}
+
 # developer-only scripts (not needed by end users; runtime installers are in pack/portable)
 SKIP_SCRIPT_NAMES = {
     "build_portable_package.py",
     "make_share_package.py",
     "migrate_env_llm_to_user.py",
-    "agent_clip_video.py",
     "bench_gpu_asr.py",
     "bootstrap_learning_from_folder.py",
     "bootstrap_learning_posneg_pairs.py",
@@ -96,12 +102,27 @@ def copy_app(src: Path, dst: Path) -> None:
         for f in files:
             if Path(f).suffix.lower() in SKIP_SUFFIX:
                 continue
+            # always keep runtime ASR helpers even if "_" / SKIP list changes
+            if f in KEEP_RUNTIME_SCRIPTS:
+                sp = root_p / f
+                tp = target_root / f
+                try:
+                    shutil.copy2(sp, tp)
+                except Exception as e:
+                    print("skip", sp, e)
+                continue
             if f.startswith("_"):
                 continue
             if f in SKIP_SCRIPT_NAMES:
                 continue
             if f.startswith("test_") and Path(f).suffix == ".py":
                 continue
+            # drop other scripts/* noise for end users; keep only runtime essentials + requirements/config files outside scripts
+            if rel.parts[:1] == ("scripts",):
+                # keep only known runtime modules
+                if f not in KEEP_RUNTIME_SCRIPTS and Path(f).suffix == ".py":
+                    # allow non-helper modules that web never imports? default deny
+                    continue
             sp = root_p / f
             tp = target_root / f
             try:

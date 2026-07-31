@@ -105,6 +105,32 @@ def test_build_plan_messages_is_ids_only_schema():
     assert all("id" in c and "text" in c for c in compact)
 
 
+def test_live_deal_call_dropped_jia_yi_dan():
+    from clipper.llm_plan import _is_control, _is_price_or_shipping
+
+    assert _is_price_or_shipping("姐妹们赶紧加一单")
+    assert _is_price_or_shipping("喜欢的加一单啊")
+    assert _is_control("小黄车加购") or _is_price_or_shipping("小黄车加购")
+    assert not _is_price_or_shipping("收腰版型上身显瘦")
+
+    lines = [
+        {"utt_id": "u1", "text": "收腰版型上身显瘦遮肉", "t0_ms": 0, "t1_ms": 4000},
+        {"utt_id": "u2", "text": "姐妹们赶紧加一单", "t0_ms": 4000, "t1_ms": 7000},
+        {"utt_id": "u3", "text": "面料超级软还不透气", "t0_ms": 7000, "t1_ms": 11000},
+        {"utt_id": "u4", "text": "喜欢的再拍一单", "t0_ms": 11000, "t1_ms": 14000},
+    ]
+    clauses = expand_lines_to_clauses(lines)
+    plan = llm_obj_to_timeline(
+        {"keep": [{"id": c["id"], "text": c["text"]} for c in clauses], "_clauses": clauses},
+        lines,
+        target_seconds=60,
+        playback_speed=1.0,
+    )
+    blob = " ".join(s.text for s in plan.golden)
+    assert "加一单" not in blob and "拍一单" not in blob
+    assert "显瘦" in blob or "面料" in blob
+
+
 def test_policy_risk_dropped_from_plans():
     from clipper.llm_plan import _is_policy_risk
 

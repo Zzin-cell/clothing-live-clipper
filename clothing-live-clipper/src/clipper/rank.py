@@ -33,6 +33,10 @@ _PRICE_TEXT = (
     "发货", "發貨", "发貨", "现货", "現貨", "预售", "預售", "物流", "快递", "快遞",
     "顺丰", "順豐", "几天发", "幾天發", "今日发", "今日發", "补货", "補貨",
     "付款", "包邮", "邮费", "郵費", "太贵", "太貴", "贵呀", "貴呀",
+    # 直播催单 / 成交口令
+    "加一单", "加一單", "再加一单", "再加一單", "拍一单", "拍一單", "补一单", "补一單",
+    "加一波", "冲一波", "赶紧加", "赶快加", "抓紧加", "闭眼加", "有货的加",
+    "想要的加", "喜欢的加", "看上的加", "秒了", "秒它", "锁单", "锁住",
 )
 
 # Hard size advice — never keep in final cut
@@ -99,6 +103,17 @@ def score_clip(clip: Clip) -> Clip:
         clip.score = 0.0
         clip.weight = 0.0
         clip.score_breakdown = {"shipping_excluded": 0.0, "raw": 0.0}
+        return clip
+    # 直播成交口令：加一单 / 拍一单 / 赶紧加…
+    if re.search(r"(加|拍|下|锁|鎖).{0,2}(一|1|俩|两|几).{0,2}(单|單|波|件)", text):
+        clip.score = 0.0
+        clip.weight = 0.0
+        clip.score_breakdown = {"deal_call_excluded": 0.0, "raw": 0.0}
+        return clip
+    if re.search(r"(赶紧|赶快|抓紧|全部|一起|有货|想要|喜欢|看上|闭眼).{0,4}(加|拍|下单|下單)", text):
+        clip.score = 0.0
+        clip.weight = 0.0
+        clip.score_breakdown = {"deal_call_excluded": 0.0, "raw": 0.0}
         return clip
 
     # Hard policy: never put size chart / sizing advice into final cut

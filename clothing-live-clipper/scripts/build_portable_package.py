@@ -42,8 +42,41 @@ SKIP_DIR_NAMES = {
     "venv",
     "node_modules",
     "检查文件",
+    "tests",  # end users don't need unit tests
+    "docs",  # developer docs; user guides live in pack root
+    ".superpowers",
 }
 SKIP_SUFFIX = {".pyc", ".pyo", ".log", ".tmp", ".part"}
+# developer-only scripts (not needed by end users; runtime installers are in pack/portable)
+SKIP_SCRIPT_NAMES = {
+    "build_portable_package.py",
+    "make_share_package.py",
+    "migrate_env_llm_to_user.py",
+    "agent_clip_video.py",
+    "bench_gpu_asr.py",
+    "bootstrap_learning_from_folder.py",
+    "bootstrap_learning_posneg_pairs.py",
+    "check_asr_medium.py",
+    "download_whisper_medium.py",
+    "download_whisper_small.py",
+    "download_whisper_tiny_curl.py",
+    "process_claimed_job.py",
+    "process_one_job.py",
+    "relearn_pair_folder_now.py",
+    "reseed_learning.py",
+    "verify_local_whisper.py",
+    "install_ffmpeg.ps1",
+    "local_whisper_model_path.txt",
+    "restart_web.bat",
+    "start_web_now.bat",
+    "_boot_web.ps1",
+    "_blank_install_test.py",
+    "_check_portable_health.py",
+    "_write_ps1_utf8bom.py",
+    "_parse_ps1.ps1",
+    "_run_parse_ps1.py",
+    "_clean_package_dir.py",
+}
 
 
 def copy_app(src: Path, dst: Path) -> None:
@@ -54,20 +87,20 @@ def copy_app(src: Path, dst: Path) -> None:
         root_p = Path(root)
         dirs[:] = [d for d in dirs if d not in SKIP_DIR_NAMES and not d.startswith(".")]
         rel = root_p.relative_to(src)
-        # skip pack build temp heavy
-        if "scripts" in rel.parts and any(
-            str(rel).endswith(x)
-            for x in ()
-        ):
-            pass
+        # never ship raw pack/ into nested app; pack is copied separately at package root
+        if rel.parts[:1] == ("pack",):
+            dirs[:] = []
+            continue
         target_root = dst / rel
         target_root.mkdir(parents=True, exist_ok=True)
         for f in files:
             if Path(f).suffix.lower() in SKIP_SUFFIX:
                 continue
-            if f.startswith("_commit_msg") or f.startswith("_probe_") or f.startswith("_diag_"):
+            if f.startswith("_"):
                 continue
-            if f.startswith("_check_") or f.startswith("_patch_") or f.startswith("_scan_"):
+            if f in SKIP_SCRIPT_NAMES:
+                continue
+            if f.startswith("test_") and Path(f).suffix == ".py":
                 continue
             sp = root_p / f
             tp = target_root / f

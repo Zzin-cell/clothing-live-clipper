@@ -85,10 +85,26 @@ chcp 65001 >nul
 cd /d "%~dp0"
 call "%~dp0pack\portable\首次安装配置.bat"
 """,
+        # Root launcher also auto-installs then starts (one click for beginners)
         "启动小面.bat": r"""@echo off
 chcp 65001 >nul
 cd /d "%~dp0"
-call "%~dp0pack\portable\启动小面.bat"
+title 小面 CapCut
+echo 小面 CapCut - 首次将自动安装配置...
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0pack\portable\ensure_ready.ps1"
+if errorlevel 1 (
+  echo 自动安装失败，请联网后重试。
+  pause
+  exit /b 1
+)
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0pack\portable\start_service.ps1"
+if errorlevel 1 (
+  echo 启动失败，见 tools\logs\
+  pause
+  exit /b 1
+)
+timeout /t 2 >nul
+exit /b 0
 """,
         "停止小面.bat": r"""@echo off
 chcp 65001 >nul
@@ -186,10 +202,11 @@ def main() -> int:
 
     # README at root
     (OUT / "先读我.txt").write_text(
-        "1. 双击「首次安装配置.bat」\n"
-        "2. 双击「启动小面.bat」\n"
-        "3. 浏览器里填写 API 后即可上传切片\n"
-        "详细步骤见：使用说明-操作指南.txt\n",
+        "只需双击「启动小面.bat」：\n"
+        "  · 第一次会自动安装配置（需联网）\n"
+        "  · 然后自动启动服务并打开网页\n"
+        "  · 在右侧填写 API 后即可上传切片\n"
+        "详细见：使用说明-操作指南.txt\n",
         encoding="utf-8",
     )
 

@@ -87,22 +87,45 @@ def test_build_plan_messages_is_ids_only_schema():
     assert '"ids"' in messages[0]["content"]
     assert "keep\":[{" not in messages[0]["content"]
     assert "why" not in messages[0]["content"]
-    # Hard DROP rules preserved + narrative optimization stacked
+    # Hard DROP rules preserved + clothing features first
     sys = messages[0]["content"]
     assert "尺码" in sys and ("价格" in sys or "发货" in sys)
     assert "直播" in sys or "控场" in sys
-    assert "上身" in sys or "面料特写" in sys
-    assert "全身效果" in sys
+    assert "服装特点" in sys or "版型" in sys
+    assert "面料" in sys
     user = messages[1]["content"]
     assert "只输出JSON" in user or "ids" in user
     assert "尺码" in user
-    assert "开场3秒" in user or "吸睛" in user
+    assert "服装特点" in user or "开头" in user
     assert "硬删" in user or "硬规则" in sys
     assert "c|" in user or "c" in user
     assert compact
     assert id_map
     # compact carries text only (no bulky t0/t1 forced into model echo)
     assert all("id" in c and "text" in c for c in compact)
+
+
+def test_repair_opens_with_clothing_features():
+    lines = [
+        {"utt_id": "u0", "text": "通勤日常都适合上班穿", "t0_ms": 0, "t1_ms": 3000},
+        {"utt_id": "u1", "text": "小个子梨形也能穿", "t0_ms": 3000, "t1_ms": 6000},
+        {"utt_id": "u2", "text": "收腰版型上身显瘦遮肉", "t0_ms": 6000, "t1_ms": 10000},
+        {"utt_id": "u3", "text": "面料超级软还不透气亲肤", "t0_ms": 10000, "t1_ms": 14000},
+        {"utt_id": "u4", "text": "细节蕾丝拼接做工精细", "t0_ms": 14000, "t1_ms": 18000},
+    ]
+    clauses = expand_lines_to_clauses(lines)
+    # Model returns scene-first order — repair must promote clothing features
+    obj = lp._repair_keep_ids(
+        {
+            "ids": [c["id"] for c in clauses],
+        },
+        clauses,
+    )
+    keep = obj["keep"]
+    assert keep
+    first = keep[0]["text"]
+    assert any(k in first for k in ("版型", "显瘦", "面料", "软", "收腰", "上身")), first
+    assert obj.get("_narrative") == "clothing_features_first"
 
 
 def test_rules_fallback_only_when_under_40s():
@@ -311,7 +334,7 @@ def test_repair_narrative_opens_with_onbody_or_fabric():
     scene_i = next((i for i, t in enumerate(texts) if "通勤" in t or "小个子" in t), None)
     if body_i is not None and scene_i is not None and body_i > 0:
         assert body_i <= scene_i
-    assert obj.get("_narrative") == "hook3s_body_craft_scene"
+    assert obj.get("_narrative") == "clothing_features_first"
 
 
 def test_normalize_llm_keep_obj_ids_only_and_numbers():

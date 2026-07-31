@@ -638,10 +638,11 @@ def _build_plan_messages(
     # Hard DROP rules stay first; narrative order is additive optimization.
     user_text = (
         f"目标约{int(target_seconds)}s。从候选选保留id并按播放顺序排列（约8-16个）。"
-        "【硬删·不可保留】尺码报码/胸围建议穿、价格拨分包邮、发货物流、"
+        "【硬删·不可保留】尺码报码/胸围建议穿、价格拨分包邮、发货物流、加一单催单、"
         "直播控场(家人们/扣1/准备一下/321)、人设标签灌鸡汤、与服装无关闲聊。"
-        "【结构优化】第1个id=开场3秒最吸睛上身效果或面料特写；"
-        "其后：全身效果→细节做工→穿搭场景(含适用人群)。\n"
+        "【结构·最重要】开头必须先放服装特点（版型/上身/面料/细节），"
+        "前几句就要讲清楚这件衣服好在哪；不要寒暄开场。"
+        "顺序：服装特点(版型+面料)→全身效果→细节做工→穿搭场景(含适用人群)。\n"
         "候选:\n"
         + "\n".join(lines)
         + '\n只输出JSON:{"ids":["c2","c3"],"hook":"visual"}'
@@ -649,9 +650,8 @@ def _build_plan_messages(
     system = (
         "你是服装短视频剪辑助手。只输出一个JSON对象。"
         "ids必须来自候选且原样复制。"
-        "硬规则(始终生效)：删尺码/价格发货/直播控场/人设鸡汤/无关闲聊。"
-        "结构优化(叠加)：开场3秒最吸睛上身或面料特写；"
-        "再全身效果→细节做工→穿搭场景。"
+        "硬规则：删尺码/价格发货/加一单/直播控场/人设鸡汤/无关闲聊。"
+        "开头先放服装特点（版型/面料/上身效果），再全身效果→细节→穿搭场景。"
         '格式:{"ids":["c2","c3","c4"],"hook":"visual"}'
     )
     messages = [
@@ -1005,24 +1005,26 @@ def _repair_keep_ids(obj: dict[str, Any], clauses: list[dict[str, Any]]) -> dict
         return "other"
 
     def _hook_attract_score(tx: str) -> float:
-        """Higher = better first 3s (on-body impact or fabric close-up)."""
+        """Higher = better opener: put clothing product features first."""
         t = tx or ""
         if (
             _is_control(t) or _is_size(t) or _is_price_or_shipping(t) or _is_persona_or_hype(t) or _is_policy_risk(t)
         ):
             return -100.0
         s = 0.0
-        # Prefer on-body / full-look impact first
-        if any(k in t for k in ("显瘦", "收腰", "遮肉", "上身", "全身", "版型", "修身", "比例", "高腰")):
-            s += 50.0
-        if any(k in t for k in ("面料", "特写", "超软", "软", "垂感", "不透", "凉感", "冰丝", "亲肤", "透气")):
-            s += 42.0
-        if any(k in t for k in ("对比", "两色", "成品", "穿上就")):
-            s += 18.0
-        s += min(20.0, float(_value_score(t)) * 2.0)
-        # Pain-only openers demoted relative to visual product hooks
-        if any(k in t for k in ("闷汗", "显壮", "显矮", "显土")) and s < 40:
-            s += 8.0
+        # Highest: concrete clothing features (what the garment is good at)
+        if any(k in t for k in ("版型", "面料", "布料", "材质", "显瘦", "收腰", "遮肉", "修身", "上身")):
+            s += 56.0
+        if any(k in t for k in ("超软", "软", "垂感", "不透", "凉感", "冰丝", "亲肤", "透气", "不起球", "抗皱")):
+            s += 48.0
+        if any(k in t for k in ("细节", "蕾丝", "拼接", "做工", "走线", "领口", "腰线")):
+            s += 36.0
+        if any(k in t for k in ("全身", "比例", "高腰", "对比", "两色", "穿上就")):
+            s += 22.0
+        s += min(24.0, float(_value_score(t)) * 2.2)
+        # Scene/audience alone is weaker as first line
+        if any(k in t for k in ("适合", "通勤", "日常", "小个子", "梨形", "微胖")) and s < 40:
+            s += 6.0
         return s
 
     def _total_ms() -> int:
@@ -1140,28 +1142,43 @@ def _repair_keep_ids(obj: dict[str, Any], clauses: list[dict[str, Any]]) -> dict
                 _add_clause(c, why="duration_fill_2", point=point)
 
     # Narrative order (not source chronology):
-    # opener 3s (best on-body/fabric) → body → craft/fabric → scene → other
+    # clothing features first (best product points) → body → craft/fabric → scene
     if fixed:
-        opener_idx = max(range(len(fixed)), key=lambda i: _hook_attract_score(str(fixed[i].get("text") or "")))
-        opener = fixed.pop(opener_idx)
-        opener = dict(opener)
-        opener["why"] = "3s_hook_onbody_or_fabric"
-        if not opener.get("point"):
-            opener["point"] = "吸睛钩子"
-        stage_rank = {"body": 0, "fabric": 1, "craft": 1, "scene": 2, "audience": 2, "other": 3, "fit": 0}
+        # Put top 1–2 feature lines first, then remaining by stage
+        ranked_idx = sorted(
+            range(len(fixed)),
+            key=lambda i: -_hook_attract_score(str(fixed[i].get("text") or "")),
+        )
+        openers: list[dict[str, Any]] = []
+        used_open: set[int] = set()
+        for i in ranked_idx:
+            if len(openers) >= 2:
+                break
+            tx = str(fixed[i].get("text") or "")
+            if _hook_attract_score(tx) < 30:
+                break
+            item = dict(fixed[i])
+            item["why"] = "open_clothing_feature"
+            if not item.get("point"):
+                item["point"] = "服装特点"
+            openers.append(item)
+            used_open.add(i)
+        rest_src = [fixed[i] for i in range(len(fixed)) if i not in used_open]
+        # After feature openers: more body/fit, then craft, then scene
+        stage_rank = {"body": 0, "fit": 0, "fabric": 1, "craft": 1, "scene": 2, "audience": 2, "other": 3}
         rest = sorted(
-            fixed,
+            rest_src,
             key=lambda x: (
                 stage_rank.get(_bucket(str(x.get("text") or "")), 3),
                 -_value_score(str(x.get("text") or "")),
                 int(x.get("t0_ms") or 0),
             ),
         )
-        fixed = [opener, *rest]
+        fixed = [*openers, *rest] if openers else rest
     obj["keep"] = fixed
     cov_final = _coverage()
     obj["_coverage"] = cov_final
-    obj["_narrative"] = "hook3s_body_craft_scene"
+    obj["_narrative"] = "clothing_features_first"
     if repaired or len(fixed) != len(keep):
         obj["_keep_repaired"] = True
         obj["_keep_raw_n"] = len(keep)
@@ -1584,7 +1601,7 @@ def plan_from_local_clauses(
         "input_clauses_raw": trim_stats.get("clauses_raw"),
         "clauses_sent": trim_stats.get("clauses_sent"),
         "trim_stats": trim_stats,
-        "narrative": "hook3s_body_craft_scene",
+        "narrative": "clothing_features_first",
     }
     plan = llm_obj_to_timeline(
         obj,

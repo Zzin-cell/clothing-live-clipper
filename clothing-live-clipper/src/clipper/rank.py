@@ -831,25 +831,31 @@ _OPENING_BAN_WORDS = (
 
 
 def _hook_open_score(c: Clip) -> float:
-    """Higher = better first-3s hook: on-body impact or fabric close-up only."""
+    """Higher = better opener: clothing product features first."""
     text = c.text or ""
     s = 0.0
-    # Prefer flashy product look, not pain rant or price welfare
-    if any(w in text for w in ("显瘦", "收腰", "遮肉", "上身", "全身", "版型", "修身", "比例", "高腰")):
-        s += 48.0
-    if any(w in text for w in ("面料", "特写", "超软", "软", "垂感", "不透", "凉感", "冰丝", "亲肤", "透气")):
-        s += 40.0
+    # Put garment selling points first (fit / fabric / craft)
+    if any(w in text for w in ("版型", "面料", "布料", "材质", "显瘦", "收腰", "遮肉", "修身", "上身")):
+        s += 52.0
+    if any(w in text for w in ("超软", "软", "垂感", "不透", "凉感", "冰丝", "亲肤", "透气", "不起球", "抗皱")):
+        s += 46.0
+    if any(w in text for w in ("细节", "蕾丝", "拼接", "做工", "走线", "领口", "腰线")):
+        s += 34.0
     if any(w in text for w in _VISUAL_HOOK_WORDS):
-        s += 16.0
-    # Mild bonus for pain only if already visual; never open with pure welfare
+        s += 14.0
+    # Scene alone is weaker as the absolute first line
+    if any(w in text for w in ("适合", "通勤", "日常", "小个子", "梨形", "微胖")):
+        s += 8.0 if s >= 30 else 2.0
     if any(w in text for w in _PAIN_HOOK_WORDS):
-        s += 10.0 if s >= 30 else 2.0
+        s += 6.0 if s >= 30 else 1.0
     if any(w in text for w in _WELFARE_HOOK_WORDS):
         s -= 40.0
     if _looks_like_live_room(text) or any(w in text for w in _OPENING_BAN_WORDS):
         s -= 100.0
     if any(p in text for p in _PRICE_TEXT) or any(p in text for p in _SIZE_TEXT):
         s -= 80.0
+    if any(p in text for p in _POLICY_RISK_TEXT):
+        s -= 90.0
     s += _hook_strength(c) * 0.30
     try:
         s += learned_text_score(text, for_hook=True) * 0.4

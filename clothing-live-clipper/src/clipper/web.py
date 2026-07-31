@@ -364,6 +364,37 @@ def create_app() -> FastAPI:
         )
         return meta
 
+    def _download_name(job_id: str, filename: str) -> str:
+        """
+        Browser download filename.
+        final.mp4 / preview.mp4 → {original_stem}final.mp4 / {original_stem}preview.mp4
+        e.g. 连衣裙.mp4 → 连衣裙final.mp4
+        """
+        meta_path = _job_dir(job_id) / "job_meta.json"
+        src = ""
+        try:
+            if meta_path.exists():
+                meta = _read_json(meta_path)
+                src = str(meta.get("video_source") or "").strip()
+        except Exception:
+            src = ""
+        stem = Path(src).stem if src else ""
+        # sanitize for Content-Disposition / Windows-ish downloads
+        if stem:
+            bad = '<>:"/\\|?*\n\r\t'
+            stem = "".join("_" if c in bad else c for c in stem).strip(" .")
+            stem = stem[:80] if stem else ""
+        if not stem:
+            stem = str(job_id)
+        if filename == "final.mp4":
+            return f"{stem}final.mp4"
+        if filename == "preview.mp4":
+            return f"{stem}preview.mp4"
+        # other artifacts: prefix original stem for clarity
+        if stem and filename:
+            return f"{stem}_{filename}"
+        return filename
+
     @app.get("/api/jobs/{job_id}/files/{filename}")
     def get_job_file(job_id: str, filename: str) -> FileResponse:
         allowed = {
@@ -388,7 +419,8 @@ def create_app() -> FastAPI:
             ".json": "application/json",
             ".md": "text/markdown; charset=utf-8",
         }.get(path.suffix.lower(), "application/octet-stream")
-        return FileResponse(path, media_type=media, filename=filename)
+        download_as = _download_name(job_id, filename)
+        return FileResponse(path, media_type=media, filename=download_as)
 
     async def _save_upload(upload: UploadFile | None, dest: Path) -> None:
         if upload is None:

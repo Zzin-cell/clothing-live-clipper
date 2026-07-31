@@ -1468,14 +1468,18 @@ function renderJob(data) {
 
   // actions
   const actions = [];
+  const srcName = String(data.video_source || data.job_id || "video");
+  const srcStem = srcName.replace(/\.[^.\\/]+$/, "").replace(/[<>:"/\\|?*\u0000-\u001f]/g, "_").trim() || "video";
+  const dlFinal = `${srcStem}final.mp4`;
+  const dlPreview = `${srcStem}preview.mp4`;
   if (files.preview) {
     actions.push(
-      `<a class="jy-btn" href="/api/jobs/${encodeURIComponent(data.job_id)}/files/preview.mp4" download>下载预览</a>`
+      `<a class="jy-btn" href="/api/jobs/${encodeURIComponent(data.job_id)}/files/preview.mp4" download="${escapeHtml(dlPreview)}">下载预览</a>`
     );
   }
   if (files.final) {
     actions.push(
-      `<a class="jy-btn primary" href="/api/jobs/${encodeURIComponent(data.job_id)}/files/final.mp4" download>下载成片</a>`
+      `<a class="jy-btn primary" href="/api/jobs/${encodeURIComponent(data.job_id)}/files/final.mp4" download="${escapeHtml(dlFinal)}">下载成片</a>`
     );
   }
   if (files.plan || files.final || files.preview) {

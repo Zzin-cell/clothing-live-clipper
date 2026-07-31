@@ -105,6 +105,94 @@ def test_build_plan_messages_is_ids_only_schema():
     assert all("id" in c and "text" in c for c in compact)
 
 
+def test_rules_fallback_only_when_under_40s():
+    """Cloud path under ~40s final may yield to longer rules; >=40s keeps cloud."""
+    # Build material with plenty of clothing lines so all paths non-empty
+    lines = []
+    samples = [
+        "收腰版型上身显瘦遮肉",
+        "面料超级软还不透气亲肤",
+        "小个子梨形通勤也适合",
+        "垂感很好日常穿舒服",
+        "细节蕾丝拼接做工精细",
+        "家人们扣1点关注",
+        "今天199包邮加一单",
+    ]
+    for i in range(24):
+        lines.append(
+            {
+                "utt_id": f"u{i}",
+                "text": samples[i % len(samples)] if i % 6 != 5 else f"上身效果真的显瘦很舒服{i}",
+                "t0_ms": i * 3500,
+                "t1_ms": i * 3500 + 3200,
+            }
+        )
+
+    from clipper.models import TimelinePlan, PlanSlot
+
+    short_slots = [
+        PlanSlot(clip_id="c1", role="story", t0_ms=0, t1_ms=20_000, text="收腰版型显瘦", score=50),
+        PlanSlot(clip_id="c2", role="story", t0_ms=20_000, t1_ms=35_000, text="面料超软", score=40),
+    ]
+    # source ms @1.4x → final 35s/1.4≈25s under 40s
+    short_plan = TimelinePlan(
+        target_duration_s=60,
+        golden=short_slots,
+        trust=[],
+        cta=[],
+        total_duration_ms=35_000,
+        golden_weight_ratio=1.0,
+        golden20_passed=True,
+        warnings=[],
+    )
+    long_slots = [
+        PlanSlot(clip_id=f"r{i}", role="story", t0_ms=i * 6000, t1_ms=i * 6000 + 5500, text=f"版型面料适合{i}", score=30)
+        for i in range(16)
+    ]
+    long_plan = TimelinePlan(
+        target_duration_s=60,
+        golden=long_slots,
+        trust=[],
+        cta=[],
+        total_duration_ms=88_000,
+        golden_weight_ratio=1.0,
+        golden20_passed=True,
+        warnings=[],
+    )
+
+    # Case A: cloud short → rules should win if longer
+    with patch("clipper.llm_plan.call_llm_for_plan", return_value={"keep": [], "_clauses": [], "_meta": {"model": "Qwen/Qwen2.5-7B-Instruct"}}):
+        with patch("clipper.llm_plan.llm_obj_to_timeline", return_value=short_plan):
+            with patch("clipper.llm_plan.plan_from_local_clauses", return_value=(short_plan, {"_meta": {"model": "local_clause_rank"}})):
+                with patch("clipper.rank.build_timeline_plan", return_value=long_plan):
+                    plan, obj = lp.plan_from_asr_with_llm(lines, target_seconds=60, playback_speed=1.4)
+    assert (obj.get("_meta") or {}).get("chosen_path") == "rules_duration"
+    assert plan.total_duration_ms >= 80_000
+
+    # Case B: cloud already ~50s final (source 70s) → keep cloud, not rules
+    ok_slots = [
+        PlanSlot(clip_id=f"k{i}", role="story", t0_ms=i * 5000, t1_ms=i * 5000 + 4800, text=f"显瘦面料{i}", score=40)
+        for i in range(15)
+    ]
+    ok_plan = TimelinePlan(
+        target_duration_s=60,
+        golden=ok_slots,
+        trust=[],
+        cta=[],
+        total_duration_ms=70_000,  # final ≈50s @1.4x
+        golden_weight_ratio=1.0,
+        golden20_passed=True,
+        warnings=[],
+    )
+    with patch("clipper.llm_plan.call_llm_for_plan", return_value={"keep": [{"id": "c1"}], "_clauses": [], "_meta": {"model": "Qwen/Qwen2.5-7B-Instruct"}}):
+        with patch("clipper.llm_plan.llm_obj_to_timeline", return_value=ok_plan):
+            with patch("clipper.llm_plan.plan_from_local_clauses", return_value=(short_plan, {"_meta": {"model": "local_clause_rank"}})):
+                with patch("clipper.rank.build_timeline_plan", return_value=long_plan):
+                    plan2, obj2 = lp.plan_from_asr_with_llm(lines, target_seconds=60, playback_speed=1.4)
+    assert (obj2.get("_meta") or {}).get("chosen_path") == "cloud_or_repaired"
+    assert plan2.total_duration_ms == 70_000
+
+
 def test_live_deal_call_dropped_jia_yi_dan():
     from clipper.llm_plan import _is_control, _is_price_or_shipping
 

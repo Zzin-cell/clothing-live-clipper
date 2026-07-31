@@ -1609,14 +1609,16 @@ def plan_from_asr_with_llm(
     Returns (plan, debug_obj).
 
     Priority:
-    1) cloud LLM keep (repaired)
-    2) if too short / missing fit-fabric-audience and rules can do better duration → hybrid
-    3) local clause fill
+    1) cloud LLM keep (repaired) when available
+    2) local clause fill when cloud fails
+    3) rules_duration ONLY when the preferred path is still under ~40s final
+       (too short for publish), and rules actually has more usable duration
     """
     sp = playback_speed if playback_speed and playback_speed > 0 else 1.4
     aim_src = int(round(target_seconds * 1000 * sp))  # ~84s for 60s@1.4x
-    # Prefer candidates that can make final >= 50s after speed
-    min_ok_src = max(int(round(50_000 * sp)), int(aim_src * 0.85))
+    # Soft target around 55–60s final; rules fallback only triggers under 40s final
+    min_ok_src = max(int(round(40_000 * sp)), int(aim_src * 0.70))
+    rules_only_if_final_under_s = 40.0
 
     cloud_err: str | None = None
     plan: TimelinePlan | None = None
@@ -1639,6 +1641,8 @@ def plan_from_asr_with_llm(
             if clauses:
                 obj2 = _repair_keep_ids({"keep": []}, clauses)
                 obj2["_clauses"] = clauses
+                if isinstance(obj.get("_clauses_raw"), list):
+                    obj2["_clauses_raw"] = obj.get("_clauses_raw")
                 plan = llm_obj_to_timeline(
                     obj2,
                     lines,
@@ -1658,7 +1662,7 @@ def plan_from_asr_with_llm(
         lines, target_seconds=target_seconds, playback_speed=playback_speed
     )
 
-    # Rules plan for duration when ASR is sparse on keywords
+    # Rules plan only used if primary path is critically short (<40s final)
     rules_plan = None
     try:
         from clipper.config import Settings as _Settings
@@ -1722,11 +1726,9 @@ def plan_from_asr_with_llm(
         cov = _cov(p)
         cov_n = int(cov["fit"]) + int(cov["fabric"]) + int(cov["audience"])
         dur = int(p.total_duration_ms or 0)
-        final_s = dur / 1000.0 / sp if sp > 0 else dur / 1000.0
-        # Strong penalty under 50s final; reward filling toward target
-        under50 = max(0.0, 50.0 - final_s)
-        dur_score = min(dur, aim_src) - max(0, min_ok_src - dur) * 2 - int(under50 * 8000)
-        return (0 if under50 > 0.05 else 1, cov_n, dur_score, len(p.golden), dur)
+        # Prefer coverage + closer-to-target duration; no hard 50s path-switch
+        dur_score = min(dur, aim_src) - max(0, min_ok_src - dur)
+        return (cov_n, dur_score, len(p.golden), dur)
 
     candidates: list[tuple[str, TimelinePlan, dict[str, Any]]] = []
     if plan is not None and plan.golden:
@@ -1742,65 +1744,81 @@ def plan_from_asr_with_llm(
         meta["cloud_error"] = cloud_err
         lo["_meta"] = meta
         candidates.append(("local_clause_rank", local_plan, lo))
-    if rules_plan is not None and rules_plan.golden:
-        candidates.append(
-            (
-                "rules_duration",
-                rules_plan,
-                {
-                    "product_summary": "规则时长兜底",
-                    "main_points": ["版型", "面料", "适用人群"],
-                    "keep": [],
-                    "_meta": {
-                        "model": "rules_duration_fallback",
-                        "submit_mode": "rules_after_short_llm",
-                        "cloud_error": cloud_err,
-                    },
-                },
-            )
-        )
 
-    if not candidates:
+    # Prefer cloud > local first (quality path), ignore rules for now
+    primary: list[tuple[str, TimelinePlan, dict[str, Any]]] = [
+        c for c in candidates if c[0] in {"cloud_or_repaired", "local_clause_rank"}
+    ]
+    if primary:
+        def _primary_pick(item: tuple[str, TimelinePlan, dict[str, Any]]) -> tuple:
+            name, p, _o = item
+            base = _score(p)
+            # Always prefer cloud when present and non-empty
+            path_bonus = 3 if name == "cloud_or_repaired" else 1
+            return (*base, path_bonus)
+
+        best_name, best_plan, best_obj = max(primary, key=_primary_pick)
+    elif candidates:
+        best_name, best_plan, best_obj = max(candidates, key=lambda x: _score(x[1]))
+    else:
+        best_name = best_plan = best_obj = None  # type: ignore[assignment]
+
+    # Rules only when preferred path is critically short (<40s final)
+    if (
+        rules_plan is not None
+        and rules_plan.golden
+        and (
+            best_plan is None
+            or not best_plan.golden
+            or _final_s(best_plan) + 0.05 < rules_only_if_final_under_s
+        )
+    ):
+        rules_candidate = (
+            "rules_duration",
+            rules_plan,
+            {
+                "product_summary": "规则时长兜底",
+                "main_points": ["版型", "面料", "适用人群"],
+                "keep": [],
+                "_meta": {
+                    "model": "rules_duration_fallback",
+                    "submit_mode": "rules_only_if_under_40s",
+                    "cloud_error": cloud_err,
+                    "rules_trigger_final_s": round(_final_s(best_plan), 2) if best_plan else None,
+                },
+            },
+        )
+        candidates.append(rules_candidate)
+        if best_plan is None or not best_plan.golden:
+            best_name, best_plan, best_obj = rules_candidate
+        else:
+            # Take rules only if it is meaningfully longer
+            if int(rules_plan.total_duration_ms or 0) > int(best_plan.total_duration_ms or 0) + 2000:
+                best_name, best_plan, best_obj = rules_candidate
+            # else keep cloud/local even if short material is limited
+
+    if best_plan is None or not best_plan.golden:
         raise RuntimeError(cloud_err or "llm_plan_has_no_slots")
 
-    def _pick_score(item: tuple[str, TimelinePlan, dict[str, Any]]) -> tuple:
-        name, p, _o = item
-        base = _score(p)
-        meets50 = base[0] == 1
-        # Cloud wins only if already >=50s final; otherwise prefer longer local/rules
-        if name == "cloud_or_repaired" and meets50 and base[1] >= 2:
-            return (1, base[1] + 1, base[2] + aim_src // 5, base[3], base[4], 3)
-        if name == "cloud_or_repaired" and meets50:
-            return (1, *base[1:], 2)
-        if name == "cloud_or_repaired":
-            return (0, *base[1:], 1)
-        if name == "local_clause_rank":
-            return (1 if meets50 else 0, *base[1:], 1)
-        # rules_duration: use for length when cloud is short
-        return (1 if meets50 else 0, *base[1:], 2 if not meets50 else 0)
-
-    best_name, best_plan, best_obj = max(candidates, key=_pick_score)
-    # Absolute guard: if winner still <50s but another path is longer, take the longest eligible
-    if _final_s(best_plan) + 0.05 < 50.0:
-        longer = max(candidates, key=lambda it: int(it[1].total_duration_ms or 0))
-        if int(longer[1].total_duration_ms or 0) > int(best_plan.total_duration_ms or 0):
-            best_name, best_plan, best_obj = longer
     meta = dict(best_obj.get("_meta") or {})
     meta["chosen_path"] = best_name
     meta["cloud_error"] = cloud_err
+    meta["rules_threshold_final_s"] = rules_only_if_final_under_s
     meta["candidate_scores"] = {
         name: {
             "slots": len(p.golden or []),
             "ms": int(p.total_duration_ms or 0),
+            "final_s": round(_final_s(p), 2),
             "cov": _cov(p),
             "score": _score(p),
-            "pick": _pick_score((name, p, o)),
         }
-        for name, p, o in candidates
+        for name, p, _o in candidates
     }
     best_obj["_meta"] = meta
     # ensure warnings mark path
     best_plan.warnings = list(best_plan.warnings or []) + [f"policy:plan_path:{best_name}"]
     if cloud_err:
         best_plan.warnings.append(f"cloud_error:{cloud_err[:120]}")
+    if best_name == "rules_duration":
+        best_plan.warnings.append("policy:rules_only_if_under_40s")
     return best_plan, best_obj

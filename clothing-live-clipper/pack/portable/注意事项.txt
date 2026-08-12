@@ -1,3 +1,17 @@
+【超全量便携版】
+
+预置听写模型：whisper-medium、whisper-small、whisper-tiny
+
+预置工具：ffmpeg
+
+预置 Python：tools\python\python.exe（空白机无需安装系统 Python）
+
+LLM：不预置 Key；空白电脑在网页右侧填写 Base URL + API Key，点「自动匹配」后即可使用。
+
+首次双击「启动小面.bat」会用内置 python.exe 创建虚拟环境并装依赖；模型已预置时听写可离线。
+
+
+
 注意事项（请务必阅读）
 ======================
 

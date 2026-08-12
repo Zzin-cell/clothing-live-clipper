@@ -204,11 +204,23 @@ body {
 /* Hide everything under the header so collapse never looks like an empty content area */
 .jy-panel.collapsed .jy-transcript,
 .jy-panel.collapsed .jy-panel-body,
-.jy-panel.collapsed .jy-track-tools {
+.jy-panel.collapsed .jy-track-tools,
+.jy-panel.collapsed .llm-form,
+.jy-panel.collapsed .llm-panel-body {
   display: none !important;
 }
 .jy-panel.collapsed .jy-panel-head {
   margin-bottom: 0;
+}
+.jy-panel-head-collapsible {
+  cursor: pointer;
+  user-select: none;
+}
+.jy-panel-llm .jy-panel-head {
+  gap: 8px;
+}
+.jy-panel-llm .llm-panel-body {
+  padding-top: 2px;
 }
 .muted { color: var(--muted); font-weight: 500; font-size: 12px; }
 
@@ -226,6 +238,57 @@ body {
 .jy-drop-icon { font-size: 22px; color: var(--accent); }
 .jy-drop-text { font-size: 13px; }
 .jy-drop-sub { font-size: 12px; color: var(--muted); text-align: center; word-break: break-all; }
+.jy-error {
+  color: #b91c1c;
+  font-size: 12px;
+  margin: 8px 0 0;
+  line-height: 1.45;
+  word-break: break-word;
+}
+.jy-job-list {
+  margin-top: 10px;
+  max-height: 180px;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.jy-job-item {
+  border: 1px solid var(--line, #e2e8f0);
+  border-radius: 10px;
+  padding: 8px 10px;
+  cursor: pointer;
+  background: #fff;
+  font-size: 12px;
+}
+.jy-job-item:hover, .jy-job-item.active {
+  border-color: var(--accent, #0ea5b7);
+  background: #f0fdff;
+}
+.jy-job-item .t {
+  font-weight: 600;
+  color: #0f172a;
+  word-break: break-all;
+}
+.jy-job-item .s {
+  color: var(--muted, #64748b);
+  margin-top: 2px;
+}
+.jy-learn-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding: 6px 12px 0;
+}
+.jy-learn-bar .jy-switch {
+  gap: 6px;
+  font-size: 12px;
+  color: #0f172a;
+}
+.jy-learn-bar .muted {
+  font-size: 11px;
+}
 
 .jy-form {
   display: flex;
@@ -693,13 +756,48 @@ body {
 .jy-clip.drag-over-right {
   box-shadow: inset 0 -3px 0 #00c2c7;
 }
+/* legacy class kept; no longer used for drop (insert only) */
 .jy-clip.drag-over-replace {
-  outline: 2px solid #2f7bff;
-  box-shadow: 0 0 0 4px rgba(47, 123, 255, 0.15);
+  outline: none;
+  box-shadow: none;
+}
+.jy-track-body.drag-over {
+  border-color: rgba(0, 194, 199, 0.75);
+  background: #ecfeff;
+  box-shadow: inset 0 0 0 1px rgba(8, 145, 178, 0.18);
 }
 .jy-clip.hook { background: linear-gradient(180deg, #ecfdf5, #d1fae5); border-color: #86efac; color: #14532d; }
 .jy-clip.trust { background: linear-gradient(180deg, #f0f9ff, #e0f2fe); border-color: #7dd3fc; color: #0c4a6e; }
 .jy-clip.cta { background: linear-gradient(180deg, #f5f3ff, #ede9fe); border-color: #c4b5fd; color: #4c1d95; }
+/* Right: logical plan cards */
+.jy-clip.story {
+  background: linear-gradient(180deg, #ecfeff, #cffafe);
+  border-color: #67e8f9;
+  color: #155e75;
+  box-shadow: 0 1px 0 rgba(8, 145, 178, 0.08);
+}
+/* Left: free source utterances (not yet in plan) */
+.jy-clip.asr-card.asr-source {
+  background: linear-gradient(180deg, #fffbeb, #fef3c7);
+  border-color: #fcd34d;
+  color: #78350f;
+}
+/* Left: already added to plan — match right story color */
+.jy-clip.asr-card.asr-in-plan {
+  background: linear-gradient(180deg, #ecfeff, #cffafe);
+  border-color: #67e8f9;
+  color: #155e75;
+  box-shadow: inset 3px 0 0 #0891b2;
+}
+.jy-clip.asr-card.asr-in-plan .clip-badge::after {
+  content: " · 已加入";
+  font-weight: 700;
+  opacity: 0.9;
+}
+.jy-clip.asr-card.asr-in-plan .asr-add-golden,
+.jy-clip.asr-card.asr-in-plan .asr-add-one {
+  opacity: 0.85;
+}
 .jy-clip .clip-top {
   display: flex;
   align-items: center;
@@ -774,16 +872,58 @@ body {
 .jy-clip .meta { color: #64748b; font-size: 11px; margin-top: 4px; }
 .jy-clip .clip-drag {
   color: #94a3b8;
-  font-size: 14px;
+  font-size: 16px;
   line-height: 1;
   cursor: grab;
+  padding: 4px 6px;
+  border-radius: 6px;
+  user-select: none;
+  -webkit-user-select: none;
+  touch-action: none;
+}
+.jy-clip .clip-drag:hover {
+  background: rgba(8, 145, 178, 0.12);
+  color: #0e7490;
+}
+.jy-clip .clip-order-btns {
+  display: inline-flex;
+  gap: 4px;
+  margin-left: auto;
+}
+.jy-clip .clip-order-btns .clip-up,
+.jy-clip .clip-order-btns .clip-down {
+  width: 24px;
+  height: 22px;
+  border: 1px solid #cbd5e1;
+  border-radius: 6px;
+  background: #fff;
+  color: #334155;
+  font-size: 12px;
+  line-height: 20px;
+  padding: 0;
+  cursor: pointer;
+}
+.jy-clip .clip-order-btns .clip-up:hover,
+.jy-clip .clip-order-btns .clip-down:hover {
+  border-color: #0891b2;
+  color: #0e7490;
+  background: #ecfeff;
+}
+.jy-clip .clip-order-btns .clip-up:disabled,
+.jy-clip .clip-order-btns .clip-down:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
 }
 .jy-clip .clip-x {
-  margin-left: auto;
+  margin-left: 4px;
   width: 22px; height: 22px; border: 0; border-radius: 50%;
   background: rgba(15,23,42,.55); color: #fff; cursor: pointer; font-size: 13px; line-height: 22px;
 }
 .jy-clip .clip-x:hover { background: #ef4444; }
+/* when no order buttons (asr cards), keep delete/add on the right */
+.jy-clip.asr-card .clip-x {
+  margin-left: auto;
+}
 .jy-clip .clip-tools {
   display: flex; gap: 6px; margin-top: 8px; flex-wrap: wrap;
 }
@@ -947,3 +1087,40 @@ body {
   }
   .jy-player { max-height: 50vh; }
 }
+
+/* plan head: learn controls sit beside 保存并重剪 */
+.jy-panel-head-plan {
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.jy-head-actions-plan {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-left: auto;
+  max-width: 100%;
+}
+.jy-learn-inline {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: #334155;
+  white-space: nowrap;
+  user-select: none;
+}
+.jy-learn-inline input {
+  width: 14px;
+  height: 14px;
+  margin: 0;
+}
+#plan-edit-hint {
+  max-width: 180px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+#learn-stat:empty { display: none; }
+

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import uuid
 from datetime import datetime, timezone
@@ -19,6 +20,14 @@ from clipper.pipeline import run_pipeline
 from clipper.system_status import build_status, run_probe
 from clipper.whisper_asr import ASRError, transcribe_video_to_json
 from pydantic import BaseModel, Field
+
+try:
+    from clipper.job_queue import QUEUE, start_model_warmup_async
+except Exception:  # pragma: no cover
+    QUEUE = None  # type: ignore
+
+    def start_model_warmup_async() -> None:  # type: ignore
+        return None
 
 APP_ROOT = Path(__file__).resolve().parents[2]
 STATIC_DIR = Path(__file__).resolve().parent / "static"
@@ -75,8 +84,8 @@ class PlanEditBody(BaseModel):
     trust: list[dict] = Field(default_factory=list)
     cta: list[dict] = Field(default_factory=list)
     reclip: bool = True
-    # Plan D: user chooses whether this reverse-cut should train global ranking
-    learn: bool = False
+    # Default ON: reverse-cut auto-learns global ranking unless client sends learn=false
+    learn: bool = True
 
 
 def _utc_now() -> str:
@@ -88,13 +97,67 @@ def _job_dir(job_id: str) -> Path:
 
 
 def _read_json(path: Path) -> Any:
-    return json.loads(path.read_text(encoding="utf-8"))
+    """Read JSON with brief retries (writers may replace file atomically)."""
+    last_err: Exception | None = None
+    for i in range(8):
+        try:
+            text = path.read_text(encoding="utf-8")
+            if not text.strip():
+                raise json.JSONDecodeError("empty", text, 0)
+            return json.loads(text)
+        except (OSError, json.JSONDecodeError) as e:
+            last_err = e
+            if i < 7:
+                import time
+
+                time.sleep(0.02 * (i + 1))
+                continue
+            raise
+    if last_err:
+        raise last_err
+    raise RuntimeError(f"failed to read json: {path}")
 
 
 def _write_meta(d: Path, meta: dict) -> None:
-    (d / "job_meta.json").write_text(
-        json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8"
-    )
+    """Atomic write with Windows-friendly retries (WinError 32 share violations)."""
+    import time
+    import uuid as _uuid
+
+    d.mkdir(parents=True, exist_ok=True)
+    path = d / "job_meta.json"
+    data = json.dumps(meta, ensure_ascii=False, indent=2)
+    last_err: Exception | None = None
+    for i in range(12):
+        tmp = d / f"job_meta.{_uuid.uuid4().hex}.tmp"
+        try:
+            tmp.write_text(data, encoding="utf-8")
+            os.replace(tmp, path)
+            return
+        except PermissionError as e:
+            last_err = e
+            try:
+                if tmp.exists():
+                    tmp.unlink()
+            except OSError:
+                pass
+            time.sleep(0.02 * (i + 1))
+        except OSError as e:
+            last_err = e
+            try:
+                if tmp.exists():
+                    tmp.unlink()
+            except OSError:
+                pass
+            # Fallback: direct write if replace keeps failing
+            if i >= 8:
+                try:
+                    path.write_text(data, encoding="utf-8")
+                    return
+                except OSError as e2:
+                    last_err = e2
+            time.sleep(0.02 * (i + 1))
+    if last_err:
+        raise last_err
 
 
 def _safe_name(name: str | None, default: str) -> str:
@@ -165,6 +228,23 @@ def create_app() -> FastAPI:
     if STATIC_DIR.exists():
         app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
+    @app.on_event("startup")
+    def _startup_warmup() -> None:
+        # Non-fatal: preloads whisper for first real job; stabilizes LAN multi-user waits.
+        try:
+            start_model_warmup_async()
+        except Exception:
+            pass
+
+    @app.get("/api/queue")
+    def api_queue() -> dict[str, Any]:
+        if QUEUE is None:
+            return {"ok": False, "error": "queue_unavailable"}
+        try:
+            return {"ok": True, "queue": QUEUE.snapshot()}
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
     @app.get("/", response_class=HTMLResponse)
     def index() -> HTMLResponse:
         index_path = STATIC_DIR / "index.html"
@@ -179,6 +259,12 @@ def create_app() -> FastAPI:
         a = asr_status()
         l = llm_status()
         st = build_status()
+        q: dict[str, Any] = {}
+        try:
+            if QUEUE is not None:
+                q = QUEUE.snapshot()
+        except Exception:
+            q = {}
         return {
             "ok": True,
             "ffmpeg": bool(which_ffmpeg()),
@@ -194,6 +280,10 @@ def create_app() -> FastAPI:
                 "llm_plan_ready": bool(l.get("plan_ready")),
                 "has_llm_key": bool(l.get("has_key")),
             },
+            # deploy alignment for frontend hard-refresh check
+            "queue_build": q.get("queue_build"),
+            "ui_build_expected": q.get("ui_build_expected") or "jy71-learn-all-paths",
+            "avg_job_s": q.get("avg_job_s"),
             "time": _utc_now(),
         }
 
@@ -325,10 +415,25 @@ def create_app() -> FastAPI:
             )
             for d in dirs[: max(1, min(limit, 100))]:
                 meta_path = d / "job_meta.json"
+                item: dict[str, Any]
                 if meta_path.exists():
-                    jobs.append(_read_json(meta_path))
+                    try:
+                        raw = _read_json(meta_path)
+                        item = raw if isinstance(raw, dict) else {"job_id": d.name, "status": "unknown"}
+                    except Exception as e:
+                        item = {
+                            "job_id": d.name,
+                            "status": "unknown",
+                            "error": f"meta_read_failed:{e}",
+                        }
                 else:
-                    jobs.append({"job_id": d.name, "status": "unknown"})
+                    item = {"job_id": d.name, "status": "unknown"}
+                # Always ensure job_id is present (UI/history depends on it)
+                if not item.get("job_id"):
+                    item["job_id"] = d.name
+                item["has_final"] = bool(item.get("has_final") or (d / "final.mp4").exists())
+                item["has_preview"] = bool(item.get("has_preview") or (d / "preview.mp4").exists())
+                jobs.append(item)
         return {"jobs": jobs}
 
     @app.get("/api/jobs/{job_id}")
@@ -561,10 +666,13 @@ def create_app() -> FastAPI:
         except Exception as e:  # noqa: BLE001
             raise HTTPException(status_code=500, detail=f"保存视频失败: {e}") from e
 
+        now = _utc_now()
         meta: dict[str, Any] = {
             "job_id": job_id,
             "status": "queued",
-            "created_at": _utc_now(),
+            "created_at": now,
+            "queued_at": now,
+            "queue_wait_s": 0,
             "target_seconds": target_seconds,
             "render_requested": bool(render),
             "error": None,
@@ -574,22 +682,39 @@ def create_app() -> FastAPI:
             "video_source": video.filename,
             "progress": 0,
             "stage": "queued",
-            "user_hint": "上传后自动听写打轴并切片，无需 Agent",
+            "stage_detail": "已入队，等待调度",
+            "user_hint": "上传后自动听写打轴并切片；繁忙时排队等待",
         }
         _write_meta(d, meta)
 
-        # Fire-and-forget local worker (ASR + clipper)
+        # Fire-and-forget local worker (ASR + clipper).
+        # Important: after start_job_async the queue may already rewrite job_meta.
+        # Do NOT blindly overwrite status/stage back to "processing/starting".
         if auto_process:
             started = start_job_async(d)
-            meta = _read_json(d / "job_meta.json")
-            meta["auto_started"] = bool(started)
-            if started:
-                meta["status"] = "processing"
-                meta["stage"] = "starting"
-                meta["progress"] = 1
-            _write_meta(d, meta)
+            try:
+                disk = _read_json(d / "job_meta.json")
+                if isinstance(disk, dict):
+                    disk["auto_started"] = bool(started)
+                    # only fill missing hints; keep queue_pos / stage_detail from scheduler
+                    if not disk.get("video_source"):
+                        disk["video_source"] = meta.get("video_source")
+                    if disk.get("progress") in (None, 0) and started:
+                        disk["progress"] = max(1, int(disk.get("progress") or 1))
+                    _write_meta(d, disk)
+                    meta = disk
+                else:
+                    meta["auto_started"] = bool(started)
+                    _write_meta(d, meta)
+            except Exception:
+                # queue already owns meta; response can still use in-memory
+                meta["auto_started"] = bool(started)
 
-        return get_job(job_id)
+        # Prefer fresh disk meta if worker already progressed; fall back safely.
+        try:
+            return get_job(job_id)
+        except Exception:
+            return meta
 
     @app.post("/api/jobs/{job_id}/retry")
     def retry_job(job_id: str) -> dict[str, Any]:
@@ -740,8 +865,9 @@ def create_app() -> FastAPI:
             json.dumps(plan, ensure_ascii=False, indent=2), encoding="utf-8"
         )
 
-        # Plan D: optional learn from human reverse-edit (user toggle)
-        learn_flag = bool(getattr(body, "learn", False))
+        # Plan D: learn reverse-edit into global preferences.
+        # Product policy now defaults to auto-learn on reclip; client can still send learn=false to skip.
+        learn_flag = bool(getattr(body, "learn", True))
         if learn_flag:
             try:
                 prefs = record_plan_feedback(

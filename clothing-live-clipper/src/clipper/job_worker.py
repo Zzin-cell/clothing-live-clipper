@@ -25,13 +25,16 @@ if _ffbin.exists():
 
 _lock = threading.Lock()
 _running: set[str] = set()
-# Whisper/CUDA model load+infer is safest serialized; other stages can run concurrent.
+# Legacy locks kept as fallback; stable LAN mode uses job_queue slot semaphores.
 _asr_lock = threading.Lock()
-# SiliconFlow plan calls also need serialization — parallel plan requests often
-# time out even when single-thread ping/plan works.
 _llm_lock = threading.Lock()
-# allow many jobs in parallel (non-ASR stages overlap)
-_MAX_CONCURRENT_JOBS = int(os.environ.get("CLIPPER_MAX_CONCURRENT_JOBS") or "4")
+# Default lower for LAN stability; throughput mode / env can raise.
+_MAX_CONCURRENT_JOBS = int(os.environ.get("CLIPPER_MAX_CONCURRENT_JOBS") or "2")
+
+try:
+    from clipper.job_queue import QUEUE as _JOB_QUEUE
+except Exception:  # pragma: no cover
+    _JOB_QUEUE = None  # type: ignore
 
 
 def _utc_now() -> str:
@@ -39,16 +42,73 @@ def _utc_now() -> str:
 
 
 def _write_meta(job_dir: Path, meta: dict[str, Any]) -> None:
-    (job_dir / "job_meta.json").write_text(
-        json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8"
-    )
+    """Atomic write with Windows-friendly retries (WinError 32 share violations)."""
+    import time
+    import uuid as _uuid
+
+    job_dir.mkdir(parents=True, exist_ok=True)
+    path = job_dir / "job_meta.json"
+    data = json.dumps(meta, ensure_ascii=False, indent=2)
+    last_err: Exception | None = None
+    for i in range(12):
+        tmp = job_dir / f"job_meta.{_uuid.uuid4().hex}.tmp"
+        try:
+            tmp.write_text(data, encoding="utf-8")
+            os.replace(tmp, path)
+            return
+        except PermissionError as e:
+            last_err = e
+            try:
+                if tmp.exists():
+                    tmp.unlink()
+            except OSError:
+                pass
+            time.sleep(0.02 * (i + 1))
+        except OSError as e:
+            last_err = e
+            try:
+                if tmp.exists():
+                    tmp.unlink()
+            except OSError:
+                pass
+            if i >= 8:
+                try:
+                    path.write_text(data, encoding="utf-8")
+                    return
+                except OSError as e2:
+                    last_err = e2
+            time.sleep(0.02 * (i + 1))
+    if last_err:
+        # last resort: don't crash worker meta updates hard in production path
+        try:
+            path.write_text(data, encoding="utf-8")
+            return
+        except OSError:
+            raise last_err
 
 
 def _read_meta(job_dir: Path) -> dict[str, Any]:
     p = job_dir / "job_meta.json"
     if not p.exists():
         return {}
-    return json.loads(p.read_text(encoding="utf-8"))
+    last_err: Exception | None = None
+    for i in range(8):
+        try:
+            text = p.read_text(encoding="utf-8")
+            if not text.strip():
+                raise json.JSONDecodeError("empty job_meta", text, 0)
+            return json.loads(text)
+        except (OSError, json.JSONDecodeError) as e:
+            last_err = e
+            if i < 7:
+                import time
+
+                time.sleep(0.02 * (i + 1))
+                continue
+    # Corrupted/empty meta should not kill worker startup mid-flight.
+    if last_err:
+        return {}
+    return {}
 
 
 def _set_progress(job_dir: Path, stage: str, pct: int, detail: str = "") -> None:
@@ -108,24 +168,60 @@ def process_job_dir(job_dir: Path) -> None:
         from clipper.pipeline import run_pipeline
 
         # 1) extract + ASR via agent_clip helpers
-        _set_progress(job_dir, "extract_audio", 8, "抽取音频")
+        # Warm-extract can run under limited slots while others hold ASR.
         sys.path.insert(0, str(ROOT / "scripts"))
         from agent_clip_video import asr_local, extract_wav, resolve_local_model  # type: ignore
 
         work = job_dir / "asr_work"
         wav = work / "audio_16k.wav"
-        extract_wav(video, wav)
+        if not (wav.exists() and wav.stat().st_size > 1000):
+            # Prefer queue warm-slot when allowed (front-of-queue); else extract without warm contention.
+            used_warm = False
+            if _JOB_QUEUE is not None:
+                try:
+                    used_warm = bool(_JOB_QUEUE.acquire_warm_extract(job_dir))
+                except Exception:
+                    used_warm = False
+            try:
+                _set_progress(
+                    job_dir,
+                    "warm_extract" if used_warm else "extract_audio",
+                    8,
+                    "预热抽音频" if used_warm else "抽取音频",
+                )
+                extract_wav(video, wav)
+                meta_w = _read_meta(job_dir)
+                warm = meta_w.get("warmup") if isinstance(meta_w.get("warmup"), dict) else {}
+                warm = dict(warm or {})
+                warm["extract"] = True
+                meta_w["warmup"] = warm
+                _write_meta(job_dir, meta_w)
+            finally:
+                if used_warm and _JOB_QUEUE is not None:
+                    try:
+                        _JOB_QUEUE.release_warm_extract()
+                    except Exception:
+                        pass
+        else:
+            _set_progress(job_dir, "warm_extract", 10, "复用已预热音频")
 
         model_name = resolve_local_model()
-        _set_progress(job_dir, "asr", 25, f"高精度口播打轴 ({model_name})，GPU听写排队中/进行中")
-        # heartbeat: if asr takes long, UI still shows activity
         import time as _time
 
         t_asr0 = _time.time()
-        # serialize only the Whisper call so concurrent jobs don't thrash GPU/model
-        with _asr_lock:
-            _set_progress(job_dir, "asr", 28, f"正在听写 ({model_name})")
-            raw = asr_local(wav)
+        # Global ASR slot (queue) or legacy lock
+        if _JOB_QUEUE is not None:
+            _JOB_QUEUE.acquire_asr(job_dir)
+            try:
+                _set_progress(job_dir, "asr", 28, f"正在听写 ({model_name})")
+                raw = asr_local(wav)
+            finally:
+                _JOB_QUEUE.release_asr()
+        else:
+            _set_progress(job_dir, "asr", 25, f"高精度口播打轴 ({model_name})，GPU听写排队中/进行中")
+            with _asr_lock:
+                _set_progress(job_dir, "asr", 28, f"正在听写 ({model_name})")
+                raw = asr_local(wav)
         raw_path = job_dir / "transcript_asr.json"
         raw_path.write_text(json.dumps(raw, ensure_ascii=False, indent=2), encoding="utf-8")
         meta = _read_meta(job_dir)
@@ -230,17 +326,31 @@ def process_job_dir(job_dir: Path) -> None:
                     f"LLM 读取全量口播小句并提取主要内容（{len(llm_input)}句）…",
                 )
                 # Serialize cloud plan calls so concurrent jobs don't all timeout.
-                with _llm_lock:
-                    # tiny stagger avoids bursty gateway throttling after ASR finishes
-                    import time as _time
+                if _JOB_QUEUE is not None:
+                    _JOB_QUEUE.acquire_llm(job_dir)
+                    try:
+                        import time as _time
 
-                    _time.sleep(0.15)
-                    plan_llm, llm_obj = plan_from_asr_with_llm(
-                        llm_input,
-                        target_seconds=target,
-                        playback_speed=sp,
-                        settings=settings,
-                    )
+                        _time.sleep(0.15)
+                        plan_llm, llm_obj = plan_from_asr_with_llm(
+                            llm_input,
+                            target_seconds=target,
+                            playback_speed=sp,
+                            settings=settings,
+                        )
+                    finally:
+                        _JOB_QUEUE.release_llm()
+                else:
+                    with _llm_lock:
+                        import time as _time
+
+                        _time.sleep(0.15)
+                        plan_llm, llm_obj = plan_from_asr_with_llm(
+                            llm_input,
+                            target_seconds=target,
+                            playback_speed=sp,
+                            settings=settings,
+                        )
                 llm_debug = {
                     "product_summary": llm_obj.get("product_summary"),
                     "main_points": llm_obj.get("main_points"),
@@ -319,7 +429,14 @@ def process_job_dir(job_dir: Path) -> None:
                     meta = _read_meta(job_dir)
                     meta["render_profile"] = "draft"
                     _write_meta(job_dir, meta)
-                    render_from_plan_only(job_dir)
+                    if _JOB_QUEUE is not None:
+                        _JOB_QUEUE.acquire_render(job_dir)
+                        try:
+                            render_from_plan_only(job_dir)
+                        finally:
+                            _JOB_QUEUE.release_render()
+                    else:
+                        render_from_plan_only(job_dir)
                     # render_from_plan_only writes final status; reload
                     meta = _read_meta(job_dir)
                     meta["planner"] = "llm"
@@ -445,13 +562,26 @@ def process_job_dir(job_dir: Path) -> None:
 
         _set_progress(job_dir, "clipper", 65, "规则逻辑排序与时间轴")
         _set_progress(job_dir, "render", 80, "渲染成片" if render else "仅生成计划")
-        result = run_pipeline(
-            video=video,
-            transcript_path=tr_path,
-            out_dir=job_dir,
-            settings=settings,
-            render=render,
-        )
+        if render and _JOB_QUEUE is not None:
+            _JOB_QUEUE.acquire_render(job_dir)
+            try:
+                result = run_pipeline(
+                    video=video,
+                    transcript_path=tr_path,
+                    out_dir=job_dir,
+                    settings=settings,
+                    render=render,
+                )
+            finally:
+                _JOB_QUEUE.release_render()
+        else:
+            result = run_pipeline(
+                video=video,
+                transcript_path=tr_path,
+                out_dir=job_dir,
+                settings=settings,
+                render=render,
+            )
 
         has_plan = (job_dir / "plan.json").exists()
         has_final = (job_dir / "final.mp4").exists()
@@ -507,6 +637,7 @@ def process_job_dir(job_dir: Path) -> None:
         )
         _write_meta(job_dir, meta)
     finally:
+        # Queue dispatcher also calls mark_finished; keep legacy set in sync.
         with _lock:
             _running.discard(job_id)
 
@@ -620,25 +751,60 @@ def reclip_from_saved_transcript(job_dir: Path) -> None:
 
 
 def running_job_ids() -> list[str]:
+    if _JOB_QUEUE is not None:
+        try:
+            return _JOB_QUEUE.active_ids()
+        except Exception:
+            pass
     with _lock:
         return sorted(_running)
 
 
 def start_job_async(job_dir: Path) -> bool:
-    """Start background thread if not already running this job.
+    """Enqueue job into stable FIFO dispatcher (LAN multi-user safe).
 
-    Multiple different jobs can run concurrently. Whisper ASR stage is
-    serialized via `_asr_lock` so GPU model use does not thrash; LLM/render
-    stages of different jobs can overlap.
+    Replaces old per-job retry storm. Active slots are limited; ASR/LLM have
+    their own slot semaphores. Waiting jobs stay queued with queue_pos meta.
     """
     job_dir = Path(job_dir)
     job_id = job_dir.name
+
+    # Preferred path: central queue
+    if _JOB_QUEUE is not None:
+        try:
+            # resolve extract helper for background front-queue warmup
+            def _extract_ok(video: Path, wav: Path) -> None:
+                sys.path.insert(0, str(ROOT / "scripts"))
+                from agent_clip_video import extract_wav  # type: ignore
+
+                extract_wav(video, wav)
+
+            _JOB_QUEUE.configure_handlers(
+                process_fn=process_job_dir,
+                write_meta_fn=_write_meta,
+                read_meta_fn=_read_meta,
+                extract_fn=_extract_ok,
+            )
+            info = _JOB_QUEUE.enqueue(job_dir)
+            # mirror into legacy set for any external status helpers
+            with _lock:
+                if info.get("active"):
+                    _running.add(job_id)
+            return True
+        except Exception as e:
+            # fall through to legacy path if queue broken
+            try:
+                meta = _read_meta(job_dir)
+                meta["queue_error"] = str(e)[:200]
+                _write_meta(job_dir, meta)
+            except Exception:
+                pass
+
+    # Legacy fallback (should rarely run)
     with _lock:
         if job_id in _running:
             return False
-        # soft cap: still allow queueing by returning False when too many
         if len(_running) >= max(1, _MAX_CONCURRENT_JOBS):
-            # keep job meta as queued for UI retry/poll
             try:
                 meta = _read_meta(job_dir)
                 meta["status"] = "queued"
@@ -648,7 +814,7 @@ def start_job_async(job_dir: Path) -> bool:
                 _write_meta(job_dir, meta)
             except Exception:
                 pass
-            # schedule delayed retry start without blocking caller
+
             def _retry():
                 import time as _t
 

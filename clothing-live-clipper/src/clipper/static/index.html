@@ -4,7 +4,10 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>小面 · CapCut</title>
-  <link rel="stylesheet" href="/static/styles.css?v=jy52-fittext" />
+  <link rel="stylesheet" href="/static/styles.css?v=jy71-learn-all-paths" />
+  <script>
+    window.__XIAOMIAN_UI__ = "jy71-learn-all-paths";
+  </script>
 </head>
 <body>
   <div class="jy-app">
@@ -23,10 +26,7 @@
       <div class="jy-top-mid">
         <span class="jy-pill" id="health">检查环境…</span>
       </div>
-      <div class="jy-top-right">
-        <button type="button" class="jy-btn ghost" id="open-transcript">口播稿</button>
-        <button type="button" class="jy-btn primary" id="export-btn" disabled>导出成片</button>
-      </div>
+      <div class="jy-top-right"></div>
     </header>
 
     <div class="jy-main">
@@ -38,30 +38,26 @@
             <span class="muted">唯一输入</span>
           </div>
           <form id="job-form" class="jy-form">
-            <label class="jy-drop" id="drop-zone">
-              <input type="file" id="video" accept="video/*,.mp4,.mov,.mkv,.webm,.avi,.m4v,.ts,.mts,.m2ts,video/mp2t" required hidden />
+            <!-- Restored working-zip pattern: label wraps hidden file input (proven on blank PCs) -->
+            <label class="jy-drop" id="drop-zone" for="video">
+              <input
+                type="file"
+                id="video"
+                accept="video/*,.mp4,.mov,.mkv,.webm,.avi,.m4v,.ts,.mts,.m2ts,video/mp2t"
+                required
+                hidden
+              />
               <div class="jy-drop-icon">⬆</div>
               <div class="jy-drop-text">点击或拖入直播视频</div>
               <div class="jy-drop-sub" id="file-name">支持 mp4 / mov / mkv / webm / ts</div>
             </label>
 
-            <div class="jy-row">
-              <label class="jy-field">
-                <span>目标时长</span>
-                <div class="jy-stepper">
-                  <input type="number" id="target_seconds" value="60" min="15" max="180" />
-                  <span>秒</span>
-                </div>
-              </label>
-              <label class="jy-switch">
-                <input type="checkbox" id="render" checked />
-                <span>渲染成片</span>
-              </label>
-            </div>
+            <!-- Defaults kept as hidden fields: 60s + always render -->
+            <input type="hidden" id="target_seconds" value="60" />
+            <input type="hidden" id="render" value="true" />
 
             <button type="submit" class="jy-btn primary block" id="submit-btn">开始服装切片</button>
-            <p class="jy-hint">成片目标约 60 秒（1.4x）。开头先讲服装特点（版型/面料/上身效果：不走光·不显肚子·拜拜肉等）；去字母码/几斤穿/价格发货/直播控场/加一单。终稿：2K 级 · MP4 · 30fps。</p>
-            <p class="jy-error" id="form-error" hidden></p>
+            <p class="jy-error" id="form-error" hidden style="min-height:1.2em"></p>
           </form>
         </div>
 
@@ -76,7 +72,7 @@
           <div class="jy-track-tools asr-tools">
             <button type="button" class="jy-btn tiny" id="asr-reload" disabled>刷新口播</button>
             <button type="button" class="jy-btn tiny" id="asr-to-golden" disabled>+加入成片</button>
-            <span class="muted">拖到中间逻辑成片 · 可改词</span>
+            <span class="muted">拖到中间对应位置即可添加 · 可改词</span>
           </div>
           <div class="jy-transcript asr-cards" id="transcript-list">
             <div class="jy-empty">处理后在这里显示口播句子（可编辑、可拖入成片）</div>
@@ -102,23 +98,28 @@
         </div>
 
         <div class="jy-timeline-panel">
-          <div class="jy-panel-head">
+          <div class="jy-panel-head jy-panel-head-plan">
             <span>逻辑成片</span>
-            <div class="jy-head-actions">
+            <div class="jy-head-actions jy-head-actions-plan">
               <span class="muted" id="plan-edit-hint"></span>
+              <label class="jy-switch jy-learn-inline" title="保存并重剪时写入全局口味偏好">
+                <input type="checkbox" id="plan-learn" checked />
+                <span>自动学习</span>
+              </label>
+              <button type="button" class="jy-btn tiny" id="learn-clear" title="清空全局学习偏好">清空学习</button>
+              <span class="muted" id="learn-stat"></span>
               <button type="button" class="jy-btn tiny primary" id="plan-apply" disabled>保存并重剪</button>
             </div>
           </div>
+          <p class="jy-hint" id="learn-hint" hidden></p>
           <div class="jy-tracks">
             <div class="jy-track jy-track-logic">
               <div class="jy-track-body" id="golden-track"></div>
             </div>
           </div>
-          <!-- legacy ids for JS null-safe fallback (not displayed) -->
+          <!-- legacy ids for JS null-safe fallback (may be unused) -->
           <div id="plan-reset" hidden></div>
           <div id="plan-balance" hidden></div>
-          <div id="plan-learn" hidden></div>
-          <div id="learn-clear" hidden></div>
           <div id="plan-note" hidden></div>
           <div id="trust-track" hidden></div>
           <div id="cta-track" hidden></div>
@@ -141,89 +142,64 @@
             <p class="jy-hint" id="llm-status-text"></p>
             <div class="jy-llm-status-meta" id="llm-status-meta" hidden></div>
           </div>
-          <p class="jy-hint" id="job-run-hint">支持多任务并发。上传后可继续上传，任务互不影响（听写阶段会短暂串行）。</p>
+          <p class="jy-hint" id="job-run-hint">上传后自动排队处理。繁忙时显示位次与等待时间。</p>
+          <div class="jy-job-list" id="job-list">
+            <div class="jy-empty" id="job-list-empty">暂无任务。左侧选择视频后点「开始服装切片」。</div>
+          </div>
         </div>
 
-        <div class="jy-panel jy-panel-llm">
-          <div class="jy-panel-head">
+        <div class="jy-panel jy-panel-llm collapsed" id="panel-llm">
+          <div class="jy-panel-head jy-panel-head-collapsible" id="llm-panel-head" title="点击展开/收起">
             <span>LLM 用户配置</span>
-            <span class="muted" id="llm-cfg-status">未配置</span>
-          </div>
-          <form id="llm-config-form" class="jy-form llm-form">
-            <p class="jy-hint llm-intro">OpenAI 兼容。推荐 https://api.siliconflow.cn/v1 + Qwen/Qwen2.5-7B-Instruct。配置仅存本机用户文件，不读环境变量。</p>
-
-            <label class="jy-switch llm-enable">
-              <input type="checkbox" id="llm_plan" checked />
-              <span>启用 LLM 逻辑排片</span>
-            </label>
-
-            <label class="jy-field">
-              <span>Base URL（OpenAI 兼容）</span>
-              <input type="text" id="llm_base_url" placeholder="https://api.siliconflow.cn/v1" />
-            </label>
-
-            <label class="jy-field">
-              <span>API Key</span>
-              <input type="password" id="llm_api_key" placeholder="硅基流动 API Key（sk-...）" autocomplete="off" />
-            </label>
-
-            <label class="jy-field">
-              <span>模型 Model（可自动匹配）</span>
-              <div class="jy-row llm-model-row">
-                <input type="text" id="llm_model" placeholder="Qwen/Qwen2.5-7B-Instruct（可自动匹配）" list="llm-model-list" />
-                <button type="button" class="jy-btn tiny" id="llm-fetch-models" title="从 Base URL 拉取 /models 并自动选择">自动匹配</button>
-              </div>
-              <datalist id="llm-model-list"></datalist>
-            </label>
-
-            <label class="jy-field">
-              <span>Organization（可选）</span>
-              <input type="text" id="llm_org" placeholder="可留空" />
-            </label>
-
-            <div class="jy-row llm-actions">
-              <button type="button" class="jy-btn tiny" id="llm-probe">测试连通</button>
-              <button type="submit" class="jy-btn tiny primary" id="llm-save">保存并启用</button>
+            <div class="jy-head-actions">
+              <span class="muted" id="llm-cfg-status">未配置</span>
+              <button type="button" class="jy-btn tiny" id="toggle-llm-panel" title="展开/收起">展开</button>
             </div>
+          </div>
+          <div class="jy-panel-body llm-panel-body" id="llm-panel-body">
+            <form id="llm-config-form" class="jy-form llm-form">
+              <p class="jy-hint llm-intro">OpenAI 兼容。推荐 https://api.siliconflow.cn/v1 + Qwen/Qwen2.5-7B-Instruct。配置仅存本机用户文件，不读环境变量。</p>
 
-            <p class="jy-hint" id="llm-cfg-msg">推荐 SiliconFlow 轻量模型。填 Base URL + Key + Model 后点「测试连通」。Token 无效时请重新复制 Key。</p>
-          </form>
+              <label class="jy-switch llm-enable">
+                <input type="checkbox" id="llm_plan" checked />
+                <span>启用 LLM 逻辑排片</span>
+              </label>
+
+              <label class="jy-field">
+                <span>Base URL（OpenAI 兼容）</span>
+                <input type="text" id="llm_base_url" placeholder="https://api.siliconflow.cn/v1" />
+              </label>
+
+              <label class="jy-field">
+                <span>API Key</span>
+                <input type="password" id="llm_api_key" placeholder="硅基流动 API Key（sk-...）" autocomplete="off" />
+              </label>
+
+              <label class="jy-field">
+                <span>模型 Model（可自动匹配）</span>
+                <div class="jy-row llm-model-row">
+                  <input type="text" id="llm_model" placeholder="Qwen/Qwen2.5-7B-Instruct（可自动匹配）" list="llm-model-list" />
+                  <button type="button" class="jy-btn tiny" id="llm-fetch-models" title="从 Base URL 拉取 /models 并自动选择">自动匹配</button>
+                </div>
+                <datalist id="llm-model-list"></datalist>
+              </label>
+
+              <input type="hidden" id="llm_org" value="" />
+
+              <div class="jy-row llm-actions">
+                <button type="button" class="jy-btn tiny" id="llm-probe">测试连通</button>
+                <button type="submit" class="jy-btn tiny primary" id="llm-save">保存并启用</button>
+              </div>
+
+              <p class="jy-hint" id="llm-cfg-msg">推荐 SiliconFlow 轻量模型。填 Base URL + Key + Model 后点「测试连通」。Token 无效时请重新复制 Key。</p>
+            </form>
+          </div>
         </div>
 
       </aside>
     </div>
   </div>
 
-  <!-- 口播稿模块（替代无用设置页） -->
-  <div class="drawer-backdrop" id="drawer-backdrop" hidden></div>
-  <aside class="drawer" id="transcript-drawer" hidden>
-    <div class="drawer-head">
-      <div>
-        <h2>口播稿</h2>
-        <p class="card-desc">查看 / 勾选 / 改字 / 按时码重剪（无需重新听写）</p>
-      </div>
-      <button type="button" class="jy-btn ghost" id="close-transcript">关闭</button>
-    </div>
-    <div class="drawer-body transcript-body">
-      <div class="tr-toolbar">
-        <div class="tr-meta" id="tr-meta">未选择任务</div>
-        <div class="tr-actions">
-          <button type="button" class="jy-btn tiny" id="tr-reload">刷新</button>
-          <button type="button" class="jy-btn tiny" id="tr-all">全选</button>
-          <button type="button" class="jy-btn tiny" id="tr-none">全不选</button>
-        </div>
-      </div>
-      <div class="tr-list" id="tr-list">
-        <div class="jy-empty">先处理一个视频，再编辑口播稿</div>
-      </div>
-      <div class="tr-footer">
-        <button type="button" class="jy-btn" id="tr-save">仅保存口播</button>
-        <button type="button" class="jy-btn primary" id="tr-reclip">保存并重剪</button>
-      </div>
-      <p class="jy-hint" id="tr-msg"></p>
-    </div>
-  </aside>
-
-  <script src="/static/app.js?v=jy53-dlname"></script>
+  <script src="/static/app.js?v=jy71-learn-all-paths"></script>
 </body>
 </html>

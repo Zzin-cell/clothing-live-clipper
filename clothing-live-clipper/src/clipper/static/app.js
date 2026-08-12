@@ -160,20 +160,146 @@ function statusClass(status) {
 
 function stageLabel(stage) {
   const map = {
-    queued: "排队",
+    queued: "排队等待",
     starting: "启动",
+    warm_extract: "预热抽音频",
     extract_audio: "抽音频",
-    asr: "GPU 口播打轴（medium+降噪，通常1–3分钟）",
+    wait_asr: "等待听写槽",
+    asr: "听写中（串行稳定）",
     asr_done: "听写完成",
+    wait_llm: "等待LLM槽",
+    wait_render: "等待渲染槽",
     filter: "过滤无效词",
     llm_plan: "LLM 全量小句提取主要内容并重排反剪",
     clipper: "规则逻辑排序",
     reclip: "按口播重剪",
     render: "渲染成片",
+    export: "导出终稿",
     done: "完成",
     failed: "失败",
   };
   return map[stage] || stage || "处理中";
+}
+
+/** Parse ISO time (…Z) to epoch ms; 0 if invalid. */
+function parseUtcMs(iso) {
+  if (!iso) return 0;
+  const s = String(iso).trim();
+  if (!s) return 0;
+  const t = Date.parse(s.endsWith("Z") || /[+-]\d{2}:\d{2}$/.test(s) ? s : s + "Z");
+  return Number.isFinite(t) ? t : 0;
+}
+
+/** Format seconds to 12s / 3分05秒 / 1小时02分 */
+function formatWaitDuration(sec) {
+  let s = Math.max(0, Math.floor(Number(sec) || 0));
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  const r = s % 60;
+  if (m < 60) return `${m}分${String(r).padStart(2, "0")}秒`;
+  const h = Math.floor(m / 60);
+  const mm = m % 60;
+  return `${h}小时${String(mm).padStart(2, "0")}分`;
+}
+
+/** Frontend build id; must match server ui_build_expected for version alignment. */
+const UI_BUILD = "jy71-learn-all-paths";
+window.__XIAOMIAN_UI_BUILD__ = UI_BUILD;
+
+function isQueueWaiting(data) {
+  if (!data) return false;
+  const st = String(data.status || "");
+  const stage = String(data.stage || "");
+  if (["success", "success_partial", "failed"].includes(st)) return false;
+  if (st === "queued") return true;
+  return (
+    stage === "queued" ||
+    stage === "wait_asr" ||
+    stage === "wait_llm" ||
+    stage === "wait_render" ||
+    stage === "warm_extract" ||
+    stage === "starting"
+  );
+}
+
+/**
+ * Queue subtitle: position + live wait duration + ETA.
+ * Only while waiting — not during active asr/render (avoid confusing total time).
+ */
+function formatQueueWaitInfo(data) {
+  if (!isQueueWaiting(data)) return "";
+
+  const st = String(data.status || "");
+  const stage = String(data.stage || "");
+  const qAt = parseUtcMs(data.queued_at) || parseUtcMs(data.created_at);
+  let waitS = 0;
+  if (qAt > 0) waitS = Math.max(0, Math.floor((Date.now() - qAt) / 1000));
+  else if (data.queue_wait_s != null) waitS = Math.max(0, Number(data.queue_wait_s) || 0);
+
+  const pos = Number(data.queue_pos || 0);
+  const total = Number(data.queue_total || 0);
+  const parts = [];
+  if (pos > 0) parts.push(`第${pos}${total ? "/" + total : ""}位`);
+  if (waitS > 0 || st === "queued" || stage.startsWith("wait_") || stage === "warm_extract") {
+    parts.push(`已等${formatWaitDuration(waitS)}`);
+  }
+  // ETA from backend sliding average
+  let etaS = data.eta_s != null ? Number(data.eta_s) : NaN;
+  if (!Number.isFinite(etaS) || etaS <= 0) {
+    // soft client ETA: pos * avg if provided via health later
+    etaS = NaN;
+  }
+  if (Number.isFinite(etaS) && etaS > 0 && isQueueWaiting(data)) {
+    parts.push(`预计还需${formatWaitDuration(etaS)}`);
+  }
+  return parts.join(" · ");
+}
+
+function buildStageLine(data) {
+  const base = stageLabel(data.stage);
+  if (isQueueWaiting(data)) {
+    const liveWait = formatQueueWaitInfo(data);
+    let detail = String(data.stage_detail || "").trim();
+    detail = detail.replace(/^排队(中|等待)?[·\s]*/u, "").trim();
+    const liveOnlyWait = (liveWait || "").split(" · ").find((x) => x.startsWith("已等"));
+    const livePos = (liveWait || "").split(" · ").find((x) => x.startsWith("第"));
+    const liveEta = (liveWait || "").split(" · ").find((x) => x.startsWith("预计还需"));
+    if (liveOnlyWait) {
+      if (/已等/.test(detail)) detail = detail.replace(/已等[^\s·]*/u, liveOnlyWait);
+      else detail = detail ? `${detail} · ${liveOnlyWait}` : liveOnlyWait;
+    }
+    if (livePos && !/第\d+/.test(detail)) {
+      detail = detail ? `${livePos} · ${detail}` : livePos;
+    }
+    if (liveEta) {
+      if (/预计还需/.test(detail)) detail = detail.replace(/预计还需[^\s·]*/u, liveEta);
+      else detail = detail ? `${detail} · ${liveEta}` : liveEta;
+    }
+    if (!detail && liveWait) detail = liveWait;
+    return detail ? `${base} · ${detail}` : base;
+  }
+  const detail = String(data.stage_detail || "").trim();
+  return detail ? `${base} · ${detail}` : base;
+}
+
+// const UI_BUILD = "jy56-queue-eta";  // duplicate removed
+
+function checkUiVersionAlignment(data) {
+  try {
+    const expect = String((data && data.ui_build_expected) || "").trim();
+    if (!expect) return;
+    if (expect === UI_BUILD) return;
+    const el = $("health");
+    if (el) {
+      el.className = "jy-pill bad";
+      el.textContent = `前端偏旧(${UI_BUILD}≠${expect}) · 请 Ctrl+F5 并重启服务`;
+    }
+    const hint = $("job-run-hint");
+    if (hint) {
+      hint.textContent =
+        `版本未对齐：页面 ${UI_BUILD} / 后端期望 ${expect}。请重启服务后按 Ctrl+F5 强刷，否则看不到排队/ETA。`;
+    }
+  } catch (_) {}
 }
 
 async function loadHealth() {
@@ -187,6 +313,8 @@ async function loadHealth() {
     el.textContent = ok
       ? `本机就绪 · ffmpeg${data.ffmpeg ? "✓" : "·"} · ${llmReady ? "用户LLM✓" : "待填LLM/规则"}`
       : `环境异常 · ffmpeg${data.ffmpeg ? "✓" : "缺失"}`;
+    // C: hard-refresh if static UI lags behind server queue/UI contract
+    checkUiVersionAlignment(data);
   } catch (e) {
     el.className = "jy-pill bad";
     el.textContent = "无法连接后端";
@@ -197,13 +325,18 @@ async function loadHealth() {
     if (lr.ok) {
       const L = await lr.json();
       const n = Number(L.events || 0);
-      const top = (L.top_hook || []).slice(0, 5).map((x) => x[0]).join(" / ");
+      // top_hook may be phrase strings or [phrase, score] pairs
+      const top = (L.top_hook || [])
+        .slice(0, 5)
+        .map((x) => (Array.isArray(x) ? x[0] : x))
+        .filter(Boolean)
+        .join(" / ");
       if ($("learn-stat")) $("learn-stat").textContent = n > 0 ? `已学 ${n} 次` : "人机闭环";
       if ($("learn-hint")) {
         $("learn-hint").textContent =
           n > 0
-            ? `学习已生效：${n} 次（保留 ${L.kept_slots || 0} / 丢弃 ${L.dropped_slots || 0}）。偏好：${top || "—"}。注意：必须勾选「学习这次重剪」才会写入；新视频需重新上传才会用到。`
-            : "学习为空。精修后务必勾选「学习这次重剪」再保存，否则只改当前片、不记全局。";
+            ? `已自动学习 ${n} 次（保留 ${L.kept_slots || 0} / 丢弃 ${L.dropped_slots || 0}）${top ? " · 偏好：" + top : ""}`
+            : "保存并重剪会自动学习（可在逻辑成片关闭）";
       }
     }
   } catch (_) {}
@@ -353,9 +486,10 @@ function _splitClipByCut(role, idx, cut0ms, cut1ms, textLeft, textRight) {
   let c1 = Math.max(t0, Math.min(t1, Number(cut1ms)));
   if (c1 < c0) [c0, c1] = [c1, c0];
   // ignore tiny cuts
-  if (c1 - c0 < 200) return false;
-  const leftOk = c0 - t0 >= 250;
-  const rightOk = t1 - c1 >= 250;
+  if (c1 - c0 < 120) return false;
+  // allow shorter leftovers for precise Chinese phrase cuts
+  const leftOk = c0 - t0 >= 180;
+  const rightOk = t1 - c1 >= 180;
   if (!leftOk && !rightOk) return false;
 
   const base = { ...s, role: roleLabel(role), removed: false };
@@ -384,37 +518,205 @@ function _splitClipByCut(role, idx, cut0ms, cut1ms, textLeft, textRight) {
   return true;
 }
 
-/** Delete a sub-range inside one clip by text selection ratio (approx without word timestamps). */
+/** Chinese/English speaking-time weight of one code unit (for cut mapping). */
+function _charSpeakWeight(ch) {
+  if (!ch) return 0;
+  // CJK ideographs: full unit
+  if (/[\u4e00-\u9fff\u3400-\u4dbf]/.test(ch)) return 1.0;
+  // fullwidth digits / letters roughly half-ish spoken length
+  if (/[０-９Ａ-Ｚａ-ｚ]/.test(ch)) return 0.55;
+  // ascii letters
+  if (/[A-Za-z]/.test(ch)) return 0.45;
+  // numbers (often price junk) spoken a bit faster but still material
+  if (/[0-9]/.test(ch)) return 0.5;
+  // Chinese punctuation — short breath, keep tiny weight for alignment stability
+  if (/[，。！？、；：…—·,.!?;:\s]/.test(ch)) return 0.12;
+  // other symbols
+  return 0.2;
+}
+
+/**
+ * Map character index [0..text.length] -> absolute ms within [t0,t1]
+ * using cumulative Chinese speech weights (not naive byte length ratio).
+ * Optional ASR clause anchors correct drift for long clips.
+ */
+function mapCharIndexToMs(text, charIdx, t0, t1, anchors) {
+  const full = String(text || "");
+  const n = full.length;
+  const i = Math.max(0, Math.min(n, Number(charIdx) || 0));
+  const dur = Math.max(300, Number(t1) - Number(t0));
+  if (n <= 0) return Number(t0);
+  if (i <= 0) return Number(t0);
+  if (i >= n) return Number(t1);
+
+  // cumulative weights at each boundary 0..n
+  const w = new Array(n);
+  let total = 0;
+  for (let k = 0; k < n; k++) {
+    w[k] = _charSpeakWeight(full[k]);
+    total += w[k];
+  }
+  if (total <= 1e-6) total = n;
+  const cum = new Array(n + 1);
+  cum[0] = 0;
+  for (let k = 0; k < n; k++) cum[k + 1] = cum[k] + w[k];
+
+  // base: weighted proportional time
+  let ms = Number(t0) + Math.round((cum[i] / total) * dur);
+
+  // refine with ASR clauses that fall inside this clip window
+  if (Array.isArray(anchors) && anchors.length) {
+    // pick surrounding anchors by overlapping [t0,t1] text fragments
+    const hits = [];
+    for (const a of anchors) {
+      const at0 = Number(a.t0_ms || 0);
+      const at1 = Number(a.t1_ms || 0);
+      if (at1 <= t0 + 40 || at0 >= t1 - 40) continue;
+      const atext = String(a.text || "").trim();
+      if (!atext) continue;
+      // locate atext inside full text (prefer first occurrence that fits window order)
+      let pos = full.indexOf(atext);
+      // loose: strip spaces
+      if (pos < 0) {
+        const compact = full.replace(/\s+/g, "");
+        const ac = atext.replace(/\s+/g, "");
+        const cp = compact.indexOf(ac);
+        if (cp >= 0) {
+          // map compact pos back roughly
+          let seen = 0;
+          pos = 0;
+          for (let x = 0; x < full.length; x++) {
+            if (/\s/.test(full[x])) continue;
+            if (seen === cp) {
+              pos = x;
+              break;
+            }
+            seen++;
+          }
+        }
+      }
+      if (pos < 0) continue;
+      hits.push({
+        i0: pos,
+        i1: pos + atext.length,
+        t0: Math.max(t0, at0),
+        t1: Math.min(t1, at1),
+      });
+    }
+    hits.sort((a, b) => a.i0 - b.i0 || a.t0 - b.t0);
+    // find bracketing anchors for character i
+    let prev = null;
+    let next = null;
+    for (const h of hits) {
+      if (h.i1 <= i) prev = h;
+      if (h.i0 >= i && !next) next = h;
+    }
+    // if inside an anchor clause, interpolate within that clause
+    for (const h of hits) {
+      if (i >= h.i0 && i <= h.i1) {
+        const localW = Math.max(1e-6, cum[h.i1] - cum[h.i0]);
+        const frac = (cum[i] - cum[h.i0]) / localW;
+        ms = h.t0 + Math.round(frac * Math.max(200, h.t1 - h.t0));
+        return Math.max(t0, Math.min(t1, ms));
+      }
+    }
+    if (prev && next && next.i0 > prev.i1) {
+      const spanW = Math.max(1e-6, cum[next.i0] - cum[prev.i1]);
+      const frac = (cum[i] - cum[prev.i1]) / spanW;
+      ms = prev.t1 + Math.round(frac * Math.max(100, next.t0 - prev.t1));
+    } else if (prev) {
+      // after last known anchor: scale remaining weights into remaining time
+      const remW = Math.max(1e-6, total - cum[prev.i1]);
+      const frac = (cum[i] - cum[prev.i1]) / remW;
+      ms = prev.t1 + Math.round(frac * Math.max(100, t1 - prev.t1));
+    } else if (next) {
+      const remW = Math.max(1e-6, cum[next.i0]);
+      const frac = cum[i] / remW;
+      ms = t0 + Math.round(frac * Math.max(100, next.t0 - t0));
+    }
+  }
+  return Math.max(t0, Math.min(t1, ms));
+}
+
+/** ASR cards overlapping a plan slot — used as timing anchors. */
+function getCutAnchorsForSlot(slot) {
+  const t0 = Math.max(0, Number(slot?.t0_ms || 0));
+  const t1 = Math.max(t0 + 300, Number(slot?.t1_ms || 0));
+  const list = [];
+  for (const u of asrCards || []) {
+    const a0 = Number(u.t0_ms || 0);
+    const a1 = Number(u.t1_ms || 0);
+    if (a1 <= t0 + 20 || a0 >= t1 - 20) continue;
+    list.push({ text: u.text, t0_ms: a0, t1_ms: a1 });
+  }
+  // also include other plan slots that look like short source crumbs inside range
+  return list;
+}
+
+/**
+ * Delete a sub-range inside one clip by selected Chinese text.
+ * Uses speech-weight mapping + ASR clause anchors (not plain char ratio).
+ */
 function cutSelectedTextInClip(role, idx, ta) {
   if (!planEdit?.[role]?.[idx] || !ta) return false;
   const text = String(ta.value || "");
-  const a = Number(ta.selectionStart ?? 0);
-  const b = Number(ta.selectionEnd ?? 0);
+  let a = Number(ta.selectionStart ?? 0);
+  let b = Number(ta.selectionEnd ?? 0);
   if (!(b > a) || !text.length) {
     alert("请先在口播框里用鼠标选中要删掉的那几个字（例如“199再来一次”）");
     return false;
   }
+  // expand selection to avoid cutting mid-number / mid-english token
+  while (a > 0 && /[0-9A-Za-z]/.test(text[a - 1]) && /[0-9A-Za-z]/.test(text[a])) a -= 1;
+  while (b < text.length && /[0-9A-Za-z]/.test(text[b - 1]) && /[0-9A-Za-z]/.test(text[b])) b += 1;
+
   const s = planEdit[role][idx];
   const t0 = Math.max(0, Number(s.t0_ms || 0));
   const t1 = Math.max(t0 + 300, Number(s.t1_ms || 0));
   const dur = t1 - t0;
-  const r0 = a / text.length;
-  const r1 = b / text.length;
-  // pad a little so cut catches spoken phrase
-  const pad = Math.min(400, Math.round(dur * 0.04));
-  const cut0 = Math.max(t0, Math.round(t0 + dur * r0) - pad);
-  const cut1 = Math.min(t1, Math.round(t0 + dur * r1) + pad);
-  const leftText = (text.slice(0, a) + text.slice(b)).replace(/\s{2,}/g, " ").trim();
-  // keep left full remaining text on first part if right empty, etc.
+  const anchors = getCutAnchorsForSlot(s);
+  let cut0 = mapCharIndexToMs(text, a, t0, t1, anchors);
+  let cut1 = mapCharIndexToMs(text, b, t0, t1, anchors);
+  if (cut1 < cut0) [cut0, cut1] = [cut1, cut0];
+
+  // adaptive pad: short selection → larger relative pad; long → smaller absolute pad
+  const selChars = Math.max(1, b - a);
+  const basePad = Math.round(Math.min(280, Math.max(60, dur * 0.018 + selChars * 18)));
+  // Chinese text usually has less trailing silence than linear pad assumes
+  cut0 = Math.max(t0, cut0 - Math.round(basePad * 0.45));
+  cut1 = Math.min(t1, cut1 + Math.round(basePad * 0.55));
+
+  // snap cuts to nearby ASR clause boundaries when close (improves phrase cuts)
+  for (const an of anchors) {
+    const edges = [Number(an.t0_ms), Number(an.t1_ms)];
+    for (const e of edges) {
+      if (Math.abs(e - cut0) <= 220) cut0 = Math.max(t0, Math.min(t1, e));
+      if (Math.abs(e - cut1) <= 220) cut1 = Math.max(t0, Math.min(t1, e));
+    }
+  }
+  if (cut1 - cut0 < 120) {
+    alert("选中太短，估算裁剪不足 0.12s。请多选几个字，或用「裁掉从/到(s)」精确秒数。");
+    return false;
+  }
+
   const textLeft = text.slice(0, a).trim();
   const textRight = text.slice(b).trim();
-  const ok = _splitClipByCut(role, idx, cut0, cut1, textLeft || leftText, textRight || leftText);
+  const leftText = (textLeft + (textLeft && textRight ? "" : "") + textRight).replace(/\s{2,}/g, " ").trim();
+  const ok = _splitClipByCut(
+    role,
+    idx,
+    cut0,
+    cut1,
+    textLeft || leftText,
+    textRight || leftText
+  );
   if (!ok) {
     alert("选中范围太短或会裁空整段，请扩大选中或改用「裁掉秒数」");
     return false;
   }
   if ($("plan-edit-hint")) {
-    $("plan-edit-hint").textContent = `已裁掉约 ${((cut1 - cut0) / 1000).toFixed(1)}s（按选中文字估算），请点重剪生效`;
+    const how = anchors.length ? "中文权重+ASR锚点" : "中文语速权重";
+    $("plan-edit-hint").textContent = `已裁掉 ${(cut0 / 1000).toFixed(2)}s–${(cut1 / 1000).toFixed(2)}s（${how}），请点重剪生效`;
   }
   queueRenderTracks();
   return true;
@@ -462,12 +764,34 @@ function roleLabel(trackKey) {
 function moveClip(fromRole, fromIdx, toRole, toIdx) {
   if (!planEdit?.[fromRole]?.[fromIdx]) return;
   if (!planEdit[toRole]) planEdit[toRole] = [];
+  // same track no-op
+  if (fromRole === toRole && (toIdx === fromIdx || toIdx === fromIdx + 1)) return;
   const item = planEdit[fromRole].splice(fromIdx, 1)[0];
+  if (!item) return;
   item.role = roleLabel(toRole);
-  const insertAt = Math.max(0, Math.min(toIdx, planEdit[toRole].length));
+  let insertAt = Math.max(0, Math.min(Number(toIdx) || 0, planEdit[toRole].length));
+  // after splice, indices after fromIdx shift down when same track
+  if (fromRole === toRole && fromIdx < insertAt) insertAt = Math.max(0, insertAt - 1);
+  // uniqueness: if same module already exists at target track, drop the moved copy
+  // (should not happen on same track, but protects cross-track / re-entry)
+  const conflict = planEdit[toRole].findIndex((s) => s && !s.removed && sameModule(s, item));
+  if (conflict >= 0) {
+    // keep existing, discard moved duplicate
+    planDirty = true;
+    enforcePlanUniqueness(toRole);
+    queueRenderTracks();
+    if ($("plan-edit-hint")) {
+      $("plan-edit-hint").textContent = "模块已存在，已保持唯一不重复";
+    }
+    return;
+  }
   planEdit[toRole].splice(insertAt, 0, item);
+  enforcePlanUniqueness(toRole);
   planDirty = true;
   queueRenderTracks();
+  if ($("plan-edit-hint")) {
+    $("plan-edit-hint").textContent = "已调整模块顺序（需点「保存并重剪」才生效）";
+  }
 }
 
 function syncPlanFieldsFromDom() {
@@ -534,8 +858,12 @@ function renderTracks(plan) {
         const removed = !!s.removed;
         return `<div class="jy-clip ${role} ${removed ? "removed" : ""}" draggable="true" data-role="${key}" data-idx="${idx}" data-id="${escapeHtml(s.clip_id || "")}">
           <div class="clip-top">
-            <span class="clip-drag" title="拖动调整位置" draggable="false">⠿</span>
+            <span class="clip-drag" title="按住拖动调整位置">⠿</span>
             <span class="clip-badge">逻辑 #${idx + 1}</span>
+            <div class="clip-order-btns">
+              <button type="button" class="clip-up" title="上移" ${idx === 0 ? "disabled" : ""}>↑</button>
+              <button type="button" class="clip-down" title="下移" ${idx >= list.length - 1 ? "disabled" : ""}>↓</button>
+            </div>
             <button type="button" class="clip-x" title="${removed ? "恢复" : "删除"}">${removed ? "+" : "×"}</button>
           </div>
           <textarea class="clip-text-edit" rows="${suggestTextareaRows(s.text)}" placeholder="编辑这段口播词…">${escapeHtml(s.text || "")}</textarea>
@@ -547,21 +875,32 @@ function renderTracks(plan) {
             <label>裁掉从(s)<input class="clip-cut0s" type="number" step="0.1" min="0" value="" placeholder="${a}" /></label>
             <label>到(s)<input class="clip-cut1s" type="number" step="0.1" min="0" value="" placeholder="${b}" /></label>
             <button type="button" class="clip-cut-range" title="按秒数裁掉中间一段">裁掉这段</button>
-            <button type="button" class="clip-cut-sel" title="删除口播框中选中文字对应时间">删选中文字段</button>
+            <button type="button" class="clip-cut-sel" title="删除选中中文对应时间（语速权重+口播锚点，比均分更准）">删选中文字段</button>
           </div>
-          <div class="meta">时长 ${((Number(s.t1_ms || 0) - Number(s.t0_ms || 0)) / 1000).toFixed(1)}s</div>
+          <div class="meta">时长 ${((Number(s.t1_ms || 0) - Number(s.t0_ms || 0)) / 1000).toFixed(1)}s · 可拖动手柄/点 ↑↓ 调整顺序</div>
         </div>`;
       })
       .join("");
   };
 
-  // single logical sequence in golden
-  if ($("golden-track")) $("golden-track").innerHTML = mk(src.golden, "story", "golden");
+  // single logical sequence in golden — always unique modules
+  if (planEdit?.golden) {
+    const n = enforcePlanUniqueness("golden");
+    if (n > 0 && $("plan-edit-hint")) {
+      $("plan-edit-hint").textContent = `已去掉 ${n} 个重复模块（成片内唯一）`;
+    }
+  }
+  const goldenList = planEdit?.golden || src.golden || [];
+  if ($("golden-track")) $("golden-track").innerHTML = mk(goldenList, "story", "golden");
   if ($("trust-track")) $("trust-track").innerHTML = "";
   if ($("cta-track")) $("cta-track").innerHTML = "";
   ensurePlanEventsBound();
   updatePlanHint();
   scheduleFitClipTextareas($("golden-track"));
+  // Keep left ASR card colors in sync with right plan membership
+  try {
+    refreshAsrInPlanMarks();
+  } catch (_) {}
 
   if (scrollBox) scrollBox.scrollTop = scrollTop;
   if (focusKey) {
@@ -581,10 +920,10 @@ function renderTracks(plan) {
 }
 
 function ensurePlanEventsBound() {
-  if (planEventsBound) return;
-  planEventsBound = true;
   const root = document.querySelector(".jy-timeline-panel");
   if (!root) return;
+  if (planEventsBound) return;
+  planEventsBound = true;
 
   // text/time edits: update model only, NO full re-render (smooth typing)
   root.addEventListener("input", (e) => {
@@ -658,16 +997,16 @@ function ensurePlanEventsBound() {
       return;
     }
     if (btn.classList.contains("clip-up")) {
-      if (idx > 0) moveClip(role, idx, role, idx - 1);
+      if (idx > 0) {
+        // insert before previous item
+        moveClip(role, idx, role, idx - 1);
+      }
       return;
     }
     if (btn.classList.contains("clip-down")) {
       if (planEdit?.[role] && idx < planEdit[role].length - 1) {
-        const arr = planEdit[role];
-        const item = arr.splice(idx, 1)[0];
-        arr.splice(idx + 1, 0, item);
-        planDirty = true;
-        queueRenderTracks();
+        // insert after next item => target index = idx + 2 (before adjustment)
+        moveClip(role, idx, role, idx + 2);
       }
       return;
     }
@@ -686,7 +1025,8 @@ function ensurePlanEventsBound() {
   root.addEventListener("dragstart", (e) => {
     const card = e.target.closest?.(".jy-clip");
     if (!card || !root.contains(card)) return;
-    if (e.target.closest("button, textarea, input")) {
+    // allow drag from handle / badge / empty card chrome; block form controls
+    if (e.target.closest("button, textarea, input, label, .clip-time-row, .cut-row")) {
       e.preventDefault();
       return;
     }
@@ -705,8 +1045,18 @@ function ensurePlanEventsBound() {
       }
     }
     card.classList.add("dragging");
-    e.dataTransfer.effectAllowed = "move";
-    e.dataTransfer.setData("text/plain", JSON.stringify({ role: card.dataset.role, idx: Number(card.dataset.idx) }));
+    try {
+      e.dataTransfer.effectAllowed = "move";
+      // some Chromium builds need text/plain set before drop works across panels
+      e.dataTransfer.setData(
+        "text/plain",
+        JSON.stringify({ source: "plan", role: card.dataset.role, idx: Number(card.dataset.idx) })
+      );
+      e.dataTransfer.setData(
+        "application/x-xiaomian-clip",
+        JSON.stringify({ source: "plan", role: card.dataset.role, idx: Number(card.dataset.idx) })
+      );
+    } catch (_) {}
   });
 
   root.addEventListener("dragend", (e) => {
@@ -716,39 +1066,65 @@ function ensurePlanEventsBound() {
     root.querySelectorAll(".jy-clip").forEach((c) => c.classList.remove("drag-over-left", "drag-over-right"));
   });
 
+  // dragover must always preventDefault over the whole panel so drop is allowed
   root.addEventListener("dragover", (e) => {
-    const track = e.target.closest?.(".jy-track-body");
-    if (!track) return;
+    const track =
+      e.target.closest?.(".jy-track-body") ||
+      e.target.closest?.("#golden-track") ||
+      (root.contains(e.target) ? $("golden-track") : null);
+    if (!track || !root.contains(track)) return;
     e.preventDefault();
-    e.dataTransfer.dropEffect = "move";
+    try {
+      // left ASR drag = copy/add; right plan drag = move/reorder
+      const types = Array.from(e.dataTransfer?.types || []);
+      const asrDrag = types.includes("application/x-xiaomian-clip") || types.includes("text/plain");
+      e.dataTransfer.dropEffect = asrDrag ? "copy" : "move";
+    } catch (_) {
+      e.dataTransfer.dropEffect = "copy";
+    }
     track.classList.add("drag-over");
     const overClip = e.target.closest(".jy-clip");
     root.querySelectorAll(".jy-clip").forEach((c) =>
       c.classList.remove("drag-over-left", "drag-over-right", "drag-over-replace")
     );
-    if (overClip && track.contains(overClip)) {
-      // hovering body of a card => replace mode; near edges still show insert cue
+    // only show insert cues (before/after) — never replace-by-drop
+    if (overClip && track.contains(overClip) && !overClip.classList.contains("asr-card")) {
       const rect = overClip.getBoundingClientRect();
-      const y = e.clientY - rect.top;
-      const edge = Math.max(12, rect.height * 0.22);
-      if (y < edge) overClip.classList.add("drag-over-left");
-      else if (y > rect.height - edge) overClip.classList.add("drag-over-right");
-      else overClip.classList.add("drag-over-replace");
+      const mid = rect.top + rect.height / 2;
+      if (e.clientY < mid) overClip.classList.add("drag-over-left");
+      else overClip.classList.add("drag-over-right");
     }
   });
 
   root.addEventListener("drop", (e) => {
-    const track = e.target.closest?.(".jy-track-body");
-    if (!track) return;
+    // Product rule: drag left ASR onto a position => INSERT add.
+    // Do NOT replace existing plan cards by dropping on center.
+    const track =
+      e.target.closest?.(".jy-track-body") ||
+      e.target.closest?.("#golden-track") ||
+      (root.contains(e.target) ? $("golden-track") : null);
+    if (!track || !root.contains(track)) return;
     e.preventDefault();
+    e.stopPropagation();
     track.classList.remove("drag-over");
+    root.querySelectorAll(".jy-clip").forEach((c) =>
+      c.classList.remove("drag-over-left", "drag-over-right", "drag-over-replace")
+    );
+
     let payload = null;
+    const raw =
+      e.dataTransfer.getData("application/x-xiaomian-clip") ||
+      e.dataTransfer.getData("text/plain") ||
+      "{}";
     try {
-      payload = JSON.parse(e.dataTransfer.getData("text/plain") || "{}");
+      payload = JSON.parse(raw);
     } catch (_) {
+      if ($("plan-edit-hint")) $("plan-edit-hint").textContent = "拖放失败：数据无效，请重试";
       return;
     }
-    const toRole = track.id.replace("-track", "");
+    if (!payload || typeof payload !== "object") return;
+
+    const toRole = (track.id || "golden-track").replace("-track", "") || "golden";
     if (!TRACK_ORDER.includes(toRole)) return;
     if (!planEdit) {
       planEdit = { golden: [], trust: [], cta: [] };
@@ -757,94 +1133,73 @@ function ensurePlanEventsBound() {
     }
     if (!planEdit[toRole]) planEdit[toRole] = [];
 
+    // resolve insert index from pointer position
     const overClip = e.target.closest(".jy-clip");
-    // 1) drop ON a card center => replace/swap; near edges => insert
-    if (overClip && track.contains(overClip) && overClip.dataset.role === toRole) {
-      const overIdx = Number(overClip.dataset.idx);
-      const rect = overClip.getBoundingClientRect();
-      const y = e.clientY - rect.top;
-      const edge = Math.max(12, rect.height * 0.22);
-      const nearEdge = y < edge || y > rect.height - edge;
-      if (!nearEdge) {
-        if (payload.source === "asr") {
-          replaceClipWithAsr(toRole, overIdx, Number(payload.idx));
-          return;
-        }
-        if (payload.role != null && payload.idx != null) {
-          swapClips(String(payload.role), Number(payload.idx), toRole, overIdx);
-          return;
-        }
-      }
-    }
-
-    // 2) drop on empty area / card edge => insert/reorder
     let toIdx = planEdit[toRole].length;
     if (overClip && track.contains(overClip) && overClip.dataset.role === toRole) {
       const overIdx = Number(overClip.dataset.idx);
       const rect = overClip.getBoundingClientRect();
       const mid = rect.top + rect.height / 2;
       toIdx = e.clientY < mid ? overIdx : overIdx + 1;
+    } else {
+      // drop on empty zone / hint: append
+      toIdx = planEdit[toRole].length;
     }
 
+    // Left ASR -> add OR move existing unique module to drop position
     if (payload.source === "asr") {
       const aidx = Number(payload.idx);
-      const item = asrCards[aidx];
-      if (!item) return;
-      const leftCard = document.querySelector(`.asr-card[data-idx="${aidx}"]`);
-      let text = item.text;
-      let t0 = Number(item.t0_ms || 0);
-      let t1 = Number(item.t1_ms || 0);
-      if (leftCard) {
-        const ta = leftCard.querySelector(".clip-text-edit");
-        const t0s = leftCard.querySelector(".clip-t0s");
-        const t1s = leftCard.querySelector(".clip-t1s");
-        if (ta) text = ta.value;
-        if (t0s) t0 = Math.max(0, Math.round(Number(t0s.value || 0) * 1000));
-        if (t1s) t1 = Math.max(t0 + 300, Math.round(Number(t1s.value || 0) * 1000));
+      if (!asrCards[aidx]) {
+        if ($("plan-edit-hint")) $("plan-edit-hint").textContent = "加入失败：找不到口播句";
+        return;
       }
-      // if track already has clips, make new clip duration near average
-      const act = (planEdit[toRole] || []).filter((s) => !s.removed);
-      if (act.length) {
-        const avg = act.reduce((a, s) => a + slotDurMs(s), 0) / act.length;
-        const target = Math.max(2500, Math.min(9000, Math.round(avg)));
-        t1 = t0 + target;
+      const r = insertAsrUnique(aidx, toIdx);
+      if (r.action === "empty") {
+        if ($("plan-edit-hint")) $("plan-edit-hint").textContent = "加入失败：口播文案为空";
+        return;
       }
-      const slot = {
-        clip_id: `asr_${aidx}_${Date.now().toString(36)}`,
-        role: roleLabel(toRole),
-        text: String(text || "").trim(),
-        t0_ms: t0,
-        t1_ms: t1,
-        score: 20,
-        removed: false,
-      };
-      if (!slot.text) return;
-      planEdit[toRole].splice(Math.max(0, toIdx), 0, slot);
       planDirty = true;
+      setPlanToolsEnabled(true);
       queueRenderTracks();
+      refreshAsrInPlanMarks();
+      if ($("plan-edit-hint")) {
+        if (r.action === "add") {
+          $("plan-edit-hint").textContent = `已添加到位置 #${(r.index >= 0 ? r.index : toIdx) + 1}（唯一 · 需保存并重剪）`;
+        } else if (r.action === "move") {
+          $("plan-edit-hint").textContent = `该口播已在成片中，已移到位置 #${(r.index >= 0 ? r.index : toIdx) + 1}（不重复）`;
+        } else {
+          $("plan-edit-hint").textContent = "该口播已在逻辑成片中（每句只保留一份）";
+        }
+      }
       return;
     }
 
+    // Right plan card reorder / move
     const fromRole = payload.role;
     const fromIdx = Number(payload.idx);
+    if (fromRole == null || Number.isNaN(fromIdx)) return;
     if (!planEdit?.[fromRole]?.[fromIdx]) return;
-    if (fromRole === toRole && fromIdx < toIdx) toIdx -= 1;
     moveClip(fromRole, fromIdx, toRole, Math.max(0, toIdx));
   });
 }
 
 function isLearnEnabled() {
   const el = $("plan-learn");
-  // Hidden placeholder is not a checkbox after UI simplify — never force learn
-  return !!(el && el.type === "checkbox" && el.checked);
+  // Default ON: auto-learn reverse edits unless user unchecks.
+  // If checkbox missing, still learn (product policy: 自动学习反剪).
+  if (!el || el.type !== "checkbox") return true;
+  return !!el.checked;
 }
 
 async function applyPlanEdit() {
   if (!currentJobId || !planEdit) return;
   syncPlanFieldsFromDom();
+  // force unique modules before submit
+  enforcePlanUniqueness("golden");
   // also drop empty-text or zero-length slots
-  const clean = (arr) =>
-    (arr || [])
+  const clean = (arr) => {
+    const seen = [];
+    return (arr || [])
       .filter((s) => s && !s.removed)
       .map((s) => {
         const t0 = Math.max(0, Number(s.t0_ms || 0));
@@ -856,13 +1211,23 @@ async function applyPlanEdit() {
           t0_ms: t0,
           t1_ms: t1,
           score: Number(s.score || 0),
+          from_asr_idx: s.from_asr_idx,
         };
       })
-      .filter((s) => s.t1_ms > s.t0_ms);
+      .filter((s) => s.t1_ms > s.t0_ms)
+      .filter((s) => {
+        // final uniqueness net (time / text / asr)
+        if (seen.some((x) => sameModule(x, s))) return false;
+        seen.push(s);
+        return true;
+      })
+      .map(({ from_asr_idx, ...rest }) => rest); // strip client-only field
+  };
+  // Auto-learn reverse cut by default (plan-learn checkbox, default checked)
   const learn = isLearnEnabled();
   const payload = {
     reclip: true,
-    learn,
+    learn: !!learn,
     golden: clean(planEdit.golden),
     trust: [],
     cta: [],
@@ -932,8 +1297,7 @@ async function clearLearningData() {
 }
 
 function setupPlanTools() {
-  // Simplified toolbar: only 「保存并重剪」 is shown.
-  // Hidden legacy nodes keep null-safe hooks if re-enabled later.
+  // Toolbar: 保存并重剪 + 自动学习开关（默认开）
   $("plan-reset")?.addEventListener?.("click", () => {
     if (!planOriginal) return;
     planEdit = clonePlan(planOriginal);
@@ -945,15 +1309,23 @@ function setupPlanTools() {
   $("learn-clear")?.addEventListener?.("click", clearLearningData);
   const learnEl = $("plan-learn");
   if (learnEl && learnEl.type === "checkbox") {
+    // default ON; only honor explicit user opt-out stored as "0"
     try {
-      learnEl.checked = localStorage.getItem("clipper_learn_on_reclip") === "1";
+      const v = localStorage.getItem("clipper_learn_on_reclip");
+      learnEl.checked = v !== "0";
+      if (v == null) localStorage.setItem("clipper_learn_on_reclip", "1");
     } catch (_) {
-      learnEl.checked = false;
+      learnEl.checked = true;
     }
     learnEl.addEventListener("change", () => {
       try {
         localStorage.setItem("clipper_learn_on_reclip", learnEl.checked ? "1" : "0");
       } catch (_) {}
+      if ($("plan-edit-hint")) {
+        $("plan-edit-hint").textContent = learnEl.checked
+          ? "自动学习·开"
+          : "自动学习·关";
+      }
     });
   }
 }
@@ -962,6 +1334,214 @@ function setAsrToolsEnabled(on) {
   ["asr-reload", "asr-to-golden"].forEach((id) => {
     if ($(id)) $(id).disabled = !on;
   });
+}
+
+/** Normalize time window for overlap matching (ms). */
+function windowKey(t0, t1) {
+  const a = Math.max(0, Math.round(Number(t0) || 0));
+  const b = Math.max(a + 1, Math.round(Number(t1) || 0));
+  // 120ms tolerance via quantization
+  return `${Math.round(a / 120)}_${Math.round(b / 120)}`;
+}
+
+/** Normalize text for uniqueness (ignore spaces / punctuation noise). */
+function textKey(text) {
+  return String(text || "")
+    .replace(/\s+/g, "")
+    .replace(/[，。！？、,.!?;；:：'\"“”‘’…·\-—]/g, "")
+    .toLowerCase();
+}
+
+/**
+ * Identity of a plan / ASR module for uniqueness.
+ * Same asr index OR same time window OR same normalized text (len>=4) = same module.
+ */
+function slotIdentity(slotOrAsr) {
+  if (!slotOrAsr) return { asr: null, win: null, text: null };
+  const asr =
+    slotOrAsr.from_asr_idx != null && slotOrAsr.from_asr_idx !== ""
+      ? Number(slotOrAsr.from_asr_idx)
+      : null;
+  return {
+    asr: Number.isFinite(asr) ? asr : null,
+    win: windowKey(slotOrAsr.t0_ms, slotOrAsr.t1_ms),
+    text: textKey(slotOrAsr.text),
+  };
+}
+
+function sameModule(a, b) {
+  if (!a || !b) return false;
+  const ia = slotIdentity(a);
+  const ib = slotIdentity(b);
+  if (ia.asr != null && ib.asr != null && ia.asr === ib.asr) return true;
+  if (ia.win && ib.win && ia.win === ib.win) return true;
+  if (ia.text && ib.text && ia.text.length >= 4 && ia.text === ib.text) return true;
+  return false;
+}
+
+/** Build set of active plan windows currently in logical timeline. */
+function getPlanWindowKeys(plan) {
+  const keys = new Set();
+  const src = plan || planEdit || {};
+  for (const k of ["golden", "trust", "cta"]) {
+    for (const s of src[k] || []) {
+      if (!s || s.removed) continue;
+      keys.add(windowKey(s.t0_ms, s.t1_ms));
+      const tk = textKey(s.text);
+      if (tk.length >= 4) keys.add(`t:${tk}`);
+      if (s.from_asr_idx != null && s.from_asr_idx !== "") keys.add(`a:${Number(s.from_asr_idx)}`);
+    }
+  }
+  return keys;
+}
+
+/** True if left ASR card is already represented in right plan (unique module). */
+function isAsrInPlan(u, planKeys, asrIdx = null) {
+  if (!u) return false;
+  // Prefer live scan against planEdit for full identity (asr/time/text)
+  if (planEdit?.golden?.length) {
+    const probe = {
+      text: u.text,
+      t0_ms: u.t0_ms,
+      t1_ms: u.t1_ms,
+      from_asr_idx: asrIdx != null ? asrIdx : u.from_asr_idx,
+    };
+    if (findModuleIndex(probe) >= 0) return true;
+  }
+  const keys = planKeys || getPlanWindowKeys();
+  if (keys.has(windowKey(u.t0_ms, u.t1_ms))) return true;
+  const tk = textKey(u.text);
+  if (tk.length >= 4 && keys.has(`t:${tk}`)) return true;
+  if (asrIdx != null && keys.has(`a:${Number(asrIdx)}`)) return true;
+  return false;
+}
+
+/** Index of first matching module in golden plan, or -1. */
+function findModuleIndex(probe, role = "golden") {
+  const arr = planEdit?.[role] || [];
+  for (let i = 0; i < arr.length; i++) {
+    const s = arr[i];
+    if (!s || s.removed) continue;
+    if (sameModule(s, probe)) return i;
+  }
+  return -1;
+}
+
+/**
+ * Keep modules unique in a track (first occurrence wins).
+ * Drops later duplicates by asr idx / time window / text.
+ */
+function uniquePlanTrack(arr) {
+  const out = [];
+  for (const s of arr || []) {
+    if (!s || s.removed) continue;
+    if (out.some((x) => sameModule(x, s))) continue;
+    out.push(s);
+  }
+  return out;
+}
+
+function enforcePlanUniqueness(role = "golden") {
+  if (!planEdit?.[role]) return 0;
+  const before = planEdit[role].length;
+  planEdit[role] = uniquePlanTrack(planEdit[role]);
+  return Math.max(0, before - planEdit[role].length);
+}
+
+/** Refresh left card in-plan colors without full re-render if possible. */
+function refreshAsrInPlanMarks() {
+  const keys = getPlanWindowKeys();
+  document.querySelectorAll(".asr-card").forEach((card) => {
+    const idx = Number(card.dataset.idx);
+    const u = asrCards[idx];
+    const on = isAsrInPlan(u, keys, idx);
+    card.classList.toggle("asr-in-plan", on);
+    card.classList.toggle("asr-source", !on);
+    card.classList.toggle("story", on);
+    card.classList.toggle("trust", !on);
+    card.dataset.inPlan = on ? "1" : "0";
+  });
+}
+
+/**
+ * Insert ASR into plan uniquely.
+ * - if not present: insert at toIdx (or append)
+ * - if already present and toIdx given: MOVE existing card to that position (still unique)
+ * - if already present and no move: skip
+ * returns {action:'add'|'move'|'skip'|'empty', index}
+ */
+function insertAsrUnique(aidx, toIdx = null) {
+  const item = asrCards[aidx];
+  if (!item) return { action: "skip", index: -1 };
+  if (!planEdit) {
+    planEdit = { golden: [], trust: [], cta: [] };
+    planOriginal = clonePlan(planEdit);
+  }
+  const role = "golden";
+  if (!planEdit[role]) planEdit[role] = [];
+
+  const leftCard = document.querySelector(`.asr-card[data-idx="${aidx}"]`);
+  let text = item.text;
+  let t0 = Number(item.t0_ms || 0);
+  let t1 = Number(item.t1_ms || 0);
+  if (leftCard) {
+    const ta = leftCard.querySelector(".clip-text-edit");
+    const t0s = leftCard.querySelector(".clip-t0s");
+    const t1s = leftCard.querySelector(".clip-t1s");
+    if (ta) text = ta.value;
+    if (t0s) t0 = Math.max(0, Math.round(Number(t0s.value || 0) * 1000));
+    if (t1s) t1 = Math.max(t0 + 300, Math.round(Number(t1s.value || 0) * 1000));
+    item.text = text;
+    item.t0_ms = t0;
+    item.t1_ms = t1;
+  }
+  text = String(text || "").trim();
+  if (!text) return { action: "empty", index: -1 };
+  t1 = Math.max(t0 + 300, t1);
+
+  const probe = { text, t0_ms: t0, t1_ms: t1, from_asr_idx: aidx };
+  const existing = findModuleIndex(probe, role);
+
+  // Already in plan: move to drop position if provided, else skip (keep unique)
+  if (existing >= 0) {
+    if (toIdx == null || Number.isNaN(Number(toIdx))) {
+      return { action: "skip", index: existing };
+    }
+    let insertAt = Math.max(0, Math.min(Number(toIdx), planEdit[role].length));
+    const [slot] = planEdit[role].splice(existing, 1);
+    // fix index after removal
+    if (existing < insertAt) insertAt -= 1;
+    insertAt = Math.max(0, Math.min(insertAt, planEdit[role].length));
+    // refresh identity fields
+    slot.text = text;
+    slot.t0_ms = t0;
+    slot.t1_ms = t1;
+    slot.from_asr_idx = aidx;
+    slot.removed = false;
+    planEdit[role].splice(insertAt, 0, slot);
+    enforcePlanUniqueness(role);
+    return { action: "move", index: insertAt };
+  }
+
+  const slot = {
+    clip_id: `asr_${aidx}_${Date.now().toString(36)}_${Math.random().toString(16).slice(2, 6)}`,
+    role: roleLabel(role),
+    text,
+    t0_ms: t0,
+    t1_ms: t1,
+    score: 20,
+    removed: false,
+    from_asr_idx: aidx,
+  };
+  let insertAt =
+    toIdx == null || Number.isNaN(Number(toIdx))
+      ? planEdit[role].length
+      : Math.max(0, Math.min(Number(toIdx), planEdit[role].length));
+  planEdit[role].splice(insertAt, 0, slot);
+  enforcePlanUniqueness(role);
+  // re-find after unique (should be insertAt or nearby)
+  const idx = findModuleIndex(probe, role);
+  return { action: "add", index: idx >= 0 ? idx : insertAt };
 }
 
 function addAsrToTrack(trackKey, indices) {
@@ -975,48 +1555,46 @@ function addAsrToTrack(trackKey, indices) {
   setPlanToolsEnabled(true);
   const list = indices && indices.length ? indices : [...selectedAsr];
   if (!list.length) {
-    alert("请先勾选左侧口播卡片，或直接拖拽到成片结构");
+    alert("请先勾选左侧口播卡片，或点卡片上的 ＋ / 拖到中间逻辑成片");
     return;
   }
+  let added = 0;
+  let moved = 0;
+  let skippedDup = 0;
+  let skippedEmpty = 0;
   list
     .sort((a, b) => a - b)
     .forEach((aidx) => {
-      const item = asrCards[aidx];
-      if (!item) return;
-      const leftCard = document.querySelector(`.asr-card[data-idx="${aidx}"]`);
-      let text = item.text;
-      let t0 = Number(item.t0_ms || 0);
-      let t1 = Number(item.t1_ms || 0);
-      if (leftCard) {
-        const ta = leftCard.querySelector(".clip-text-edit");
-        const t0s = leftCard.querySelector(".clip-t0s");
-        const t1s = leftCard.querySelector(".clip-t1s");
-        if (ta) text = ta.value;
-        if (t0s) t0 = Math.max(0, Math.round(Number(t0s.value || 0) * 1000));
-        if (t1s) t1 = Math.max(t0 + 300, Math.round(Number(t1s.value || 0) * 1000));
-        item.text = text;
-        item.t0_ms = t0;
-        item.t1_ms = t1;
-      }
-      const slot = {
-        clip_id: `asr_${aidx}_${Date.now().toString(36)}_${Math.random().toString(16).slice(2, 6)}`,
-        role: roleLabel(trackKey),
-        text: String(text || "").trim(),
-        t0_ms: t0,
-        t1_ms: t1,
-        score: 20,
-        removed: false,
-      };
-      if (!slot.text) return;
-      planEdit[trackKey].push(slot);
+      // button/add: append if new; never create a second copy
+      const r = insertAsrUnique(aidx, null);
+      if (r.action === "add") added += 1;
+      else if (r.action === "move") moved += 1;
+      else if (r.action === "empty") skippedEmpty += 1;
+      else skippedDup += 1;
     });
   selectedAsr.clear();
   // clear checks without full left re-render
   document.querySelectorAll(".asr-card .asr-check").forEach((ck) => {
     ck.checked = false;
   });
-  planDirty = true;
-  queueRenderTracks();
+  if (added > 0 || moved > 0) {
+    planDirty = true;
+    queueRenderTracks();
+  }
+  refreshAsrInPlanMarks();
+  if ($("plan-edit-hint")) {
+    if (added > 0) {
+      $("plan-edit-hint").textContent = `已加入 ${added} 段（逻辑成片内唯一 · 需保存并重剪）`;
+    } else if (moved > 0) {
+      $("plan-edit-hint").textContent = `已调整位置 ${moved} 段（模块唯一，不重复添加）`;
+    } else if (skippedDup > 0) {
+      $("plan-edit-hint").textContent = "这些口播已在逻辑成片中（每句只保留一份）";
+    } else if (skippedEmpty > 0) {
+      $("plan-edit-hint").textContent = "加入失败：口播文案为空";
+    } else {
+      $("plan-edit-hint").textContent = "没有可加入的口播句";
+    }
+  }
 }
 
 function renderAsrCards() {
@@ -1045,17 +1623,21 @@ function renderAsrCards() {
     } catch (_) {}
   }
 
+  const planKeys = getPlanWindowKeys();
   box.innerHTML = asrCards
     .map((u, idx) => {
       const a = (Number(u.t0_ms || 0) / 1000).toFixed(1);
       const b = (Number(u.t1_ms || 0) / 1000).toFixed(1);
       const checked = selectedAsr.has(idx) ? "checked" : "";
-      return `<div class="jy-clip asr-card trust" draggable="true" data-source="asr" data-idx="${idx}">
+      const inPlan = isAsrInPlan(u, planKeys, idx);
+      const tone = inPlan ? "asr-in-plan story" : "asr-source";
+      const badgeExtra = inPlan ? " · 已加入" : "";
+      return `<div class="jy-clip asr-card ${tone}" draggable="true" data-source="asr" data-idx="${idx}" data-in-plan="${inPlan ? "1" : "0"}">
         <div class="clip-top">
           <input type="checkbox" class="asr-check" ${checked} title="多选后批量加入成片" />
-          <span class="clip-drag" title="拖到成片结构">⠿</span>
-          <span class="clip-badge">口播 #${idx + 1}</span>
-          <button type="button" class="clip-x asr-add-one" title="加入逻辑成片">＋</button>
+          <span class="clip-drag" title="按住拖到中间逻辑成片">⠿</span>
+          <span class="clip-badge">口播 #${idx + 1}${badgeExtra}</span>
+          <button type="button" class="clip-x asr-add-one" title="${inPlan ? "已在逻辑成片中" : "加入逻辑成片"}">＋</button>
         </div>
         <textarea class="clip-text-edit" rows="${suggestTextareaRows(u.text)}" placeholder="编辑这段口播词…">${escapeHtml(u.text || "")}</textarea>
         <div class="clip-time-row">
@@ -1063,7 +1645,7 @@ function renderAsrCards() {
           <label>结束(s)<input class="clip-t1s" type="number" step="0.1" min="0" value="${b}" /></label>
         </div>
         <div class="clip-tools">
-          <button type="button" class="asr-add-golden">+加入成片</button>
+          <button type="button" class="asr-add-golden">${inPlan ? "已在成片" : "+加入成片"}</button>
         </div>
       </div>`;
     })
@@ -1159,7 +1741,7 @@ function ensureAsrEventsBound() {
   box.addEventListener("dragstart", (e) => {
     const card = e.target.closest?.(".asr-card");
     if (!card) return;
-    if (e.target.closest("button, textarea, input")) {
+    if (e.target.closest("button, textarea, input, label, .clip-time-row, .clip-tools")) {
       e.preventDefault();
       return;
     }
@@ -1176,11 +1758,16 @@ function ensureAsrEventsBound() {
       }
     }
     card.classList.add("dragging");
-    e.dataTransfer.effectAllowed = "copyMove";
-    e.dataTransfer.setData("text/plain", JSON.stringify({ source: "asr", idx }));
+    try {
+      e.dataTransfer.effectAllowed = "copyMove";
+      const payload = JSON.stringify({ source: "asr", idx });
+      e.dataTransfer.setData("text/plain", payload);
+      e.dataTransfer.setData("application/x-xiaomian-clip", payload);
+    } catch (_) {}
   });
   box.addEventListener("dragend", (e) => {
     e.target.closest?.(".asr-card")?.classList.remove("dragging");
+    document.querySelectorAll(".jy-track-body").forEach((t) => t.classList.remove("drag-over"));
   });
 }
 
@@ -1382,9 +1969,10 @@ function renderJob(data) {
   }
   $("current-job-title").textContent = data.video_source || data.job_id;
   const st = data.status || "";
+  const waitInfo = formatQueueWaitInfo(data);
   $("current-job-status").textContent = `${STATUS_LABEL[st] || st}${
-    data.final_duration_s ? ` · ${data.final_duration_s}s` : ""
-  }`;
+    waitInfo ? ` · ${waitInfo}` : ""
+  }${data.final_duration_s ? ` · 成片${data.final_duration_s}s` : ""}`;
   renderLlmStatus(data);
 
   // progress
@@ -1395,7 +1983,7 @@ function renderJob(data) {
     const pct = Number(data.progress || (st === "queued" ? 2 : 15));
     $("progress-bar").style.width = `${pct}%`;
     $("progress-text").textContent = `${pct}%`;
-    $("stage-text").textContent = stageLabel(data.stage) + (data.stage_detail ? ` · ${data.stage_detail}` : "");
+    $("stage-text").textContent = buildStageLine(data);
   } else {
     pb.hidden = st !== "failed";
     if (st === "failed") {
@@ -1434,23 +2022,9 @@ function renderJob(data) {
         );
       }
     }
-    $("export-btn").disabled = false;
-    $("export-btn").onclick = async () => {
-      // request final-quality re-render then open download when ready
-      try {
-        await fetch(`/api/jobs/${encodeURIComponent(data.job_id)}/export-final`, {
-          method: "POST",
-        });
-        const finalUrl = `/api/jobs/${encodeURIComponent(data.job_id)}/files/final.mp4?v=${Date.now()}`;
-        // open current best immediately; poll briefly for final upgrade
-        window.open(files.final ? finalUrl : url, "_blank");
-      } catch (_) {
-        window.open(url, "_blank");
-      }
-    };
+    // top-bar export button removed from UI; download stays under 当前任务 actions
   } else if (jobChanged) {
     video.removeAttribute("src");
-    $("export-btn").disabled = true;
   }
 
   // tracks: never clobber while user is editing (planDirty)
@@ -1496,9 +2070,6 @@ function renderJob(data) {
   if (st === "failed") {
     actions.push(`<button type="button" class="jy-btn" id="retry-btn">重试</button>`);
   }
-  if (files.transcript || files.transcript_asr || data.status === "success" || data.status === "success_partial") {
-    actions.push(`<button type="button" class="jy-btn" id="open-tr-inline">编辑口播稿</button>`);
-  }
   $("actions").innerHTML = actions.join("") || '<span class="muted">暂无导出</span>';
   const exportFinalBtn = $("export-final-btn");
   if (exportFinalBtn) {
@@ -1521,8 +2092,6 @@ function renderJob(data) {
       pollJob(data.job_id);
     };
   }
-  const openTr = $("open-tr-inline");
-  if (openTr) openTr.onclick = () => openTranscriptDrawer();
 
   // only load left transcript when switching jobs (or empty)
   if (jobChanged || !asrCards.length) {
@@ -1545,6 +2114,7 @@ async function showJob(jobId) {
   if (["queued", "processing", "starting", "claimed"].includes(data.status)) {
     pollJob(jobId);
   } else if (pollTimer) {
+    clearTimeout(pollTimer);
     clearInterval(pollTimer);
     pollTimer = null;
   }
@@ -1552,18 +2122,28 @@ async function showJob(jobId) {
 
 function pollJob(jobId) {
   if (pollTimer) clearInterval(pollTimer);
-  pollTimer = setInterval(async () => {
+  // 1s while queued so "已等Xs" ticks live; slow down when processing
+  let delay = 1000;
+  const tick = async () => {
     try {
-      // while user is editing, only lightly refresh jobs list / progress text, don't rebuild editors
       const res = await fetch(`/api/jobs/${encodeURIComponent(jobId)}`);
       if (!res.ok) return;
       const data = await res.json();
+      const st = data.status || "";
+      const stage = String(data.stage || "");
+      const inQueueUi =
+        st === "queued" ||
+        stage === "queued" ||
+        stage === "wait_asr" ||
+        stage === "wait_llm" ||
+        stage === "warm_extract";
+      delay = inQueueUi ? 1000 : 2500;
+
       if (planDirty && data.job_id === currentJobId) {
-        // soft progress update only
-        const st = data.status || "";
+        const waitInfo = formatQueueWaitInfo(data);
         $("current-job-status").textContent = `${STATUS_LABEL[st] || st}${
-          data.final_duration_s ? ` · ${data.final_duration_s}s` : ""
-        }`;
+          waitInfo ? ` · ${waitInfo}` : ""
+        }${data.final_duration_s ? ` · 成片${data.final_duration_s}s` : ""}`;
         const processing = ["queued", "processing", "starting", "claimed"].includes(st);
         const pb = $("progress-block");
         if (processing) {
@@ -1571,48 +2151,101 @@ function pollJob(jobId) {
           const pct = Number(data.progress || 15);
           $("progress-bar").style.width = `${pct}%`;
           $("progress-text").textContent = `${pct}%`;
-          $("stage-text").textContent = stageLabel(data.stage) + (data.stage_detail ? ` · ${data.stage_detail}` : "");
+          $("stage-text").textContent = buildStageLine(data);
         }
         if (!processing) {
-          // finished while editing: allow one full refresh after user applies, not now
           loadJobs();
-          clearInterval(pollTimer);
+          if (pollTimer) clearInterval(pollTimer);
           pollTimer = null;
+        } else {
+          if (pollTimer) clearInterval(pollTimer);
+          pollTimer = setTimeout(tick, delay);
         }
         return;
       }
       renderJob(data);
       loadJobs();
       if (!["queued", "processing", "starting", "claimed"].includes(data.status)) {
-        clearInterval(pollTimer);
+        if (pollTimer) clearInterval(pollTimer);
         pollTimer = null;
+        return;
       }
-    } catch (_) {}
-  }, 2500);
+      if (pollTimer) clearInterval(pollTimer);
+      pollTimer = setTimeout(tick, delay);
+    } catch (_) {
+      if (pollTimer) clearInterval(pollTimer);
+      pollTimer = setTimeout(tick, 2000);
+    }
+  };
+  pollTimer = setTimeout(tick, 300);
+}
+
+function renderJobList(jobs) {
+  const box = $("job-list");
+  const empty = $("job-list-empty");
+  if (!box) return;
+  const list = Array.isArray(jobs) ? jobs : [];
+  if (!list.length) {
+    box.innerHTML = `<div class="jy-empty" id="job-list-empty">暂无任务。左侧选择视频后点「开始服装切片」。</div>`;
+    return;
+  }
+  box.innerHTML = list
+    .slice(0, 12)
+    .map((j) => {
+      const id = j.job_id || "unknown";
+      const st = j.status || "unknown";
+      const title = j.video_source || id;
+      const wait = formatQueueWaitInfo(j);
+      const active = id === currentJobId ? "active" : "";
+      const badge = STATUS_LABEL[st] || st;
+      const sub = [badge, wait || j.stage_detail || j.stage || "", j.has_final ? "有成片" : ""]
+        .filter(Boolean)
+        .join(" · ");
+      return `<div class="jy-job-item ${active}" data-job-id="${escapeHtml(id)}" title="点击查看该任务">
+        <div class="t">${escapeHtml(title)}</div>
+        <div class="s">${escapeHtml(sub)}</div>
+      </div>`;
+    })
+    .join("");
+  // click bind once via delegation
+  if (!box.dataset.bound) {
+    box.dataset.bound = "1";
+    box.addEventListener("click", (e) => {
+      const item = e.target.closest?.(".jy-job-item");
+      if (!item) return;
+      const id = item.getAttribute("data-job-id");
+      if (id) showJob(id);
+    });
+  }
 }
 
 async function loadJobs() {
-  // history list removed; keep as lightweight status refresher for current job
   const hint = $("job-run-hint");
   try {
     const res = await fetch("/api/jobs?limit=12");
     const data = await res.json();
     const jobs = data.jobs || [];
-    const running = jobs.filter((j) =>
-      ["queued", "processing", "starting", "claimed"].includes(j.status)
-    );
+    renderJobList(jobs);
     if (hint) {
-      hint.textContent = running.length
-        ? `并发中 ${running.length} 个任务（听写串行，LLM/渲染并行）。当前：${currentJobId || "无"}`
-        : `当前任务：${currentJobId || "无"}。可连续上传，任务互不影响。`;
+      const queuedN = jobs.filter((j) => j.status === "queued" || String(j.stage || "").startsWith("wait_") || j.stage === "queued").length;
+      const activeN = jobs.filter((j) => j.status === "processing" || j.status === "starting" || j.status === "claimed").length;
+      let curWait = "";
+      if (currentJobId) {
+        const cur = jobs.find((j) => j.job_id === currentJobId);
+        if (cur) {
+          const w = formatQueueWaitInfo(cur);
+          if (w) curWait = ` · 当前${w}`;
+        }
+      }
+      hint.textContent = (queuedN + activeN) > 0
+        ? `队列稳定模式：排队 ${queuedN} · 处理中 ${activeN} · 听写串行${curWait}`
+        : `当前任务：${currentJobId || "无"}。下方可点历史任务查看成片。`;
     }
     if (currentJobId) {
-      // refresh current only
       const cur = jobs.find((j) => j.job_id === currentJobId);
       if (cur && ["queued", "processing", "starting", "claimed"].includes(cur.status)) {
         // poll handles detailed progress
       } else if (cur) {
-        // finished: soft refresh
         try {
           const r = await fetch(`/api/jobs/${encodeURIComponent(currentJobId)}`);
           if (r.ok) renderJob(await r.json());
@@ -1625,11 +2258,52 @@ async function loadJobs() {
 }
 
 function setupForm() {
+  // Restored from working portable zip pattern, plus safer file retention + clearer errors.
   const form = $("job-form");
   const fileInput = $("video");
   const drop = $("drop-zone");
   const err = $("form-error");
   const btn = $("submit-btn");
+  const pickBtn = $("pick-video-btn");
+  let selectedFile = null; // drag-drop fallback when input.files assignment fails
+
+  if (!form || !fileInput || !drop || !btn) {
+    console.error("[setupForm] missing elements", { form: !!form, fileInput: !!fileInput, drop: !!drop, btn: !!btn });
+    return;
+  }
+
+  const setFileName = (f) => {
+    selectedFile = f || null;
+    const nameEl = $("file-name");
+    if (!nameEl) return;
+    if (f) {
+      const mb = f.size ? ` · ${(f.size / 1024 / 1024).toFixed(1)}MB` : "";
+      nameEl.textContent = `已选择：${f.name}${mb}`;
+      nameEl.style.color = "#0f766e";
+      nameEl.style.fontWeight = "600";
+    } else {
+      nameEl.textContent = "支持 mp4 / mov / mkv / webm / ts";
+      nameEl.style.color = "";
+      nameEl.style.fontWeight = "";
+    }
+  };
+
+  const showErr = (msg) => {
+    err.hidden = false;
+    err.style.color = "#b91c1c";
+    err.textContent = String(msg || "未知错误");
+  };
+  const showOk = (msg) => {
+    err.hidden = false;
+    err.style.color = "#0f766e";
+    err.textContent = String(msg || "");
+  };
+
+  pickBtn?.addEventListener("click", (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    fileInput.click();
+  });
 
   ["dragenter", "dragover"].forEach((ev) => {
     drop.addEventListener(ev, (e) => {
@@ -1645,46 +2319,78 @@ function setupForm() {
   });
   drop.addEventListener("drop", (e) => {
     const f = e.dataTransfer?.files?.[0];
-    if (f) {
+    if (!f) return;
+    try {
       fileInput.files = e.dataTransfer.files;
-      $("file-name").textContent = f.name;
-    }
+    } catch (_) {}
+    setFileName(f);
+    showOk(`已选中：${f.name}（请点「开始服装切片」）`);
   });
   fileInput.addEventListener("change", () => {
-    $("file-name").textContent = fileInput.files?.[0]?.name || "支持 mp4 / mov / mkv / webm / ts";
+    const f = fileInput.files?.[0] || null;
+    setFileName(f);
+    if (f) showOk(`已选中：${f.name}（请点「开始服装切片」）`);
   });
 
   form.addEventListener("submit", async (e) => {
     e.preventDefault();
     err.hidden = true;
-    if (!fileInput.files?.[0]) {
-      err.hidden = false;
-      err.textContent = "请选择视频";
+    const file = selectedFile || fileInput.files?.[0] || null;
+    if (!file) {
+      showErr("请选择视频（点上方区域或「选择视频文件」）");
       return;
     }
     btn.disabled = true;
     btn.textContent = "上传并启动…";
     try {
       const fd = new FormData();
-      fd.append("video", fileInput.files[0]);
-      fd.append("target_seconds", $("target_seconds").value || "60");
-      fd.append("render", $("render").checked ? "true" : "false");
+      fd.append("video", file, file.name || "video.mp4");
+      // defaults: 60s target + always render (UI controls removed)
+      fd.append("target_seconds", $("target_seconds")?.value || "60");
+      const renderEl = $("render");
+      const renderOn =
+        !renderEl
+          ? true
+          : renderEl.type === "checkbox"
+            ? !!renderEl.checked
+            : String(renderEl.value || "true").toLowerCase() !== "false";
+      fd.append("render", renderOn ? "true" : "false");
       fd.append("auto_process", "true");
+      // attach page LLM fields if present (compatible with multi-user zip)
+      try {
+        if ($("llm_base_url")?.value) fd.append("llm_base_url", $("llm_base_url").value.trim());
+        if ($("llm_model")?.value) fd.append("llm_model", $("llm_model").value.trim());
+        if ($("llm_api_key")?.value) fd.append("llm_api_key", $("llm_api_key").value.trim());
+        if ($("llm_plan")) fd.append("llm_plan", $("llm_plan").checked ? "true" : "false");
+      } catch (_) {}
+
       const res = await fetch("/api/jobs", { method: "POST", body: fd });
       const data = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(data.detail || res.statusText || "创建失败");
+      if (!res.ok) {
+        const detail = data.detail || data.error || res.statusText || "创建失败";
+        throw new Error(typeof detail === "string" ? detail : JSON.stringify(detail));
+      }
+      if (!data.job_id) throw new Error("上传成功但未返回任务ID，请重启服务后再试");
+
+      // force UI to current job immediately
+      currentJobId = data.job_id;
       renderJob(data);
       await loadJobs();
       pollJob(data.job_id);
+      showOk(`已入队：${data.job_id}${data.stage_detail ? " · " + data.stage_detail : ""}`);
+      try {
+        $("current-job-title") && ($("current-job-title").scrollIntoView({ behavior: "smooth", block: "nearest" }));
+      } catch (_) {}
     } catch (ex) {
-      err.hidden = false;
-      const msg = String(ex.message || ex);
-      if (msg.includes("Failed to fetch") || msg.includes("NetworkError") || msg.includes("fetch")) {
-        err.textContent =
-          "无法连接本地服务 (127.0.0.1:8787)。请先运行 start-web.bat 并保持窗口不关闭，然后刷新页面再试。";
+      const msg = String(ex?.message || ex || "上传失败");
+      if (/Failed to fetch|NetworkError|fetch/i.test(msg)) {
+        showErr("无法连接本地服务 127.0.0.1:8787。请先启动小面，再 Ctrl+F5 刷新。");
+      } else if (/WinError 32|PermissionError|另一个程序正在使用/i.test(msg)) {
+        showErr("任务文件写入冲突。请「停止小面」后「启动小面」，再重试。");
       } else {
-        err.textContent = msg;
+        showErr(msg);
       }
+      console.error("[upload]", ex);
     } finally {
       btn.disabled = false;
       btn.textContent = "开始服装切片";
@@ -1694,60 +2400,15 @@ function setupForm() {
 
 let transcriptCache = [];
 
+// 口播稿抽屉已从 UI 移除；左侧「口播时间轴」即主编辑入口。
 function openTranscriptDrawer() {
-  const mask = $("drawer-backdrop");
-  const drawer = $("transcript-drawer");
-  if (mask) {
-    mask.hidden = false;
-    mask.style.display = "block";
-  }
-  if (drawer) {
-    drawer.hidden = false;
-    drawer.style.display = "flex";
-  }
-  loadTranscriptEditor(currentJobId);
+  /* no-op: drawer stripped */
 }
-
 function closeTranscriptDrawer() {
-  const mask = $("drawer-backdrop");
-  const drawer = $("transcript-drawer");
-  if (mask) {
-    mask.hidden = true;
-    mask.style.display = "none";
-  }
-  if (drawer) {
-    drawer.hidden = true;
-    drawer.style.display = "none";
-  }
+  /* no-op */
 }
-
 function setupTranscriptModule() {
-  $("open-transcript")?.addEventListener("click", (e) => {
-    e.preventDefault();
-    openTranscriptDrawer();
-  });
-  // capture phase so close always works even if something stops bubbling
-  $("close-transcript")?.addEventListener(
-    "click",
-    (e) => {
-      e.preventDefault();
-      e.stopPropagation();
-      closeTranscriptDrawer();
-    },
-    true
-  );
-  $("drawer-backdrop")?.addEventListener("click", (e) => {
-    e.preventDefault();
-    closeTranscriptDrawer();
-  });
-  document.addEventListener("keydown", (e) => {
-    if (e.key === "Escape") closeTranscriptDrawer();
-  });
-  $("tr-reload")?.addEventListener("click", () => loadTranscriptEditor(currentJobId));
-  $("tr-all")?.addEventListener("click", () => setAllKeep(true));
-  $("tr-none")?.addEventListener("click", () => setAllKeep(false));
-  $("tr-save")?.addEventListener("click", () => saveTranscript(false));
-  $("tr-reclip")?.addEventListener("click", () => saveTranscript(true));
+  /* no-op: top-bar 口播稿 removed */
 }
 
 function setAllKeep(v) {
@@ -1879,6 +2540,41 @@ function setupTranscriptPanelToggle() {
     if (e.target.closest("button")) return;
     e.preventDefault();
     apply(false);
+  });
+}
+
+/** LLM 配置面板：默认可折叠，状态栏仍显示就绪摘要。 */
+function setupLlmPanelToggle() {
+  const panel = $("panel-llm");
+  const btn = $("toggle-llm-panel");
+  if (!panel || !btn) return;
+  const apply = (collapsed) => {
+    panel.classList.toggle("collapsed", collapsed);
+    btn.textContent = collapsed ? "展开" : "收起";
+    btn.title = collapsed ? "展开 LLM 配置" : "收起 LLM 配置";
+    try {
+      localStorage.setItem("clipper_llm_panel_collapsed", collapsed ? "1" : "0");
+    } catch (_) {}
+  };
+  // default collapsed on first visit to keep right rail clean
+  let collapsed = true;
+  try {
+    const v = localStorage.getItem("clipper_llm_panel_collapsed");
+    if (v === "0") collapsed = false;
+    else if (v === "1") collapsed = true;
+    else localStorage.setItem("clipper_llm_panel_collapsed", "1");
+  } catch (_) {}
+  apply(collapsed);
+  btn.addEventListener("click", (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    apply(!panel.classList.contains("collapsed"));
+  });
+  // click header (not inputs/buttons) to toggle
+  panel.querySelector(".jy-panel-head")?.addEventListener("click", (e) => {
+    if (e.target.closest("button, input, a, label")) return;
+    e.preventDefault();
+    apply(!panel.classList.contains("collapsed"));
   });
 }
 
@@ -2122,6 +2818,7 @@ setupTranscriptModule();
 setupPlanTools();
 setupAsrTools();
 setupTranscriptPanelToggle();
+setupLlmPanelToggle();
 setupLlmConfig();
 // reflow-safe fit when fonts/layout settle or panel width changes
 window.addEventListener("resize", () => scheduleFitClipTextareas(document));

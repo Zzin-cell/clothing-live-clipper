@@ -35,8 +35,13 @@ _PRICE_TEXT = (
     "付款", "包邮", "邮费", "郵費", "太贵", "太貴", "贵呀", "貴呀",
     # 直播催单 / 成交口令
     "加一单", "加一單", "再加一单", "再加一單", "拍一单", "拍一單", "补一单", "补一單",
+    "加两单", "加几单", "拍两单", "来一单", "再来一单", "加一件", "拍一件",
     "加一波", "冲一波", "赶紧加", "赶快加", "抓紧加", "闭眼加", "有货的加",
     "想要的加", "喜欢的加", "看上的加", "秒了", "秒它", "锁单", "锁住",
+    # 挂车 / n号 / 其它链接表达
+    "上链接", "上鏈接", "点链接", "戳链接", "拍链接", "放链接", "挂链接", "开链接", "给链接",
+    "几号链接", "幾號鏈接", "1号链接", "2号链接", "3号链接", "一号链接", "二号链接", "三号链接",
+    "上方链接", "下方链接", "挂上车", "上车了", "加车", "加車", "上车", "上車", "领券",
 )
 
 # Hard size advice — never keep in final cut
@@ -106,12 +111,32 @@ def score_clip(clip: Clip) -> Clip:
         clip.score_breakdown = {"shipping_excluded": 0.0, "raw": 0.0}
         return clip
     # 直播成交口令：加一单 / 拍一单 / 赶紧加…
-    if re.search(r"(加|拍|下|锁|鎖).{0,2}(一|1|俩|两|几).{0,2}(单|單|波|件)", text):
+    if re.search(
+        r"(加|拍|下|锁|鎖|来|來)\s*(?:个|個|了)?\s*(一|1|两|倆|俩|二|几|幾)\s*(?:个|個)?\s*(单|單|波|件)",
+        text,
+    ):
         clip.score = 0.0
         clip.weight = 0.0
         clip.score_breakdown = {"deal_call_excluded": 0.0, "raw": 0.0}
         return clip
-    if re.search(r"(赶紧|赶快|抓紧|全部|一起|有货|想要|喜欢|看上|闭眼).{0,4}(加|拍|下单|下單)", text):
+    if re.search(
+        r"(赶紧|赶快|抓紧|全部|一起|全场|有货|想要|喜欢|看上|闭眼|马上).{0,6}(加|拍|下单|下單|锁|鎖)",
+        text,
+    ):
+        clip.score = 0.0
+        clip.weight = 0.0
+        clip.score_breakdown = {"deal_call_excluded": 0.0, "raw": 0.0}
+        return clip
+    # n号链接 / 点链接 / 挂车入口
+    if re.search(
+        r"(?:[0-9０-９一二三四五六七八九十两俩几幾nN]\s*)+(?:号|號)\s*(?:链接|鏈接|小黄车|小黃車|购物车|購物車|位|窗)?",
+        text,
+    ) or re.search(r"(上|点|點|戳|拍|放|挂|掛|开|開|给|給|看)\s*(?:个|個)?\s*(链接|鏈接)", text):
+        clip.score = 0.0
+        clip.weight = 0.0
+        clip.score_breakdown = {"link_slot_excluded": 0.0, "raw": 0.0}
+        return clip
+    if re.search(r"(加购|加購|加车|加車|上车|上車|挂车|掛車)", text):
         clip.score = 0.0
         clip.weight = 0.0
         clip.score_breakdown = {"deal_call_excluded": 0.0, "raw": 0.0}
@@ -1173,6 +1198,19 @@ def build_timeline_plan(
 
     story = [_to_slot(c, "story") for c in selected]
     # merge adjacent tiny modules that are almost continuous (avoid choppy hard stops)
+    # Same-topic only — don't glue 面料+版型 into one module.
+    def _coarse_topic(text: str) -> str:
+        t = text or ""
+        if any(w in t for w in ("版型", "显瘦", "收腰", "遮肉", "上身", "全身", "修身", "高腰", "比例")):
+            return "fit"
+        if any(w in t for w in ("面料", "布料", "材质", "垂感", "透气", "不透", "软", "凉感", "亲肤", "闷")):
+            return "fabric"
+        if any(w in t for w in _CRAFT_DETAIL_WORDS):
+            return "detail"
+        if any(w in t for w in _SCENE_WORDS):
+            return "audience"
+        return "other"
+
     merged: list[PlanSlot] = []
     for s in story:
         if not merged:
@@ -1183,10 +1221,14 @@ def build_timeline_plan(
         prev_dur = prev.t1_ms - prev.t0_ms
         cur_dur = s.t1_ms - s.t0_ms
         prev_incomplete = (prev.text or "").endswith(("然后", "因为", "所以", "而且", "但是", "的话", "的", "了"))
+        same_topic = _coarse_topic(prev.text or "") == _coarse_topic(s.text or "")
         # merge close fragments / incomplete tails into one natural module
-        if 0 <= gap <= 650 and (
-            prev_incomplete or prev_dur < 3000 or cur_dur < 2800
-        ) and (prev_dur + cur_dur + gap) <= 11000:
+        if (
+            same_topic
+            and 0 <= gap <= 650
+            and (prev_incomplete or prev_dur < 3000 or cur_dur < 2800)
+            and (prev_dur + cur_dur + gap) <= 11000
+        ):
             prev.t1_ms = max(prev.t1_ms, s.t1_ms)
             if s.text and s.text not in (prev.text or ""):
                 joiner = "" if (prev.text or "").endswith(("，", "。", "！", "？", ",", ".")) else "，"
@@ -1202,6 +1244,37 @@ def build_timeline_plan(
         if end.endswith(("然后", "因为", "所以", "而且", "但是", "的话", "你看", "还有", "的", "了")) and len(story) > 2:
             story.pop()
             warnings.append("dropped_incomplete_tail")
+
+    # Bundle same-topic clauses so selling points aren't interleaved
+    # (e.g. fabric → fit → fabric). Prefer llm_plan helper when available.
+    try:
+        from clipper.llm_plan import _cluster_slots_by_topic
+
+        clustered = _cluster_slots_by_topic(story)
+        if clustered and len(clustered) == len(story):
+            story = clustered
+            warnings.append("policy:topic_blocks_together")
+    except Exception:
+        # Lightweight local fallback: group by coarse narrative stage
+        if len(story) > 2:
+            opener = story[0]
+            rest = story[1:]
+
+            def _topic_rank(s: PlanSlot) -> int:
+                t = s.text or ""
+                if any(w in t for w in ("版型", "显瘦", "收腰", "遮肉", "上身", "全身", "修身", "高腰", "比例")):
+                    return 0
+                if any(w in t for w in ("面料", "布料", "材质", "垂感", "透气", "不透", "软", "凉感", "亲肤", "闷")):
+                    return 1
+                if any(w in t for w in _CRAFT_DETAIL_WORDS):
+                    return 2
+                if any(w in t for w in _SCENE_WORDS):
+                    return 3
+                return 4
+
+            rest = sorted(rest, key=lambda s: (_topic_rank(s), s.t0_ms))
+            story = [opener, *rest]
+            warnings.append("policy:topic_blocks_together")
 
     total = sum(s.t1_ms - s.t0_ms for s in story)
     # Do NOT stretch t1_ms past real speech just to hit target duration.
@@ -1228,6 +1301,7 @@ def build_timeline_plan(
     warnings.append("policy:size_excluded")
     warnings.append("policy:de_live_room_feel")
     warnings.append("policy:logic_over_sections")
+    warnings.append("policy:reverse_cut_learning")
 
     ratio = 1.0 if story else 0.0
     return TimelinePlan(

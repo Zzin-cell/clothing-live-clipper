@@ -19,7 +19,7 @@ import urllib.request
 from typing import Any
 
 from clipper.config import Settings
-from clipper.learning import learning_status, split_clauses
+from clipper.learning import learned_text_score, learning_status, split_clauses
 from clipper.models import PlanSlot, TimelinePlan
 from clipper.openai_compat import OpenAICompatError, chat_completions
 from clipper.user_llm import runtime_llm
@@ -93,6 +93,20 @@ SYSTEM_PROMPT = """你是服装带货短视频剪辑导演（抖音/快手完播
 6) 可以短，但不能断；完整逻辑 > 硬凑满 60 秒
 
 ====================
+五-B、同主题小句必须成块连排（禁止主题打散）
+====================
+1) 同一逻辑块内的相关小句必须相邻成组，禁止「面料→版型→又面料→又版型」来回跳
+2) 主题块建议整块排放（块内可按原口播时间或信息递进，但不要跨块穿插）：
+   - 版型/上身效果块：显瘦、收腰、遮肉、长短、肩线腰线、上身比例
+   - 面料/体感块：软、垂、透气、不透、凉感、亲肤、抗皱
+   - 细节/做工块：蕾丝、拼接、走线、口袋、领口袖口工艺
+   - 人群/场景块：适合谁、通勤、夏天、日常、微胖梨形
+3) 反例（禁止）：正在讲“不透/凉感”，中间突然插“显瘦收腰”，后面再回来讲面料
+4) 正例：开场钩子1句 → 整块上身效果2–4句连着讲完 → 整块面料体验连着讲完 → 细节/场景 → 收束
+5) 若两句讲同一卖点（同 point / 同主题），keep 数组里必须紧挨着，中间不得夹其它主题
+6) 完整模块语义优先于“按原直播时间碎拼”
+
+====================
 六、技术硬规则
 ====================
 1) 输入是全量小句；先提炼 main_points，再从中选 keep 并重排
@@ -142,6 +156,11 @@ SYSTEM_PROMPT_LIGHT = """你是服装短视频剪辑导演（成品要像短视�
 【结构优化（叠在硬规则之上，不是替换）】
 顺序：0–3s 最吸睛(上身效果/面料特写) → 全身效果 → 细节做工 → 穿搭场景(含人群) → 自然收束
 信息密度要高；完整表达优先于硬凑时长（可短 3–8 秒，禁静音尾巴）
+
+【同主题连排 · 强制】
+- 同一主题小句必须连在一起成块，禁止版型/面料/细节来回穿插
+- 例：显瘦收腰句全部连排后再进入面料软垂不透块，勿「显瘦→不透→又收腰」
+- keep 数组相邻项的 point/主题应尽量相同；换主题时整块切换
 
 JSON（id 必须原样复制输入里的 id，如 c12 / c00012，禁止乱写长串0）：
 {"product_summary":"...","hook_type":"visual|effect","main_points":["全身效果","细节做工","穿搭场景"],"logic":["3s吸睛","全身效果","细节做工","穿搭场景","收束"],"keep":[{"id":"c12","t0_ms":0,"t1_ms":1000,"text":"...","why":"...","point":"版型","complete":true}],"drop_ids":["c1"],"notes":"..."}
@@ -321,11 +340,16 @@ _CONTROL_MARKERS = (
     "晚上好", "大家好", "早上好", "欢迎", "公屏", "弹幕", "福袋", "连麦",
     # 设备/调试
     "调试", "对焦", "收音", "听得到", "在不在", "来了吗",
-    # 交易入口 / 直播催单（含「加一单」等成交口令）
-    "链接", "小黄车", "加购", "上链接", "购物车",
-    "加一单", "再加一单", "赶紧加", "赶快加", "抓紧加", "全部加", "一起加",
-    "有货的加", "想要的加", "喜欢的加", "看上的加", "闭眼加",
+    # 交易入口 / 直播催单（加单 + 挂车链接 + n号）
+    "链接", "鏈接", "小黄车", "小黃車", "加购", "加購", "上链接", "上鏈接", "购物车", "購物車",
+    "加一单", "再加一单", "赶紧加", "赶快加", "抓紧加", "全部加", "一起加", "全场加", "全部拍",
+    "有货的加", "想要的加", "喜欢的加", "看上的加", "闭眼加", "闭眼拍",
     "拍一单", "再拍一单", "下单", "拍下", "库存告急", "手慢无",
+    "号链接", "號鏈接", "号鏈接", "幾號鏈接", "几号链接", "几号鏈接",
+    "1号链接", "2号链接", "3号链接", "4号链接", "5号链接", "6号链接",
+    "一号链接", "二号链接", "三号链接", "四号链接", "五号链接",
+    "点链接", "戳链接", "拍链接", "放链接", "挂链接", "给链接", "弹链接", "开链接",
+    "左下角", "右下角", "上方链接", "下方链接", "挂上车", "上车了", "加车",
     # 导播/准备口令（截图：准备一下 / 321 / 里面去拍）
     "准备一下", "来准备", "先准备", "準備一下", "來準備", "备一下", "備一下",
     "里面去拍", "裏面去拍", "里面拍", "出去拍", "换个机位", "转个机位",
@@ -379,7 +403,7 @@ _ONBODY_EFFECT_MARKERS = (
     "不显胯", "遮胯", "提臀", "收腹", "显腿长", "显高", "显比例",
     "不透底", "不透光", "安全感", "坐着也", "弯腰也不",
 )
-# 价格/发货/物流：一律剔除（含开场福利话术、ASR 谐音/繁体）
+# 价格/发货/物流/挂车加单：一律剔除（含开场福利、链接表达、n号、ASR 谐音/繁体）
 _PRICE_SHIP_MARKERS = (
     # 价格/促销（简繁 + 口语）
     "价格", "價錢", "價錢", "定价", "定價", "价钱", "多少钱", "多少錢", "块钱", "塊錢",
@@ -392,10 +416,18 @@ _PRICE_SHIP_MARKERS = (
     "发货", "發貨", "发貨", "现货", "現貨", "预售", "預售", "几天发", "幾天發", "今日发", "今日發",
     "次日达", "次日達", "物流", "快递", "快遞", "顺丰", "順豐", "补货", "補貨", "断码", "斷碼",
     "拍下", "下单", "下單", "付款", "发货时间", "發貨時間", "到货", "到貨", "邮费", "郵費",
-    # 直播成交口令 / ASR 谐音
+    # 直播成交口令 / 加单 / ASR 谐音
     "加一单", "加一單", "加一捕", "再加一单", "再加一單", "赶紧加一单",
     "拍一单", "拍一單", "再拍一单", "补一单", "补一單", "上一单", "上一單",
+    "加两单", "加俩单", "加几单", "拍两单", "拍几单", "再来一单", "再来单",
+    "加一件", "拍一件", "来一单", "来一單", "整单拍", "整单加",
     "加一波", "冲一波", "秒了", "秒它", "锁单", "锁住", "锁一下",
+    # 挂车 / 链接入口 / n号表达
+    "链接", "鏈接", "小黄车", "小黃車", "购物车", "購物車", "加购", "加購",
+    "上链接", "上鏈接", "点链接", "戳链接", "拍链接", "放链接", "挂链接", "开链接", "给链接",
+    "号链接", "號鏈接", "几号链接", "幾號鏈接", "1号链接", "2号链接", "3号链接",
+    "一号链接", "二号链接", "三号链接", "上方链接", "下方链接",
+    "挂上车", "上车了", "加车", "加車", "上车", "上車", "弹窗", "彈窗", "领券",
 )
 # 成片要凸显的服装卖点（版型 / 上身效果 / 面料 / 适用人群）
 _FIT_MARKERS = (
@@ -420,6 +452,9 @@ _VALUE_MARKERS = _FIT_MARKERS + _FABRIC_MARKERS + _AUDIENCE_MARKERS + (
 def _is_control(text: str) -> bool:
     t = text or ""
     if any(x in t for x in _CONTROL_MARKERS):
+        return True
+    # 挂车/加单也当控场硬删（与成交过滤双保险）
+    if _is_link_or_slot_talk(t) or _is_deal_call(t):
         return True
     # 3 2 1 / 321 倒计时口令
     if re.search(r"(?<!\d)3\s*2\s*1(?!\d)", t):
@@ -526,9 +561,79 @@ def _is_policy_risk(text: str) -> bool:
     return False
 
 
+def _is_link_or_slot_talk(text: str) -> bool:
+    """挂车链接 / n号链接 / 点链接 等直播入口话术（短视频一律剔除）。"""
+    t = text or ""
+    if not t:
+        return False
+    if any(
+        k in t
+        for k in (
+            "链接", "鏈接", "小黄车", "小黃車", "购物车", "購物車",
+            "加购", "加購", "弹窗", "彈窗", "挂车", "挂上车",
+        )
+    ):
+        return True
+    # n号 / 几号 / 1号链接 / 二号 / N号（挂车位）
+    if re.search(
+        r"(?:[0-9０-９一二三四五六七八九十两俩几幾nN]\s*)+(?:号|號)\s*(?:链接|鏈接|小黄车|小黃車|购物车|購物車|位|窗)?",
+        t,
+    ):
+        return True
+    # 上/点/戳/拍/放/开 链接
+    if re.search(r"(上|点|點|戳|拍|放|挂|掛|开|開|给|給|看|有)\s*(?:个|個)?\s*(链接|鏈接)", t):
+        return True
+    # ASR: “连接/连结/ Lianjie” 误识别（与购物语境）
+    if re.search(r"(连接|連結|连结)", t) and any(
+        k in t for k in ("号", "號", "点", "點", "上", "拍", "加", "车", "車", "左", "右", "下角")
+    ):
+        return True
+    # 左/右 角 + 链接/车
+    if re.search(r"(左|右|上|下)\s*(上|下)?\s*角", t) and any(
+        k in t for k in ("链接", "鏈接", "车", "車", "拍", "点", "點", "加")
+    ):
+        return True
+    return False
+
+
+def _is_deal_call(text: str) -> bool:
+    """直播加单 / 催拍口令（含 ASR 变体）。"""
+    t = text or ""
+    if not t:
+        return False
+    # 加/拍/下/锁 + 一/两/几 + 单/波/件
+    if re.search(
+        r"(加|拍|下|锁|鎖|来|來)\s*(?:个|個|了)?\s*(一|1|两|倆|俩|二|几|幾|俩)\s*(?:个|個)?\s*(单|單|波|件|单子|單子)",
+        t,
+    ):
+        return True
+    # 再加/再拍/赶紧加/闭眼加
+    if re.search(
+        r"(再|赶紧|赶快|抓紧|全部|一起|全场|全場|有货|想要|喜欢|喜歡|看上|闭眼|閉眼|马上|趕緊)\s*.{0,6}(加|拍|下单|下單|锁|鎖)",
+        t,
+    ):
+        return True
+    # 加购/上车/加车
+    if re.search(r"(加购|加購|加车|加車|上车|上車|挂车|掛車)", t):
+        return True
+    # 「拍下 / 下单了吗 / 库存告急」
+    if re.search(r"(拍下|下单|下單|锁单|鎖單|库存告急|手慢无|秒了|秒它)", t):
+        return True
+    # 纯「加单」「加单了」
+    if re.search(r"(加\s*单|加\s*單|拍\s*单|拍\s*單)", t):
+        return True
+    return False
+
+
 def _is_price_or_shipping(text: str) -> bool:
     t = text or ""
     if any(x in t for x in _PRICE_SHIP_MARKERS):
+        return True
+    # 链接 / n号 / 挂车入口（强化）
+    if _is_link_or_slot_talk(t):
+        return True
+    # 直播加单口令（强化）
+    if _is_deal_call(t):
         return True
     # bare / colloquial prices: 199、599拨分、¥59、99块、1000多
     if re.search(r"(¥|￥)\s*\d+", t):
@@ -543,19 +648,21 @@ def _is_price_or_shipping(text: str) -> bool:
     # 发货语境（含繁体 ASR）
     if re.search(r"(发|發).{0,4}(货|貨)", t) or re.search(r"(货|貨).{0,4}(时间|時間|慢)", t):
         return True
-    # 直播成交口令：加一单 / 再加一 / 赶紧加 / 拍一单…
-    if re.search(r"(加|拍|下|锁|鎖).{0,2}(一|1|俩|两|几).{0,2}(单|單|波|件)", t):
-        return True
-    if re.search(r"(赶紧|赶快|抓紧|全部|一起|有货|想要|喜欢|看上|闭眼).{0,4}(加|拍|下单|下單)", t):
-        return True
-    if re.search(r"(加购|加購|加车|加車|上车|上車)", t):
-        return True
     return False
 
 
-def _value_score(text: str) -> int:
+def _learned_delta(text: str, *, for_hook: bool = False) -> float:
+    """Safe wrapper: reverse-cut learning score for local + cloud candidate ranking."""
+    try:
+        return float(learned_text_score(text or "", for_hook=for_hook) or 0.0)
+    except Exception:
+        return 0.0
+
+
+def _value_score(text: str, *, for_hook: bool = False) -> float:
+    """Base clothing value + human reverse-cut preferences (all planning paths)."""
     t = text or ""
-    s = 0
+    s = 0.0
     # 三类核心卖点加权（版型/面料/人群）
     if any(k in t for k in _FIT_MARKERS):
         s += 6
@@ -575,6 +682,13 @@ def _value_score(text: str) -> int:
         s -= 80
     if len(t) < 2:
         s -= 20
+    # Human-in-the-loop: keep / drop / hook preferences from 保存并重剪
+    learn = _learned_delta(t, for_hook=for_hook)
+    # Scale so typical learn |x|<5 becomes meaningful but cannot override hard bans
+    if learn > 0:
+        s += min(12.0, learn * 1.6)
+    elif learn < 0:
+        s += max(-18.0, learn * 2.0)
     return s
 
 
@@ -621,8 +735,15 @@ def select_clauses_for_llm(
         seen_norm.add(norm)
         kept.append(c)
 
-    # score and take best, but preserve chronological order of chosen set
-    ranked = sorted(kept, key=lambda c: _value_score(str(c.get("text") or "")), reverse=True)
+    # score and take best (base value + reverse-cut learning), preserve chrono of chosen set
+    ranked = sorted(
+        kept,
+        key=lambda c: (
+            _value_score(str(c.get("text") or "")),
+            _learned_delta(str(c.get("text") or ""), for_hook=True),
+        ),
+        reverse=True,
+    )
     hard_cap = max(20, int(max_clauses))
     top = ranked[:hard_cap]
     top_ids = {str(c.get("id")) for c in top}
@@ -655,13 +776,32 @@ def _learning_hints(limit: int = 4) -> dict[str, Any]:
     """Tiny preference hints only — keep payload small for latency."""
     try:
         st = learning_status()
-        keep = (st.get("top_hook") or [])[:limit]
-        drop = (st.get("top_drop") or [])[:limit]
-        if not keep and not drop:
+        # prefer human reverse-cut tops when available
+        keep = list(st.get("top_keep") or st.get("top_hook") or [])[:limit]
+        hook = list(st.get("top_hook") or [])[:limit]
+        drop = list(st.get("top_drop") or [])[:limit]
+        if not keep and not drop and not hook:
             return {}
-        return {"keep": keep, "drop": drop}
+        return {"keep": keep, "hook": hook, "drop": drop, "events": int((st.get("stats") or {}).get("events") or 0)}
     except Exception:
         return {}
+
+
+def _format_learning_prompt_bits(limit: int = 4) -> str:
+    """Compact reverse-cut taste line for cloud LLM (≤~120 chars typical)."""
+    h = _learning_hints(limit=limit)
+    if not h:
+        return ""
+    bits: list[str] = []
+    if h.get("hook"):
+        bits.append("开场偏好:" + "/".join(str(x)[:8] for x in h["hook"][:3]))
+    if h.get("keep"):
+        bits.append("多留:" + "/".join(str(x)[:8] for x in h["keep"][:3]))
+    if h.get("drop"):
+        bits.append("少留:" + "/".join(str(x)[:8] for x in h["drop"][:3]))
+    if not bits:
+        return ""
+    return "【反剪学习】" + "；".join(bits) + "。在硬删前提下优先贴合这些口味。"
 
 
 def _build_plan_messages(
@@ -692,24 +832,29 @@ def _build_plan_messages(
         text = str(u["text"])[:text_max]
         compact.append({"id": short, "text": text})
         lines.append(f"{short}|{text}")
+    learn_bits = _format_learning_prompt_bits(limit=4)
     # Line format beats nested JSON for small models (less echo / faster).
     # Hard DROP rules stay first; narrative order is additive optimization.
     user_text = (
         f"目标约{int(target_seconds)}s。从候选选保留id并按播放顺序排列（约8-16个）。"
         "【硬删·绝对禁止】任何尺码内容：M/L/S/XL、偏大偏小、胸围腰围、建议穿、几斤穿、什么码；"
-        "价格拨分包邮、发货物流、加一单催单、直播控场(家人们/扣1/321)、人设鸡汤、无关闲聊。"
-        "【结构】开头先放服装特点（版型/上身/面料），再全身效果→细节→穿搭场景。"
-        "禁止选尺码句，即使候选里有也不要。\n"
-        "候选:\n"
+        "价格拨分包邮、发货物流、加一单/拍一单催单、n号链接/小黄车/点链接、直播控场(家人们/扣1/321)、人设鸡汤、无关闲聊。"
+        "【结构】开头1句服装特点（版型/上身/面料）→整块全身效果→整块面料体感→细节做工→穿搭场景→收束。"
+        "【同主题连排·强制】同一卖点/主题的小句必须相邻成块，禁止「面料→版型→又面料→又版型」来回跳；"
+        "例如先把显瘦/收腰讲完，再整块讲软/垂/不透，勿中途穿插别的模块。"
+        "禁止选尺码句与任何加单/链接句，即使候选里有也不要。"
+        + (learn_bits if learn_bits else "")
+        + "\n候选:\n"
         + "\n".join(lines)
         + '\n只输出JSON:{"ids":["c2","c3"],"hook":"visual"}'
     )
     system = (
         "你是服装短视频剪辑助手。只输出一个JSON对象。"
         "ids必须来自候选且原样复制。"
-        "硬规则：禁止尺码(字母码/围度/建议穿/几斤)；禁止价格发货加一单直播控场。"
-        "开头先服装特点（版型/面料/上身），再全身效果→细节→穿搭场景。"
-        '格式:{"ids":["c2","c3","c4"],"hook":"visual"}'
+        "硬规则：禁止尺码(字母码/围度/建议穿/几斤)；禁止价格发货、加一单、n号链接、小黄车、直播控场。"
+        "顺序：服装特点钩子→全身效果块→面料块→细节→场景；同主题ids必须连排，禁止主题打散穿插。"
+        + ("参考用户反剪学习口味，但不突破硬删。" if learn_bits else "")
+        + '格式:{"ids":["c2","c3","c4"],"hook":"visual"}'
     )
     messages = [
         {"role": "system", "content": system},
@@ -817,6 +962,7 @@ def call_llm_for_plan(
     obj = _extract_json_obj(content)
     obj = _normalize_llm_keep_obj(obj, clauses, id_map)
     obj = _repair_keep_ids(obj, clauses)
+    learn_h = _learning_hints(limit=4)
     obj["_meta"] = {
         "model": out.get("model") or model,
         "base_url": out.get("base_url") or base,
@@ -829,6 +975,8 @@ def call_llm_for_plan(
         "trim_stats": trim_stats,
         "submit_mode": "stable_ids_only_asr_selected_clauses",
         "attempt": attempt_label,
+        "learning_applied": bool(learn_h),
+        "learning_hints": learn_h or None,
         "compat": {
             "auth_variant": out.get("auth_variant"),
             "payload_variant": out.get("payload_variant"),
@@ -1081,7 +1229,9 @@ def _repair_keep_ids(obj: dict[str, Any], clauses: list[dict[str, Any]]) -> dict
             s += 36.0
         if any(k in t for k in ("全身", "比例", "高腰", "对比", "两色", "穿上就")):
             s += 22.0
-        s += min(24.0, float(_value_score(t)) * 2.2)
+        # base value already embeds reverse-cut learning; avoid double-count blow-up
+        s += min(24.0, float(_value_score(t, for_hook=False)) * 2.0)
+        s += min(18.0, max(-12.0, _learned_delta(t, for_hook=True) * 2.4))
         # Scene/audience alone is weaker as first line
         if any(k in t for k in ("适合", "通勤", "日常", "小个子", "梨形", "微胖")) and s < 40:
             s += 6.0
@@ -1162,7 +1312,8 @@ def _repair_keep_ids(obj: dict[str, Any], clauses: list[dict[str, Any]]) -> dict
                 gap = 3
             elif b in ("scene", "audience") and not cov["audience"]:
                 gap = 3
-            return (gap, _value_score(tx))
+            # value already includes reverse-cut learning
+            return (gap, _value_score(tx), _learned_delta(tx))
 
         ranked = sorted(clauses, key=rank_key, reverse=True)
         for c in ranked:
@@ -1230,11 +1381,36 @@ def _repair_keep_ids(obj: dict[str, Any], clauses: list[dict[str, Any]]) -> dict
             rest_src,
             key=lambda x: (
                 stage_rank.get(_bucket(str(x.get("text") or "")), 3),
-                -_value_score(str(x.get("text") or "")),
                 int(x.get("t0_ms") or 0),
+                -_value_score(str(x.get("text") or "")),
             ),
         )
-        fixed = [*openers, *rest] if openers else rest
+        # Within each stage already contiguous; further force topic blocks so
+        # fabric/fit never interleave when stage mapping is ambiguous.
+        fixed_list = [*openers, *rest] if openers else rest
+        try:
+            pseudo_slots = [
+                PlanSlot(
+                    clip_id=str(x.get("id") or f"k{i}"),
+                    role="story",
+                    t0_ms=int(x.get("t0_ms") or 0),
+                    t1_ms=int(x.get("t1_ms") or 0),
+                    text=str(x.get("text") or ""),
+                    score=float(_value_score(str(x.get("text") or ""))),
+                )
+                for i, x in enumerate(fixed_list)
+            ]
+            clustered = _cluster_slots_by_topic(pseudo_slots)
+            by_cid = {str(x.get("id") or f"k{i}"): x for i, x in enumerate(fixed_list)}
+            fixed = []
+            for s in clustered:
+                item = by_cid.get(s.clip_id)
+                if item is not None:
+                    fixed.append(item)
+            if len(fixed) != len(fixed_list):
+                fixed = fixed_list
+        except Exception:
+            fixed = fixed_list
     obj["keep"] = fixed
     cov_final = _coverage()
     obj["_coverage"] = cov_final
@@ -1252,6 +1428,107 @@ _INCOMPLETE_TAIL = (
     "你看", "你看一下", "还有", "以及", "比如", "比如说", "包括", "以及呢",
     "的话", "的话呢", "的话啊", "的", "了", "呢", "啊", "哦", "嗯",
 )
+
+
+def _topic_of_text(text: str) -> str:
+    """Coarse topic bucket for clustering related clauses together.
+
+    Priority for mixed lines (e.g. "收腰面料软"):
+      detail craft markers → fit/on-body → fabric feel → audience → close → other
+    Detail first so 蕾丝/拼接 don't get swallowed into fabric just because of "软".
+    """
+    t = text or ""
+    # Craft/detail first (more specific product modules)
+    if any(
+        k in t
+        for k in (
+            "蕾丝", "拼接", "走线", "工艺", "细节", "口袋", "领口", "袖口",
+            "开叉", "纽扣", "车线", "花边", "刺绣", "滚边", "肌理",
+        )
+    ):
+        return "detail"
+    # On-body / fit block
+    if _is_onbody_effect(t) or any(
+        k in t
+        for k in (
+            "显瘦", "收腰", "修身", "遮肉", "遮肚子", "遮胯", "肩线", "腰线",
+            "版型", "长短", "上身", "比例", "显腿", "不挑人", "包裹", "高腰",
+            "全身",
+        )
+    ):
+        return "fit"
+    # Fabric / hand-feel block
+    if any(
+        k in t
+        for k in (
+            "面料", "布料", "材质", "手感", "垂感", "透气", "不透", "凉感",
+            "亲肤", "柔软", "软", "冰凉", "抗皱", "不起球", "闷",
+            "醋酸", "天丝", "雪纺", "纯棉", "罗马布", "针织", "冰丝", "干爽",
+        )
+    ):
+        return "fabric"
+    # Audience / scene
+    if any(
+        k in t
+        for k in (
+            "适合", "微胖", "梨形", "小个子", "通勤", "日常", "夏天", "上班",
+            "场景", "季节", "人群", "谁穿", "年龄", "搭配", "好搭", "显白",
+        )
+    ):
+        return "audience"
+    # Soft closing recap only when not a concrete feature line
+    if any(k in t for k in ("推荐", "闭眼入", "真的好穿", "必须安排", "就这些", "就这样")):
+        return "close"
+    return "other"
+
+
+def _cluster_slots_by_topic(slots: list[PlanSlot]) -> list[PlanSlot]:
+    """
+    Reorder story slots so same-topic clauses form contiguous blocks.
+
+    Macro order (fixed product narrative):
+      hook(other/first) stays first if present → fit → fabric → detail → audience → close → other
+    Within a topic, keep relative order by original source time (t0_ms),
+    so "one module" sounds continuous rather than theme-hopping.
+    """
+    if not slots or len(slots) <= 2:
+        return slots
+
+    # Preserve first hook-like slot position: the current first item is treated as opener.
+    opener = slots[0]
+    rest = list(slots[1:])
+
+    # group remaining by topic, preserve first-seen order of topics with priority
+    topic_priority = {
+        "fit": 0,
+        "fabric": 1,
+        "detail": 2,
+        "audience": 3,
+        "close": 4,
+        "other": 5,
+    }
+    buckets: dict[str, list[PlanSlot]] = {k: [] for k in topic_priority}
+    for s in rest:
+        buckets[_topic_of_text(s.text or "")].append(s)
+
+    for k in buckets:
+        buckets[k].sort(key=lambda s: (int(s.t0_ms or 0), int(s.t1_ms or 0)))
+
+    # If opener itself is fit/fabric, still keep it first (hook), remaining of same topic follow.
+    out: list[PlanSlot] = [opener]
+    opener_topic = _topic_of_text(opener.text or "")
+    if opener_topic in buckets and buckets[opener_topic]:
+        out.extend(buckets[opener_topic])
+        buckets[opener_topic] = []
+
+    for topic, _prio in sorted(topic_priority.items(), key=lambda kv: kv[1]):
+        if buckets.get(topic):
+            out.extend(buckets[topic])
+
+    # safety: no drop
+    if len(out) != len(slots):
+        return slots
+    return out
 
 
 def _looks_incomplete_text(text: str) -> bool:
@@ -1494,6 +1771,7 @@ def llm_obj_to_timeline(
                 ordered,
                 key=lambda u: (
                     -_value_score(str(u.get("text") or "")),
+                    -_learned_delta(str(u.get("text") or "")),
                     int(u.get("t0_ms") or 0),
                 ),
             )
@@ -1547,6 +1825,7 @@ def llm_obj_to_timeline(
             slots.pop()
 
     # merge adjacent continuous clauses into smoother modules (same parent or tiny gap)
+    # Only same-topic: never glue 面料+版型 into one card (kills topic clustering).
     merged: list[PlanSlot] = []
     for s in slots:
         if not merged:
@@ -1554,7 +1833,12 @@ def llm_obj_to_timeline(
             continue
         prev = merged[-1]
         gap = s.t0_ms - prev.t1_ms
-        if 0 <= gap <= 500 and (prev.t1_ms - prev.t0_ms) + (s.t1_ms - s.t0_ms) <= 10000:
+        same_topic = _topic_of_text(prev.text or "") == _topic_of_text(s.text or "")
+        if (
+            same_topic
+            and 0 <= gap <= 500
+            and (prev.t1_ms - prev.t0_ms) + (s.t1_ms - s.t0_ms) <= 10000
+        ):
             # merge only if it improves completeness
             prev.t1_ms = max(prev.t1_ms, s.t1_ms)
             if s.text and s.text not in (prev.text or ""):
@@ -1568,6 +1852,7 @@ def llm_obj_to_timeline(
     warnings = [
         "policy:llm_logic_plan",
         "policy:logic_storyline",
+        "policy:topic_blocks_together",
         "policy:complete_logic_no_cutoff",
         "policy:size_excluded",
         "policy:de_live_room_feel",
@@ -1588,6 +1873,7 @@ def llm_obj_to_timeline(
                 ordered,
                 key=lambda u: (
                     -_value_score(str(u.get("text") or "")),
+                    -_learned_delta(str(u.get("text") or "")),
                     int(u.get("t0_ms") or 0),
                 ),
             )
@@ -1635,7 +1921,11 @@ def llm_obj_to_timeline(
         warnings.append(f"policy:size_stripped_n={dropped_size_n}")
     slots = cleaned
 
-    # Keep rough narrative order preference: fit/fabric/audience mixed but opener first already from keep
+    # MUST run last: duration fill / strip above can re-scatter topics.
+    # Bundle same-topic clauses so one selling point is never interleaved.
+    slots = _cluster_slots_by_topic(slots)
+    warnings.append("policy:reverse_cut_learning")
+
     return TimelinePlan(
         target_duration_s=target_seconds,
         golden=slots,
@@ -1672,6 +1962,7 @@ def plan_from_local_clauses(
     )
     obj["_clauses"] = clauses
     obj["_clauses_raw"] = clauses_all
+    learn_h = _learning_hints(limit=4)
     obj["_meta"] = {
         "model": "local_clause_rank",
         "submit_mode": "local_after_llm_fail",
@@ -1680,6 +1971,8 @@ def plan_from_local_clauses(
         "clauses_sent": trim_stats.get("clauses_sent"),
         "trim_stats": trim_stats,
         "narrative": "clothing_features_first",
+        "learning_applied": True,  # local path always ranks via _value_score(+learn)
+        "learning_hints": learn_h or None,
     }
     plan = llm_obj_to_timeline(
         obj,
@@ -1689,7 +1982,10 @@ def plan_from_local_clauses(
     )
     if not plan.golden:
         raise RuntimeError("local_clause_plan_empty")
-    plan.warnings = list(plan.warnings or []) + ["policy:local_fill_after_llm_fail"]
+    plan.warnings = list(plan.warnings or []) + [
+        "policy:local_fill_after_llm_fail",
+        "policy:reverse_cut_learning",
+    ]
     return plan, obj
 
 

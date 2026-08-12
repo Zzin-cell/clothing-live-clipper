@@ -93,11 +93,13 @@ def test_build_plan_messages_is_ids_only_schema():
     assert "直播" in sys or "控场" in sys
     assert "服装特点" in sys or "版型" in sys
     assert "面料" in sys
+    assert "同主题" in sys or "连排" in sys or "主题" in sys
     user = messages[1]["content"]
     assert "只输出JSON" in user or "ids" in user
     assert "尺码" in user
     assert "服装特点" in user or "开头" in user
     assert "硬删" in user or "硬规则" in sys
+    assert "同主题" in user or "连排" in user
     assert "c|" in user or "c" in user
     assert compact
     assert id_map
@@ -280,10 +282,12 @@ def test_size_talk_never_enters_timeline_even_if_llm_keeps():
 
 
 def test_live_deal_call_dropped_jia_yi_dan():
-    from clipper.llm_plan import _is_control, _is_price_or_shipping
+    from clipper.llm_plan import _is_control, _is_price_or_shipping, _is_deal_call, _is_link_or_slot_talk
 
     assert _is_price_or_shipping("姐妹们赶紧加一单")
     assert _is_price_or_shipping("喜欢的加一单啊")
+    assert _is_deal_call("赶紧加两单")
+    assert _is_deal_call("来一单啊")
     assert _is_control("小黄车加购") or _is_price_or_shipping("小黄车加购")
     assert not _is_price_or_shipping("收腰版型上身显瘦")
 
@@ -303,6 +307,46 @@ def test_live_deal_call_dropped_jia_yi_dan():
     blob = " ".join(s.text for s in plan.golden)
     assert "加一单" not in blob and "拍一单" not in blob
     assert "显瘦" in blob or "面料" in blob
+
+
+def test_link_and_n_hao_expressions_hard_dropped():
+    from clipper.llm_plan import _is_link_or_slot_talk, _is_price_or_shipping, _is_control
+
+    for s in (
+        "点1号链接",
+        "看一下2号链接",
+        "三号小黄车",
+        "N号链接拍下",
+        "几号链接都有",
+        "上方链接点一下",
+        "小黄车挂上车了",
+        "戳链接加购",
+        "左下角点链接",
+    ):
+        assert _is_link_or_slot_talk(s) or _is_price_or_shipping(s) or _is_control(s), s
+    assert not _is_link_or_slot_talk("领口细节很好看")
+    assert not _is_price_or_shipping("收腰版型上身显瘦")
+
+    lines = [
+        {"utt_id": "u1", "text": "收腰版型上身显瘦遮肉", "t0_ms": 0, "t1_ms": 3500},
+        {"utt_id": "u2", "text": "喜欢的姐妹点1号链接", "t0_ms": 3500, "t1_ms": 6500},
+        {"utt_id": "u3", "text": "面料超级软还不透", "t0_ms": 6500, "t1_ms": 10000},
+        {"utt_id": "u4", "text": "三号链接也可以拍", "t0_ms": 10000, "t1_ms": 12500},
+        {"utt_id": "u5", "text": "小黄车挂上车了", "t0_ms": 12500, "t1_ms": 15000},
+        {"utt_id": "u6", "text": "通勤日常都适合", "t0_ms": 15000, "t1_ms": 18000},
+        {"utt_id": "u7", "text": "赶紧加两单别犹豫", "t0_ms": 18000, "t1_ms": 20500},
+    ]
+    clauses = expand_lines_to_clauses(lines)
+    plan = llm_obj_to_timeline(
+        {"keep": [{"id": c["id"], "text": c["text"]} for c in clauses], "_clauses": clauses},
+        lines,
+        target_seconds=60,
+        playback_speed=1.0,
+    )
+    blob = " ".join(s.text for s in plan.golden)
+    assert "链接" not in blob and "小黄车" not in blob
+    assert "加两单" not in blob and "1号" not in blob and "三号" not in blob
+    assert "显瘦" in blob or "面料" in blob or "通勤" in blob
 
 
 def test_policy_risk_dropped_from_plans():
@@ -475,6 +519,89 @@ def test_plan_from_local_clauses_not_empty():
     assert ("适合" in blob) or ("梨形" in blob) or ("小个子" in blob) or ("微胖" in blob)
     # ~60s final needs enough source @1.4x (~>42s source preferred when material exists)
     assert plan.total_duration_ms >= 20_000
+
+
+def _topic_scattered(seq: list[str]) -> bool:
+    """True if any topic reappears after a different topic intervened."""
+    last: dict[str, int] = {}
+    for i, t in enumerate(seq):
+        if t in last and any(x != t for x in seq[last[t] + 1 : i]):
+            return True
+        last[t] = i
+    return False
+
+
+def test_topic_blocks_together_after_scattered_keep():
+    """Same selling-point clauses must form contiguous blocks, not fit/fabric hopscotch."""
+    # Larger gaps so merge-on-timeline doesn't glue different topics
+    lines = [
+        {"utt_id": "u1", "text": "收腰版型上身显瘦", "t0_ms": 0, "t1_ms": 2500},
+        {"utt_id": "u2", "text": "面料超级软还不透", "t0_ms": 4000, "t1_ms": 6500},
+        {"utt_id": "u3", "text": "遮肉修身比例好看", "t0_ms": 8000, "t1_ms": 10500},
+        {"utt_id": "u4", "text": "亲肤凉感夏天不闷", "t0_ms": 12000, "t1_ms": 14500},
+        {"utt_id": "u5", "text": "底下蕾丝拼接很精致", "t0_ms": 16000, "t1_ms": 18500},
+        {"utt_id": "u6", "text": "小个子梨形也适合通勤", "t0_ms": 20000, "t1_ms": 22500},
+        {"utt_id": "u7", "text": "全身显瘦效果更好", "t0_ms": 24000, "t1_ms": 26500},
+        {"utt_id": "u8", "text": "垂感特别好手感软", "t0_ms": 28000, "t1_ms": 30500},
+    ]
+    clauses = expand_lines_to_clauses(lines)
+    by_text = {c["text"]: c for c in clauses}
+    # Deliberately alternate fit / fabric
+    order = [
+        "收腰版型上身显瘦",
+        "面料超级软还不透",
+        "遮肉修身比例好看",
+        "亲肤凉感夏天不闷",
+        "底下蕾丝拼接很精致",
+        "小个子梨形也适合通勤",
+        "全身显瘦效果更好",
+        "垂感特别好手感软",
+    ]
+    keep = [{"id": by_text[t]["id"], "text": t} for t in order if t in by_text]
+    plan = llm_obj_to_timeline(
+        {"keep": keep, "_clauses": clauses, "_clauses_raw": clauses},
+        lines,
+        target_seconds=60,
+        playback_speed=1.0,
+    )
+    ts = [lp._topic_of_text(s.text or "") for s in plan.golden]
+    assert plan.golden
+    assert "policy:topic_blocks_together" in (plan.warnings or [])
+    assert not _topic_scattered(ts), ts
+    fit_idxs = [i for i, t in enumerate(ts) if t == "fit"]
+    if len(fit_idxs) >= 2:
+        assert fit_idxs[-1] - fit_idxs[0] + 1 == len(fit_idxs), (fit_idxs, ts)
+
+
+def test_cluster_helper_and_local_no_scatter():
+    from clipper.models import PlanSlot
+
+    raw = [
+        PlanSlot(clip_id="a", role="story", t0_ms=0, t1_ms=2000, text="面料超级软", score=10),
+        PlanSlot(clip_id="b", role="story", t0_ms=2000, t1_ms=4000, text="收腰版型显瘦", score=10),
+        PlanSlot(clip_id="c", role="story", t0_ms=4000, t1_ms=6000, text="还不透气亲肤", score=10),
+        PlanSlot(clip_id="d", role="story", t0_ms=6000, t1_ms=8000, text="上身遮肉比例好看", score=10),
+        PlanSlot(clip_id="e", role="story", t0_ms=8000, t1_ms=10000, text="通勤日常都适合", score=10),
+    ]
+    out = lp._cluster_slots_by_topic(raw)
+    assert [s.clip_id for s in out][0] == "a"
+    assert not _topic_scattered([lp._topic_of_text(s.text or "") for s in out])
+
+    lines = [
+        {"utt_id": "u0", "text": "家人们晚上好扣1", "t0_ms": 0, "t1_ms": 1500},
+        {"utt_id": "u1", "text": "收腰版型上身显瘦遮肉", "t0_ms": 1500, "t1_ms": 4500},
+        {"utt_id": "u2", "text": "面料超级软还不透气", "t0_ms": 4500, "t1_ms": 7500},
+        {"utt_id": "u3", "text": "全身比例特别好看", "t0_ms": 7500, "t1_ms": 10500},
+        {"utt_id": "u4", "text": "亲肤凉感夏天不闷", "t0_ms": 10500, "t1_ms": 13500},
+        {"utt_id": "u5", "text": "细节蕾丝拼接做工精细", "t0_ms": 13500, "t1_ms": 16500},
+        {"utt_id": "u6", "text": "微胖梨形通勤也适合", "t0_ms": 16500, "t1_ms": 19500},
+        {"utt_id": "u7", "text": "修身不显胯遮肚子", "t0_ms": 19500, "t1_ms": 22500},
+        {"utt_id": "u8", "text": "垂感手感都特别舒服", "t0_ms": 22500, "t1_ms": 25500},
+    ]
+    plan, _obj = lp.plan_from_local_clauses(lines, target_seconds=60, playback_speed=1.4)
+    ts = [lp._topic_of_text(s.text or "") for s in plan.golden]
+    assert plan.golden
+    assert not _topic_scattered(ts), ts
 
 
 def test_repair_forces_coverage_and_duration():

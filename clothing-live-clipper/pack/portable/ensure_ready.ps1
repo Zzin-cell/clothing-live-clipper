@@ -11,8 +11,25 @@ if ($selfName -eq "portable" -and $parentName -eq "pack") {
   $AppRoot = (Resolve-Path (Join-Path $PackRoot "..")).Path
 }
 
+function Resolve-Python {
+  $cands = @(
+    (Join-Path $AppRoot ".venv\Scripts\python.exe"),
+    (Join-Path $AppRoot "tools\python\python.exe"),
+    (Join-Path $AppRoot "python\python.exe")
+  )
+  $marker = Join-Path $AppRoot "tools\use_bundled_python.txt"
+  if (Test-Path $marker) {
+    $m = (Get-Content $marker -ErrorAction SilentlyContinue | Select-Object -First 1)
+    if ($m -and (Test-Path $m)) { $cands = @($m) + $cands }
+  }
+  foreach ($p in $cands) {
+    if ($p -and (Test-Path $p)) { return $p }
+  }
+  return $null
+}
+
 function Test-EnvHealthy {
-  $py = Join-Path $AppRoot ".venv\Scripts\python.exe"
+  $py = Resolve-Python
   $ff = Join-Path $AppRoot "tools\ffmpeg\bin\ffmpeg.exe"
   $modelOk = $false
   foreach ($n in @("whisper-medium", "whisper-small", "whisper-tiny")) {
@@ -22,7 +39,9 @@ function Test-EnvHealthy {
       break
     }
   }
-  if (-not (Test-Path $py)) { return $false }
+  # Healthy end-state still prefers a working runtime with deps imported.
+  # Bundled python alone is not enough before first install.
+  if (-not $py) { return $false }
   if (-not (Test-Path $ff)) { return $false }
   if (-not $modelOk) { return $false }
   try {
@@ -67,11 +86,15 @@ if ($need) {
   Write-Host "============================================"
   Write-Host ""
   $installer = Join-Path $PackRoot "install_all.ps1"
-  & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $installer
+  $psExe = Join-Path $env:WINDIR "System32\WindowsPowerShell\v1.0\powershell.exe"
+  if (-not (Test-Path $psExe)) { $psExe = "powershell.exe" }
+  & $psExe -NoProfile -ExecutionPolicy Bypass -File $installer
   if ($LASTEXITCODE -ne 0) {
     Write-Host "Install failed once. Retrying once more..."
     Start-Sleep -Seconds 2
-    & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $installer
+    $psExe = Join-Path $env:WINDIR "System32\WindowsPowerShell\v1.0\powershell.exe"
+  if (-not (Test-Path $psExe)) { $psExe = "powershell.exe" }
+  & $psExe -NoProfile -ExecutionPolicy Bypass -File $installer
     if ($LASTEXITCODE -ne 0) {
       Write-Host "Auto install/repair failed. See tools\logs\"
       exit 1

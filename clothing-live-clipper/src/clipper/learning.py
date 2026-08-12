@@ -484,19 +484,47 @@ def learned_text_score(text: str, *, for_hook: bool = False) -> float:
 def learning_status() -> dict[str, Any]:
     prefs = load_preferences()
     stats = prefs.get("stats") or {}
+    top_hook = sorted(
+        (prefs.get("hook_boost") or {}).items(), key=lambda kv: kv[1], reverse=True
+    )[:12]
+    top_keep = sorted(
+        (prefs.get("keep_boost") or {}).items(), key=lambda kv: kv[1], reverse=True
+    )[:12]
+    top_drop = sorted(
+        (prefs.get("drop_penalty") or {}).items(), key=lambda kv: kv[1], reverse=True
+    )[:12]
+    # flatten phrase list for prompt/UI (prefer pure phrase keys)
+    def _phrases(items: list[tuple[Any, Any]], n: int = 8) -> list[str]:
+        out: list[str] = []
+        for k, _v in items:
+            s = str(k or "").strip()
+            if not s or len(s) < 2:
+                continue
+            out.append(s[:24])
+            if len(out) >= n:
+                break
+        return out
+
     return {
         "enabled": True,
         "events": int(stats.get("events") or 0),
+        "stats": {
+            "events": int(stats.get("events") or 0),
+            "kept_slots": int(stats.get("kept_slots") or 0),
+            "dropped_slots": int(stats.get("dropped_slots") or 0),
+            "hook_slots": int(stats.get("hook_slots") or 0),
+        },
         "kept_slots": int(stats.get("kept_slots") or 0),
         "dropped_slots": int(stats.get("dropped_slots") or 0),
         "hook_slots": int(stats.get("hook_slots") or 0),
         "updated_at": prefs.get("updated_at"),
-        "top_hook": sorted(
-            (prefs.get("hook_boost") or {}).items(), key=lambda kv: kv[1], reverse=True
-        )[:12],
-        "top_drop": sorted(
-            (prefs.get("drop_penalty") or {}).items(), key=lambda kv: kv[1], reverse=True
-        )[:12],
+        "top_hook": _phrases(top_hook) or [k for k, _ in top_hook[:8]],
+        "top_keep": _phrases(top_keep) or [k for k, _ in top_keep[:8]],
+        "top_drop": _phrases(top_drop) or [k for k, _ in top_drop[:8]],
+        # raw pairs kept for debug/tools
+        "top_hook_pairs": top_hook,
+        "top_keep_pairs": top_keep,
+        "top_drop_pairs": top_drop,
         "recent_cases": (prefs.get("recent_cases") or [])[:5],
         "store": str(PREF_PATH),
     }

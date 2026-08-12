@@ -356,6 +356,13 @@ _CONTROL_MARKERS = (
     "321", "3 2 1", "三二一", "倒计时", "倒數", "倒数",
     "过一下", "过一遍", "先上", "上脚", "上裤", "来凳", "凳子", "板凳",
     "用鞋把", "卡一下", "固定一下", "摆一下", "站好", "转一圈给你看一下哦等下",
+    # 催单氛围 / 开场过门（用户强制剔除：手速、开架、抱一下）
+    "手速", "手要快", "手快点", "手要快快", "手速快", "手速要快",
+    "开架", "开架了", "准备开架", "马上开架", "这就开架", "直接开架", "上架了", "准备上架",
+    "开波", "开波了", "开场了", "准备开播", "开始上新",
+    "抱一下", "抱一抱", "给大家抱一下", "大家抱一下", "抱走", "先抱一下",
+    "吃饭给大家", "边吃边播", "先吃饭", "吃个饭", "喝口水", "缓一下",
+    "等我一下", "稍等一下", "稍等我", "先等等", "等会儿", "等会再",
     # 人设/标签灌鸡汤（非服装卖点）
     "定义我的标签", "不要随便定义", "甄姐的标签", "标签不是随意", "摸不着拆不透",
     "我的标签", "定义标签", "随便定义",
@@ -449,12 +456,183 @@ _VALUE_MARKERS = _FIT_MARKERS + _FABRIC_MARKERS + _AUDIENCE_MARKERS + (
 )
 
 
+def _clause_has_live_pacing_token(text: str) -> bool:
+    """True if this clause fragment contains forced live-pacing tokens (手速/开架/抱一下…)."""
+    t = text or ""
+    if not t:
+        return False
+    # 手速啊 / T手速 / 手要快
+    if re.search(r"手\s*速", t) or re.search(r"手\s*(要|得)?\s*快", t):
+        return True
+    if re.search(r"开\s*架", t) or re.search(r"(准备|準備).{0,4}(开架|上架|开播|开波|上新)", t):
+        return True
+    if re.search(r"抱\s*(一\s*下|一\s*抱|走)", t):
+        return True
+    if re.search(r"(给|給)\s*(大家|你们|姐妹).{0,6}抱", t):
+        return True
+    if re.search(r"(吃饭|吃飯).{0,8}(大家|姐妹|抱)", t) or re.search(r"(大家|姐妹).{0,6}(吃饭|吃飯)", t):
+        return True
+    # 纯过门短句
+    if re.search(r"^(好吧|好的|目前|然后|然後|嗯|啊|哦|对吧|对不对)[\s，,。！？!?.]*$", t.strip()):
+        return True
+    if re.search(r"(稍等|等我|先等|等会儿|等会再).{0,4}(下|哈|啊)?", t) and not any(
+        k in t for k in ("面料", "版型", "显瘦", "上身", "遮肉", "不透", "收腰", "腰线", "腰線")
+    ):
+        return True
+    return False
+
+
+def _is_live_pacing_filler(text: str) -> bool:
+    """
+    催手速 / 开架预告 / 抱一下寒暄。
+
+    - Pure filler → drop whole line
+    - Mixed with clothing → also True so callers can scrub or drop
+    """
+    t = text or ""
+    if not t:
+        return False
+    # Any clause piece with pacing tokens
+    parts = [p for p in re.split(r"[，,。！？!?；;、\n]+", t) if p and p.strip()]
+    if not parts:
+        parts = [t]
+    for p in parts:
+        if _clause_has_live_pacing_token(p):
+            return True
+    # whole-string fallbacks
+    if re.search(r"手\s*速", t) or re.search(r"开\s*架", t):
+        return True
+    if re.search(r"抱\s*(一\s*下|一\s*抱)", t):
+        return True
+    if re.search(r"(吃饭|吃飯|喝水|喝口水|缓一下)", t) and (
+        any(k in t for k in ("大家", "姐妹", "家人们", "宝宝", "抱", "等我", "稍等", "直播"))
+        or len(re.sub(r"\s+", "", t)) <= 18
+    ):
+        if not any(k in t for k in ("面料", "版型", "显瘦", "上身", "遮肉", "不透", "垂感", "收腰", "好穿", "腰线")):
+            return True
+    return False
+
+
+def scrub_live_pacing_from_text(text: str) -> tuple[str, bool]:
+    """
+    Strip forced live-pacing 小句 from mixed ASR/plan text.
+
+    Example:
+      它也是高腰线，T手速啊，我们准备开架了，吃饭给大家抱一下，好吧，目前
+      -> 它也是高腰线
+
+    Returns (cleaned_text, changed).
+    Empty cleaned_text means drop the whole slot.
+    """
+    raw = (text or "").strip()
+    if not raw:
+        return "", False
+    if not _is_live_pacing_filler(raw):
+        return raw, False
+
+    # Split on Chinese/EN punctuation; keep clothing clauses only
+    parts = re.split(r"([，,。！？!?；;、\n]+)", raw)
+    # parts is token, sep, token, sep, ...
+    kept: list[str] = []
+    seps: list[str] = []
+    buf_tok: list[str] = []
+    buf_sep: list[str] = []
+    i = 0
+    tokens: list[tuple[str, str]] = []  # (clause, trailing_sep)
+    cur = ""
+    # Simpler: split keeping only clauses
+    clauses = [p.strip() for p in re.split(r"[，,。！？!?；;、\n]+", raw) if p and p.strip()]
+    if not clauses:
+        return "", True
+    kept_clauses: list[str] = []
+    for c in clauses:
+        if _clause_has_live_pacing_token(c):
+            continue
+        # also drop ultra-short leftover connectors without clothing signal
+        compact = re.sub(r"\s+", "", c)
+        if len(compact) <= 2 and compact in {"好吧", "好的", "目前", "然后", "嗯", "啊", "哦", "对吧"}:
+            continue
+        if _is_control(c) and not any(
+            k in c
+            for k in (
+                "面料", "版型", "显瘦", "上身", "遮肉", "不透", "收腰", "腰线", "腰線",
+                "高腰", "垂感", "透气", "亲肤", "软", "拼接", "蕾丝",
+            )
+        ):
+            continue
+        kept_clauses.append(c)
+
+    if not kept_clauses:
+        return "", True
+    cleaned = "，".join(kept_clauses)
+    # Prefer original separators roughly by using Chinese comma
+    cleaned = re.sub(r"[，,]{2,}", "，", cleaned).strip("，,。；; ")
+    if not cleaned:
+        return "", True
+    changed = cleaned != raw and cleaned != re.sub(r"\s+", "", raw)
+    # Always mark changed if we removed pacing
+    if any(_clause_has_live_pacing_token(c) for c in clauses):
+        changed = True
+    if cleaned == raw:
+        # whole line was filler-flagged but clause split kept same → force drop if still has tokens
+        if re.search(r"手\s*速|开\s*架|抱\s*一|吃饭给大家|吃飯給大家", raw):
+            return "", True
+        return raw, False
+    return cleaned, True
+
+
+def scrub_plan_slot_dict(slot: dict[str, Any]) -> dict[str, Any] | None:
+    """Scrub one plan/keep slot; None = drop entirely."""
+    if not isinstance(slot, dict):
+        return None
+    tx = str(slot.get("text") or "")
+    cleaned, changed = scrub_live_pacing_from_text(tx)
+    if not cleaned:
+        return None
+    out = dict(slot)
+    if changed:
+        out["text"] = cleaned
+        # shrink duration slightly when large filler removed (keep t0; reduce t1 by filler ratio)
+        try:
+            t0 = int(out.get("t0_ms") or 0)
+            t1 = max(t0 + 300, int(out.get("t1_ms") or 0))
+            old_len = max(1, len(re.sub(r"\s+", "", tx)))
+            new_len = max(1, len(re.sub(r"\s+", "", cleaned)))
+            if new_len < old_len:
+                dur = t1 - t0
+                # keep at least ~40% of original window if some content remains
+                ratio = max(0.4, min(1.0, new_len / old_len))
+                out["t1_ms"] = max(t0 + 300, t0 + int(round(dur * ratio)))
+        except Exception:
+            pass
+    # final hard bans on remaining text
+    left = str(out.get("text") or "")
+    if (
+        _is_size(left)
+        or _is_price_or_shipping(left)
+        or _is_persona_or_hype(left)
+        or _is_policy_risk(left)
+        or _is_link_or_slot_talk(left)
+        or _is_deal_call(left)
+    ):
+        return None
+    # pure control leftover
+    if _is_control(left) and not any(
+        k in left for k in ("面料", "版型", "显瘦", "上身", "遮肉", "不透", "收腰", "腰线", "腰線", "高腰")
+    ):
+        return None
+    return out
+
+
 def _is_control(text: str) -> bool:
     t = text or ""
     if any(x in t for x in _CONTROL_MARKERS):
         return True
     # 挂车/加单也当控场硬删（与成交过滤双保险）
     if _is_link_or_slot_talk(t) or _is_deal_call(t):
+        return True
+    # 手速 / 开架 / 抱一下 等过门
+    if _is_live_pacing_filler(t):
         return True
     # 3 2 1 / 321 倒计时口令
     if re.search(r"(?<!\d)3\s*2\s*1(?!\d)", t):
@@ -465,10 +643,10 @@ def _is_control(text: str) -> bool:
         return True
     # 纯控场短句：几乎没有服装卖点
     if re.search(r"(好不好|来吧|走起|开始了|开始播)", t) and not any(
-        k in t for k in ("面料", "版型", "显瘦", "上身", "适合", "遮肉", "垂感", "不透")
+        k in t for k in ("面料", "版型", "显瘦", "上身", "适合", "遮肉", "垂感", "不透", "腰线")
     ):
         # 含准备/拍摄口令时更坚决
-        if any(k in t for k in ("准备", "準備", "拍", "321", "倒计")):
+        if any(k in t for k in ("准备", "準備", "拍", "321", "倒计", "开架", "手速")):
             return True
     return False
 
@@ -716,9 +894,15 @@ def select_clauses_for_llm(
         text = str(c.get("text") or "").strip()
         if not text:
             continue
-        if _is_control(text):
-            stats["dropped_control"] += 1
-            continue
+        # Scrub 手速/开架/抱一下 out of mixed clauses before other bans
+        cleaned, scrubbed = scrub_live_pacing_from_text(text)
+        if scrubbed:
+            text = cleaned
+            if not text:
+                stats["dropped_control"] += 1
+                continue
+            c = dict(c)
+            c["text"] = text
         if _is_size(text):
             stats["dropped_size"] += 1
             continue
@@ -727,6 +911,13 @@ def select_clauses_for_llm(
             continue
         if _is_price_or_shipping(text):
             stats["dropped_price_ship"] += 1
+            continue
+        # Pure control (no clothing left) after scrub
+        if _is_control(text) and not any(
+            k in text
+            for k in ("面料", "版型", "显瘦", "上身", "遮肉", "不透", "收腰", "腰线", "腰線", "高腰", "垂感")
+        ):
+            stats["dropped_control"] += 1
             continue
         norm = re.sub(r"\s+", "", text)[:24]
         if norm in seen_norm:
@@ -838,7 +1029,7 @@ def _build_plan_messages(
     user_text = (
         f"目标约{int(target_seconds)}s。从候选选保留id并按播放顺序排列（约8-16个）。"
         "【硬删·绝对禁止】任何尺码内容：M/L/S/XL、偏大偏小、胸围腰围、建议穿、几斤穿、什么码；"
-        "价格拨分包邮、发货物流、加一单/拍一单催单、n号链接/小黄车/点链接、直播控场(家人们/扣1/321)、人设鸡汤、无关闲聊。"
+        "价格拨分包邮、发货物流、加一单/拍一单催单、n号链接/小黄车/点链接、直播控场(家人们/扣1/321/手速/开架/抱一下)、人设鸡汤、无关闲聊。"
         "【结构】开头1句服装特点（版型/上身/面料）→整块全身效果→整块面料体感→细节做工→穿搭场景→收束。"
         "【同主题连排·强制】同一卖点/主题的小句必须相邻成块，禁止「面料→版型→又面料→又版型」来回跳；"
         "例如先把显瘦/收腰讲完，再整块讲软/垂/不透，勿中途穿插别的模块。"
@@ -851,7 +1042,7 @@ def _build_plan_messages(
     system = (
         "你是服装短视频剪辑助手。只输出一个JSON对象。"
         "ids必须来自候选且原样复制。"
-        "硬规则：禁止尺码(字母码/围度/建议穿/几斤)；禁止价格发货、加一单、n号链接、小黄车、直播控场。"
+        "硬规则：禁止尺码(字母码/围度/建议穿/几斤)；禁止价格发货、加一单、n号链接、小黄车、手速开架抱一下等直播控场。"
         "顺序：服装特点钩子→全身效果块→面料块→细节→场景；同主题ids必须连排，禁止主题打散穿插。"
         + ("参考用户反剪学习口味，但不突破硬删。" if learn_bits else "")
         + '格式:{"ids":["c2","c3","c4"],"hook":"visual"}'
@@ -1907,18 +2098,34 @@ def llm_obj_to_timeline(
         else:
             warnings.append("kept_incomplete_tail_for_duration")
 
-    # Final safety net: strip any residual size/price/live lines before publish plan
+    # Final safety net: scrub live pacing + strip residual bans before publish plan
     cleaned: list[PlanSlot] = []
     dropped_size_n = 0
+    scrubbed_n = 0
     for s in slots:
         tx = str(s.text or "")
-        if _is_size(tx) or _is_price_or_shipping(tx) or _is_control(tx) or _is_persona_or_hype(tx) or _is_policy_risk(tx):
-            if _is_size(tx):
+        new_tx, changed = scrub_live_pacing_from_text(tx)
+        if changed:
+            scrubbed_n += 1
+        if not new_tx:
+            continue
+        if _is_size(new_tx) or _is_price_or_shipping(new_tx) or _is_persona_or_hype(new_tx) or _is_policy_risk(new_tx):
+            if _is_size(new_tx):
                 dropped_size_n += 1
             continue
+        # drop pure control leftovers; keep clothing-bearing lines
+        if _is_control(new_tx) and not any(
+            k in new_tx
+            for k in ("面料", "版型", "显瘦", "上身", "遮肉", "不透", "收腰", "腰线", "腰線", "高腰", "垂感", "适合")
+        ):
+            continue
+        if changed:
+            s.text = new_tx
         cleaned.append(s)
     if dropped_size_n:
         warnings.append(f"policy:size_stripped_n={dropped_size_n}")
+    if scrubbed_n:
+        warnings.append(f"policy:live_pacing_scrubbed_n={scrubbed_n}")
     slots = cleaned
 
     # MUST run last: duration fill / strip above can re-scatter topics.

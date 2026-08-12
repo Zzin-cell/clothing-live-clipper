@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import uuid
 from datetime import datetime, timezone
@@ -802,6 +803,10 @@ def create_app() -> FastAPI:
 
         def clean_slots(items: list[dict], role: str) -> list[dict]:
             out: list[dict] = []
+            try:
+                from clipper.llm_plan import scrub_live_pacing_from_text
+            except Exception:
+                scrub_live_pacing_from_text = None  # type: ignore
             for i, s in enumerate(items or []):
                 if not isinstance(s, dict):
                     continue
@@ -813,6 +818,23 @@ def create_app() -> FastAPI:
                 t1 = int(s.get("t1_ms") or 0)
                 if t1 <= t0:
                     continue
+                # Force-scrub 手速/开架/抱一下 from mixed module text on save/reclip
+                if scrub_live_pacing_from_text is not None and text:
+                    cleaned, changed = scrub_live_pacing_from_text(text)
+                    if not cleaned:
+                        continue
+                    if changed:
+                        text = cleaned
+                        # shrink end slightly proportional to removed filler
+                        try:
+                            old_n = max(1, len(re.sub(r"\s+", "", str(s.get("text") or ""))))
+                            new_n = max(1, len(re.sub(r"\s+", "", text)))
+                            if new_n < old_n:
+                                dur = t1 - t0
+                                ratio = max(0.4, min(1.0, new_n / old_n))
+                                t1 = max(t0 + 300, t0 + int(round(dur * ratio)))
+                        except Exception:
+                            pass
                 out.append(
                     {
                         "clip_id": str(s.get("clip_id") or f"{role}_{i:03d}"),

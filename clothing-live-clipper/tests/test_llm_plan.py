@@ -309,6 +309,51 @@ def test_live_deal_call_dropped_jia_yi_dan():
     assert "显瘦" in blob or "面料" in blob
 
 
+def test_pacing_filler_shou_su_kai_jia_bao_hard_dropped():
+    from clipper.llm_plan import _is_control, _is_live_pacing_filler, scrub_live_pacing_from_text
+
+    for s in (
+        "手速啊",
+        "手速要快姐妹们",
+        "我们准备开架了",
+        "马上开架注意了",
+        "吃饭给大家抱一下",
+        "给大家抱一下哈",
+        "先抱一下啊",
+        "稍等一下哈",
+    ):
+        assert _is_live_pacing_filler(s) or _is_control(s), s
+    assert not _is_live_pacing_filler("收腰版型上身显瘦")
+    assert not _is_control("面料超级软还不透")
+
+    # Mixed module: keep clothing head, strip live pacing tail (user screenshot case)
+    mixed = "它也是高腰线，T手速啊，我们准备开架了，吃饭给大家抱一下，好吧，目前"
+    cleaned, changed = scrub_live_pacing_from_text(mixed)
+    assert changed
+    assert "高腰" in cleaned or "腰线" in cleaned
+    assert "手速" not in cleaned and "开架" not in cleaned
+    assert "抱一下" not in cleaned and "吃饭" not in cleaned
+
+    lines = [
+        {"utt_id": "u1", "text": "收腰版型上身显瘦遮肉", "t0_ms": 0, "t1_ms": 3500},
+        {"utt_id": "u2", "text": "手速啊准备开架了", "t0_ms": 3500, "t1_ms": 6000},
+        {"utt_id": "u3", "text": "面料超级软还不透", "t0_ms": 6000, "t1_ms": 9500},
+        {"utt_id": "u4", "text": mixed, "t0_ms": 9500, "t1_ms": 15600},
+        {"utt_id": "u5", "text": "通勤日常都适合", "t0_ms": 15600, "t1_ms": 18600},
+    ]
+    clauses = expand_lines_to_clauses(lines)
+    plan = llm_obj_to_timeline(
+        {"keep": [{"id": c["id"], "text": c["text"]} for c in clauses], "_clauses": clauses},
+        lines,
+        target_seconds=60,
+        playback_speed=1.0,
+    )
+    blob = " ".join(s.text for s in plan.golden)
+    assert "手速" not in blob and "开架" not in blob
+    assert "抱一下" not in blob
+    assert "显瘦" in blob or "面料" in blob or "腰线" in blob or "高腰" in blob
+
+
 def test_link_and_n_hao_expressions_hard_dropped():
     from clipper.llm_plan import _is_link_or_slot_talk, _is_price_or_shipping, _is_control
 

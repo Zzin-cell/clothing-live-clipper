@@ -10,16 +10,61 @@ const STATUS_LABEL = {
   failed: "失败",
 };
 
+/** Module timestamp precision: keep ms (0.01s UI), not 100ms. */
+const TS_UI_STEP = "0.01";
+const TS_MIN_DUR_MS = 120; // allow tighter reverse cuts than 300ms
+
+function msToSecInput(ms) {
+  const v = Math.max(0, Number(ms) || 0) / 1000;
+  // show centiseconds; trim trailing zeros for readability but keep precision
+  return (Math.round(v * 100) / 100).toFixed(2);
+}
+
+function secInputToMs(sec) {
+  const s = Number(sec);
+  if (!Number.isFinite(s) || s < 0) return 0;
+  // round to nearest ms after centisecond entry (avoid float junk)
+  return Math.max(0, Math.round(s * 1000));
+}
+
+function formatDurSec(ms) {
+  const d = Math.max(0, Number(ms) || 0) / 1000;
+  return (Math.round(d * 100) / 100).toFixed(2);
+}
+
 let currentJobId = null;
 let pollTimer = null;
 let planEdit = null; // {golden, trust, cta}
 let planOriginal = null;
+/** Job id whose plan is currently shown in planEdit (must match currentJobId). */
+let planSourceJobId = null;
 let asrCards = []; // left transcript editable cards
 let selectedAsr = new Set(); // selected asr indices for bulk add
 let planDirty = false; // user is editing plan; avoid poll clobber
 let planRenderQueued = false;
 let planEventsBound = false;
 let asrEventsBound = false;
+/** Job id that asrCards currently represent (prevents job1 ASR overwriting job2 UI). */
+let asrTranscriptJobId = null;
+/** Monotonic token so late loadTranscript responses are ignored. */
+let asrLoadToken = 0;
+
+function planSlotCount(plan) {
+  if (!plan) return 0;
+  return ["golden", "trust", "cta"].reduce(
+    (n, k) => n + ((plan[k] || []).filter((s) => s && !s.removed).length || 0),
+    0
+  );
+}
+
+function clearPlanEditorState() {
+  planEdit = null;
+  planOriginal = null;
+  planDirty = false;
+  planSourceJobId = null;
+  planRenderQueued = false;
+  setPlanToolsEnabled(false);
+}
 
 function escapeHtml(str) {
   return String(str ?? "")
@@ -203,8 +248,11 @@ function formatWaitDuration(sec) {
 }
 
 /** Frontend build id; must match server ui_build_expected for version alignment. */
-const UI_BUILD = "jy71-learn-all-paths";
+const UI_BUILD = "jy79-mid-cut-force-sides";
 window.__XIAOMIAN_UI_BUILD__ = UI_BUILD;
+
+/** Last text selection in a plan/asr textarea (survives button mousedown blur). */
+const _lastTextSel = new WeakMap(); // HTMLTextAreaElement -> {start,end,text}
 
 function isQueueWaiting(data) {
   if (!data) return false;
@@ -294,11 +342,7 @@ function checkUiVersionAlignment(data) {
       el.className = "jy-pill bad";
       el.textContent = `前端偏旧(${UI_BUILD}≠${expect}) · 请 Ctrl+F5 并重启服务`;
     }
-    const hint = $("job-run-hint");
-    if (hint) {
-      hint.textContent =
-        `版本未对齐：页面 ${UI_BUILD} / 后端期望 ${expect}。请重启服务后按 Ctrl+F5 强刷，否则看不到排队/ETA。`;
-    }
+    // job-run-hint removed from UI; version mismatch shows on health pill only
   } catch (_) {}
 }
 
@@ -351,6 +395,8 @@ function clonePlan(plan) {
     text: s.text || "",
     score: Number(s.score || 0),
     removed: !!s.removed,
+    // keep link back to left ASR card when present (for 已加入 color)
+    from_asr_idx: s.from_asr_idx != null && s.from_asr_idx !== "" ? Number(s.from_asr_idx) : undefined,
   });
   // flatten legacy 3-section plans into one logical sequence
   const flat = [
@@ -358,6 +404,28 @@ function clonePlan(plan) {
     ...(plan.trust || []).map((s) => copySlot(s, "story")),
     ...(plan.cta || []).map((s) => copySlot(s, "story")),
   ];
+  // Best-effort: when loading auto plan without from_asr_idx, attach left ASR idx by time/text
+  try {
+    if (Array.isArray(asrCards) && asrCards.length) {
+      for (const s of flat) {
+        if (s.from_asr_idx != null && Number.isFinite(Number(s.from_asr_idx))) continue;
+        let best = -1;
+        let bestScore = 0;
+        for (let i = 0; i < asrCards.length; i++) {
+          const u = asrCards[i];
+          if (!u) continue;
+          const ov = windowOverlapRatio(s.t0_ms, s.t1_ms, u.t0_ms, u.t1_ms);
+          const soft = textSoftMatch(s.text, u.text) ? 0.35 : 0;
+          const sc = ov + soft;
+          if (sc > bestScore && (ov >= 0.4 || soft > 0)) {
+            bestScore = sc;
+            best = i;
+          }
+        }
+        if (best >= 0) s.from_asr_idx = best;
+      }
+    }
+  } catch (_) {}
   return {
     golden: flat,
     trust: [],
@@ -401,7 +469,7 @@ function updatePlanHint() {
   const min = durs.length ? Math.min(...durs) : 0;
   const max = durs.length ? Math.max(...durs) : 0;
   // Short status only — keep header clean
-  el.textContent = `${n} 段 · ${(avg / 1000).toFixed(1)}s均`;
+  el.textContent = `${n} 段 · ${formatDurSec(avg)}s均`;
 }
 
 function balancePlanDurations() {
@@ -426,7 +494,7 @@ function balancePlanDurations() {
   planDirty = true;
   queueRenderTracks();
   if ($("plan-edit-hint")) {
-    $("plan-edit-hint").textContent = `已均分到约 ${(target / 1000).toFixed(1)}s/段（可再微调）`;
+    $("plan-edit-hint").textContent = `已均分到约 ${formatDurSec(target)}s/段（可再微调）`;
   }
 }
 
@@ -443,8 +511,8 @@ function replaceClipWithAsr(toRole, toIdx, asrIdx) {
     const t0s = leftCard.querySelector(".clip-t0s");
     const t1s = leftCard.querySelector(".clip-t1s");
     if (ta) text = ta.value;
-    if (t0s) t0 = Math.max(0, Math.round(Number(t0s.value || 0) * 1000));
-    if (t1s) t1 = Math.max(t0 + 300, Math.round(Number(t1s.value || 0) * 1000));
+    if (t0s) t0 = Math.max(0, secInputToMs(t0s.value || 0));
+    if (t1s) t1 = Math.max(t0 + TS_MIN_DUR_MS, secInputToMs(t1s.value || 0));
   }
   const old = planEdit[toRole][toIdx];
   // keep roughly same duration if possible for visual consistency
@@ -481,36 +549,87 @@ function _splitClipByCut(role, idx, cut0ms, cut1ms, textLeft, textRight) {
   if (!planEdit?.[role]?.[idx]) return false;
   const s = planEdit[role][idx];
   const t0 = Math.max(0, Number(s.t0_ms || 0));
-  const t1 = Math.max(t0 + 300, Number(s.t1_ms || 0));
+  const t1 = Math.max(t0 + TS_MIN_DUR_MS, Number(s.t1_ms || 0));
+  const dur = Math.max(TS_MIN_DUR_MS, t1 - t0);
   let c0 = Math.max(t0, Math.min(t1, Number(cut0ms)));
   let c1 = Math.max(t0, Math.min(t1, Number(cut1ms)));
   if (c1 < c0) [c0, c1] = [c1, c0];
-  // ignore tiny cuts
-  if (c1 - c0 < 120) return false;
-  // allow shorter leftovers for precise Chinese phrase cuts
-  const leftOk = c0 - t0 >= 180;
-  const rightOk = t1 - c1 >= 180;
-  if (!leftOk && !rightOk) return false;
+
+  const leftText = String(textLeft ?? "").trim();
+  const rightText = String(textRight ?? "").trim();
+  const midDelete = !!(leftText && rightText);
+
+  // Mid-delete: force both residuals by character proportion of full original text.
+  // Do NOT rely on ASR anchors / large pads here — they were wiping the tail.
+  if (midDelete) {
+    const full = String(s.text || "");
+    const L = Math.max(1, leftText.length);
+    const R = Math.max(1, rightText.length);
+    const M = Math.max(1, Math.max(0, full.length - L - R) || (c1 > c0 ? 1 : 1));
+    // Prefer explicit cut times if sane (inside and leave >=12% each side)
+    const leftRoom = c0 - t0;
+    const rightRoom = t1 - c1;
+    const minSide = Math.max(120, Math.floor(dur * 0.12));
+    if (leftRoom < minSide || rightRoom < minSide || c1 - c0 < 40) {
+      const totalChars = L + M + R;
+      const leftFrac = L / totalChars;
+      const midFrac = M / totalChars;
+      c0 = t0 + Math.round(dur * leftFrac);
+      c1 = t0 + Math.round(dur * (leftFrac + midFrac));
+    }
+    // clamp so both sides always exist
+    c0 = Math.min(Math.max(c0, t0 + minSide), t1 - minSide - 40);
+    c1 = Math.max(Math.min(c1, t1 - minSide), c0 + 40);
+    if (c1 >= t1 - 40) c1 = t1 - minSide;
+    if (c0 <= t0 + 40) c0 = t0 + minSide;
+  } else {
+    // end-trim cuts can be more aggressive
+    if (c1 - c0 < 60) return false;
+  }
 
   const base = { ...s, role: roleLabel(role), removed: false };
   const parts = [];
-  if (leftOk) {
+  // LEFT
+  if (leftText || (!midDelete && c0 - t0 >= 100)) {
     parts.push({
       ...base,
       clip_id: `${s.clip_id || "c"}_L_${Date.now().toString(36)}`,
-      text: String(textLeft ?? s.text ?? "").trim(),
+      text: leftText || String(s.text || "").trim(),
       t0_ms: t0,
-      t1_ms: c0,
+      t1_ms: Math.max(t0 + TS_MIN_DUR_MS, Math.min(c0, t1 - TS_MIN_DUR_MS)),
     });
   }
-  if (rightOk) {
+  // RIGHT — for mid-delete ALWAYS keep when rightText exists
+  if (rightText || (!midDelete && t1 - c1 >= 100)) {
+    const r0 = midDelete
+      ? Math.min(t1 - TS_MIN_DUR_MS, Math.max(c1, t0 + TS_MIN_DUR_MS))
+      : Math.min(t1 - TS_MIN_DUR_MS, c1);
     parts.push({
       ...base,
       clip_id: `${s.clip_id || "c"}_R_${Date.now().toString(36)}`,
-      text: String(textRight ?? s.text ?? "").trim(),
-      t0_ms: c1,
+      text: rightText || String(s.text || "").trim(),
+      t0_ms: r0,
       t1_ms: t1,
     });
+  }
+  // Absolute safety for mid-delete: if somehow only one part, rebuild both by thirds
+  if (midDelete && parts.length < 2) {
+    const third = Math.floor(dur / 3);
+    planEdit[role].splice(idx, 1, {
+      ...base,
+      clip_id: `${s.clip_id || "c"}_L_${Date.now().toString(36)}`,
+      text: leftText,
+      t0_ms: t0,
+      t1_ms: t0 + third,
+    }, {
+      ...base,
+      clip_id: `${s.clip_id || "c"}_R_${Date.now().toString(36)}`,
+      text: rightText,
+      t0_ms: t0 + 2 * third,
+      t1_ms: t1,
+    });
+    planDirty = true;
+    return true;
   }
   if (!parts.length) return false;
   planEdit[role].splice(idx, 1, ...parts);
@@ -641,7 +760,7 @@ function mapCharIndexToMs(text, charIdx, t0, t1, anchors) {
 /** ASR cards overlapping a plan slot — used as timing anchors. */
 function getCutAnchorsForSlot(slot) {
   const t0 = Math.max(0, Number(slot?.t0_ms || 0));
-  const t1 = Math.max(t0 + 300, Number(slot?.t1_ms || 0));
+  const t1 = Math.max(t0 + TS_MIN_DUR_MS, Number(slot?.t1_ms || 0));
   const list = [];
   for (const u of asrCards || []) {
     const a0 = Number(u.t0_ms || 0);
@@ -660,63 +779,81 @@ function getCutAnchorsForSlot(slot) {
 function cutSelectedTextInClip(role, idx, ta) {
   if (!planEdit?.[role]?.[idx] || !ta) return false;
   const text = String(ta.value || "");
+  // Prefer live selection; fall back to cached selection (button click blurs textarea)
   let a = Number(ta.selectionStart ?? 0);
   let b = Number(ta.selectionEnd ?? 0);
+  const cached = _lastTextSel.get(ta);
+  if (!(b > a) && cached && cached.text === text && cached.end > cached.start) {
+    a = cached.start;
+    b = cached.end;
+  }
   if (!(b > a) || !text.length) {
-    alert("请先在口播框里用鼠标选中要删掉的那几个字（例如“199再来一次”）");
+    alert("请先在口播框里用鼠标选中要删掉的那几个字（例如“侧面看险薄，板板真正”），再点「删选中文字段」");
     return false;
   }
-  // expand selection to avoid cutting mid-number / mid-english token
+  // expand selection only for pure latin/digit tokens mid-selection
   while (a > 0 && /[0-9A-Za-z]/.test(text[a - 1]) && /[0-9A-Za-z]/.test(text[a])) a -= 1;
   while (b < text.length && /[0-9A-Za-z]/.test(text[b - 1]) && /[0-9A-Za-z]/.test(text[b])) b += 1;
 
   const s = planEdit[role][idx];
+  // Always use the textarea text as source of truth for left/right split
+  const stripEdgePunct = (s) =>
+    String(s || "")
+      .replace(/^[\s，,。.!！?？、；;：:]+/u, "")
+      .replace(/[\s，,。.!！?？、；;：:]+$/u, "")
+      .trim();
+  const textLeft = stripEdgePunct(text.slice(0, a));
+  const textRight = stripEdgePunct(text.slice(b));
+  const midDelete = !!(textLeft && textRight);
+
   const t0 = Math.max(0, Number(s.t0_ms || 0));
-  const t1 = Math.max(t0 + 300, Number(s.t1_ms || 0));
-  const dur = t1 - t0;
-  const anchors = getCutAnchorsForSlot(s);
-  let cut0 = mapCharIndexToMs(text, a, t0, t1, anchors);
-  let cut1 = mapCharIndexToMs(text, b, t0, t1, anchors);
-  if (cut1 < cut0) [cut0, cut1] = [cut1, cut0];
+  const t1 = Math.max(t0 + TS_MIN_DUR_MS, Number(s.t1_ms || 0));
+  const dur = Math.max(1, t1 - t0);
 
-  // adaptive pad: short selection → larger relative pad; long → smaller absolute pad
-  const selChars = Math.max(1, b - a);
-  const basePad = Math.round(Math.min(280, Math.max(60, dur * 0.018 + selChars * 18)));
-  // Chinese text usually has less trailing silence than linear pad assumes
-  cut0 = Math.max(t0, cut0 - Math.round(basePad * 0.45));
-  cut1 = Math.min(t1, cut1 + Math.round(basePad * 0.55));
-
-  // snap cuts to nearby ASR clause boundaries when close (improves phrase cuts)
-  for (const an of anchors) {
-    const edges = [Number(an.t0_ms), Number(an.t1_ms)];
-    for (const e of edges) {
-      if (Math.abs(e - cut0) <= 220) cut0 = Math.max(t0, Math.min(t1, e));
-      if (Math.abs(e - cut1) <= 220) cut1 = Math.max(t0, Math.min(t1, e));
-    }
+  // Mid-delete: PURE character proportion — most reliable for Chinese short phrases.
+  // (Weighted/anchor mapping was collapsing the tail on mixed-length clauses.)
+  let cut0;
+  let cut1;
+  if (midDelete) {
+    cut0 = t0 + Math.round((a / Math.max(1, text.length)) * dur);
+    cut1 = t0 + Math.round((b / Math.max(1, text.length)) * dur);
+    // tiny pad only
+    const pad = Math.min(40, Math.floor(dur * 0.01));
+    cut0 = Math.max(t0 + 80, cut0 - pad);
+    cut1 = Math.min(t1 - 80, cut1 + pad);
+  } else {
+    const anchors = getCutAnchorsForSlot(s);
+    cut0 = mapCharIndexToMs(text, a, t0, t1, anchors);
+    cut1 = mapCharIndexToMs(text, b, t0, t1, anchors);
+    if (cut1 < cut0) [cut0, cut1] = [cut1, cut0];
+    const pad = Math.min(80, Math.max(20, Math.floor(dur * 0.01)));
+    cut0 = Math.max(t0, cut0 - pad);
+    cut1 = Math.min(t1, cut1 + pad);
   }
-  if (cut1 - cut0 < 120) {
-    alert("选中太短，估算裁剪不足 0.12s。请多选几个字，或用「裁掉从/到(s)」精确秒数。");
-    return false;
+  if (cut1 <= cut0) {
+    cut0 = t0 + Math.floor((a / Math.max(1, text.length)) * dur);
+    cut1 = t0 + Math.ceil((b / Math.max(1, text.length)) * dur);
   }
 
-  const textLeft = text.slice(0, a).trim();
-  const textRight = text.slice(b).trim();
-  const leftText = (textLeft + (textLeft && textRight ? "" : "") + textRight).replace(/\s{2,}/g, " ").trim();
-  const ok = _splitClipByCut(
-    role,
-    idx,
-    cut0,
-    cut1,
-    textLeft || leftText,
-    textRight || leftText
-  );
+  const ok = _splitClipByCut(role, idx, cut0, cut1, textLeft, textRight);
   if (!ok) {
     alert("选中范围太短或会裁空整段，请扩大选中或改用「裁掉秒数」");
     return false;
   }
+  // clear cache after successful cut
+  try {
+    _lastTextSel.delete(ta);
+  } catch (_) {}
   if ($("plan-edit-hint")) {
-    const how = anchors.length ? "中文权重+ASR锚点" : "中文语速权重";
-    $("plan-edit-hint").textContent = `已裁掉 ${(cut0 / 1000).toFixed(2)}s–${(cut1 / 1000).toFixed(2)}s（${how}），请点重剪生效`;
+    const sideNote =
+      textLeft && textRight
+        ? ` · 前后保留（后：${textRight.slice(0, 12)}${textRight.length > 12 ? "…" : ""}）`
+        : textLeft
+          ? " · 仅保留前段"
+          : textRight
+            ? " · 仅保留后段"
+            : "";
+    $("plan-edit-hint").textContent = `已裁掉 ${(cut0 / 1000).toFixed(2)}s–${(cut1 / 1000).toFixed(2)}s${sideNote}，请点重剪生效`;
   }
   queueRenderTracks();
   return true;
@@ -727,15 +864,15 @@ function cutSecondsInClip(role, idx, fromS, toS) {
   if (!planEdit?.[role]?.[idx]) return false;
   const s = planEdit[role][idx];
   const t0 = Math.max(0, Number(s.t0_ms || 0));
-  const t1 = Math.max(t0 + 300, Number(s.t1_ms || 0));
-  let c0 = Math.round(Number(fromS) * 1000);
-  let c1 = Math.round(Number(toS) * 1000);
+  const t1 = Math.max(t0 + TS_MIN_DUR_MS, Number(s.t1_ms || 0));
+  let c0 = secInputToMs(fromS);
+  let c1 = secInputToMs(toS);
   if (!(c1 > c0)) {
     alert("结束秒必须大于开始秒");
     return false;
   }
   if (c0 < t0 - 50 || c1 > t1 + 50) {
-    alert(`裁剪范围需在当前片段内：${(t0 / 1000).toFixed(1)}s ~ ${(t1 / 1000).toFixed(1)}s`);
+    alert(`裁剪范围需在当前片段内：${(t0 / 1000).toFixed(2)}s ~ ${(t1 / 1000).toFixed(2)}s`);
     return false;
   }
   c0 = Math.max(t0, c0);
@@ -748,7 +885,7 @@ function cutSecondsInClip(role, idx, fromS, toS) {
     return false;
   }
   if ($("plan-edit-hint")) {
-    $("plan-edit-hint").textContent = `已裁掉 ${(c0 / 1000).toFixed(1)}s–${(c1 / 1000).toFixed(1)}s，请点重剪生效`;
+    $("plan-edit-hint").textContent = `已裁掉 ${(c0 / 1000).toFixed(2)}s–${(c1 / 1000).toFixed(2)}s，请点重剪生效`;
   }
   queueRenderTracks();
   return true;
@@ -805,10 +942,10 @@ function syncPlanFieldsFromDom() {
     const t0s = card.querySelector(".clip-t0s");
     const t1s = card.querySelector(".clip-t1s");
     if (ta) planEdit[role][idx].text = ta.value;
-    if (t0s) planEdit[role][idx].t0_ms = Math.max(0, Math.round(Number(t0s.value || 0) * 1000));
+    if (t0s) planEdit[role][idx].t0_ms = Math.max(0, secInputToMs(t0s.value || 0));
     if (t1s) {
       const v0 = planEdit[role][idx].t0_ms || 0;
-      const v1 = Math.max(v0 + 300, Math.round(Number(t1s.value || 0) * 1000));
+      const v1 = Math.max(v0 + TS_MIN_DUR_MS, secInputToMs(t1s.value || 0));
       planEdit[role][idx].t1_ms = v1;
     }
   });
@@ -823,13 +960,39 @@ function queueRenderTracks() {
   });
 }
 
-function renderTracks(plan) {
-  // prefer editable working copy
-  const src = planEdit || clonePlan(plan || {});
-  if (!planEdit && (plan?.golden?.length || plan?.trust?.length || plan?.cta?.length)) {
-    planEdit = clonePlan(plan);
-    planOriginal = clonePlan(plan);
-    setPlanToolsEnabled(true);
+function renderTracks(plan, opts = {}) {
+  const forceServer = !!opts.forceServer;
+  // If planEdit belongs to another job, never prefer it
+  if (planSourceJobId && currentJobId && planSourceJobId !== currentJobId) {
+    planEdit = null;
+    planOriginal = null;
+    planDirty = false;
+    planSourceJobId = null;
+  }
+  // prefer editable working copy only when same job + not force-reload from server
+  const src =
+    !forceServer && planEdit && planSourceJobId === currentJobId
+      ? planEdit
+      : clonePlan(plan || {});
+  if (
+    forceServer ||
+    (!planEdit && (plan?.golden?.length || plan?.trust?.length || plan?.cta?.length))
+  ) {
+    if (plan?.golden?.length || plan?.trust?.length || plan?.cta?.length) {
+      planEdit = clonePlan(plan);
+      planOriginal = clonePlan(plan);
+      planSourceJobId = currentJobId;
+      planDirty = false;
+      setPlanToolsEnabled(true);
+    } else if (forceServer) {
+      planEdit = { golden: [], trust: [], cta: [] };
+      planOriginal = clonePlan(planEdit);
+      planSourceJobId = currentJobId;
+      planDirty = false;
+      setPlanToolsEnabled(false);
+    }
+  } else if (planEdit && !planSourceJobId && currentJobId) {
+    planSourceJobId = currentJobId;
   }
 
   // preserve focus/cursor across re-render
@@ -853,8 +1016,8 @@ function renderTracks(plan) {
     }
     return list
       .map((s, idx) => {
-        const a = (Number(s.t0_ms || 0) / 1000).toFixed(1);
-        const b = (Number(s.t1_ms || 0) / 1000).toFixed(1);
+        const a = msToSecInput(s.t0_ms  || 0);
+        const b = msToSecInput(s.t1_ms  || 0);
         const removed = !!s.removed;
         return `<div class="jy-clip ${role} ${removed ? "removed" : ""}" draggable="true" data-role="${key}" data-idx="${idx}" data-id="${escapeHtml(s.clip_id || "")}">
           <div class="clip-top">
@@ -868,16 +1031,16 @@ function renderTracks(plan) {
           </div>
           <textarea class="clip-text-edit" rows="${suggestTextareaRows(s.text)}" placeholder="编辑这段口播词…">${escapeHtml(s.text || "")}</textarea>
           <div class="clip-time-row">
-            <label>开始(s)<input class="clip-t0s" type="number" step="0.1" min="0" value="${a}" /></label>
-            <label>结束(s)<input class="clip-t1s" type="number" step="0.1" min="0" value="${b}" /></label>
+            <label>开始(s)<input class="clip-t0s" type="number" step="${TS_UI_STEP}" min="0" value="${a}" /></label>
+            <label>结束(s)<input class="clip-t1s" type="number" step="${TS_UI_STEP}" min="0" value="${b}" /></label>
           </div>
           <div class="clip-time-row cut-row">
-            <label>裁掉从(s)<input class="clip-cut0s" type="number" step="0.1" min="0" value="" placeholder="${a}" /></label>
-            <label>到(s)<input class="clip-cut1s" type="number" step="0.1" min="0" value="" placeholder="${b}" /></label>
+            <label>裁掉从(s)<input class="clip-cut0s" type="number" step="${TS_UI_STEP}" min="0" value="" placeholder="${a}" /></label>
+            <label>到(s)<input class="clip-cut1s" type="number" step="${TS_UI_STEP}" min="0" value="" placeholder="${b}" /></label>
             <button type="button" class="clip-cut-range" title="按秒数裁掉中间一段">裁掉这段</button>
             <button type="button" class="clip-cut-sel" title="删除选中中文对应时间（语速权重+口播锚点，比均分更准）">删选中文字段</button>
           </div>
-          <div class="meta">时长 ${((Number(s.t1_ms || 0) - Number(s.t0_ms || 0)) / 1000).toFixed(1)}s · 可拖动手柄/点 ↑↓ 调整顺序</div>
+          <div class="meta">时长 ${formatDurSec((Number(s.t1_ms || 0) - Number(s.t0_ms || 0)))}s · 可拖动手柄/点 ↑↓ 调整顺序</div>
         </div>`;
       })
       .join("");
@@ -940,12 +1103,81 @@ function ensurePlanEventsBound() {
       planEdit[role][idx].text = t.value;
       fitTextareaHeight(t, clipTextareaLimits(t));
     } else if (t.classList.contains("clip-t0s")) {
-      planEdit[role][idx].t0_ms = Math.max(0, Math.round(Number(t.value || 0) * 1000));
+      planEdit[role][idx].t0_ms = Math.max(0, secInputToMs(t.value || 0));
     } else if (t.classList.contains("clip-t1s")) {
       const v0 = planEdit[role][idx].t0_ms || 0;
-      planEdit[role][idx].t1_ms = Math.max(v0 + 300, Math.round(Number(t.value || 0) * 1000));
+      planEdit[role][idx].t1_ms = Math.max(v0 + TS_MIN_DUR_MS, secInputToMs(t.value || 0));
     }
   });
+
+  // Cache textarea selection BEFORE button steals focus (mousedown on 删选中文字段)
+  root.addEventListener(
+    "mousedown",
+    (e) => {
+      const t = e.target;
+      if (t && t.classList && t.classList.contains("clip-text-edit")) {
+        try {
+          const start = t.selectionStart;
+          const end = t.selectionEnd;
+          if (end > start) {
+            _lastTextSel.set(t, { start, end, text: String(t.value || "") });
+          }
+        } catch (_) {}
+        return;
+      }
+      // clicking cut button: freeze whatever selection last was in this card
+      const btn = e.target.closest?.("button.clip-cut-sel");
+      if (!btn) return;
+      const card = btn.closest(".jy-clip");
+      const ta = card?.querySelector?.(".clip-text-edit");
+      if (!ta) return;
+      try {
+        // if textarea still has selection at mousedown (rare), capture it
+        if (ta.selectionEnd > ta.selectionStart) {
+          _lastTextSel.set(ta, {
+            start: ta.selectionStart,
+            end: ta.selectionEnd,
+            text: String(ta.value || ""),
+          });
+        }
+      } catch (_) {}
+    },
+    true
+  );
+  root.addEventListener(
+    "mouseup",
+    (e) => {
+      const t = e.target;
+      if (!(t && t.classList && t.classList.contains("clip-text-edit"))) return;
+      try {
+        if (t.selectionEnd > t.selectionStart) {
+          _lastTextSel.set(t, {
+            start: t.selectionStart,
+            end: t.selectionEnd,
+            text: String(t.value || ""),
+          });
+        }
+      } catch (_) {}
+    },
+    true
+  );
+  root.addEventListener(
+    "keyup",
+    (e) => {
+      const t = e.target;
+      if (!(t && t.classList && t.classList.contains("clip-text-edit"))) return;
+      try {
+        if (t.selectionEnd > t.selectionStart) {
+          _lastTextSel.set(t, {
+            start: t.selectionStart,
+            end: t.selectionEnd,
+            text: String(t.value || ""),
+          });
+        }
+      } catch (_) {}
+    },
+    true
+  );
 
   root.addEventListener("click", (e) => {
     const btn = e.target.closest("button");
@@ -962,10 +1194,10 @@ function ensurePlanEventsBound() {
     const t1s = card.querySelector(".clip-t1s");
     if (planEdit?.[role]?.[idx]) {
       if (ta) planEdit[role][idx].text = ta.value;
-      if (t0s) planEdit[role][idx].t0_ms = Math.max(0, Math.round(Number(t0s.value || 0) * 1000));
+      if (t0s) planEdit[role][idx].t0_ms = Math.max(0, secInputToMs(t0s.value || 0));
       if (t1s) {
         const v0 = planEdit[role][idx].t0_ms || 0;
-        planEdit[role][idx].t1_ms = Math.max(v0 + 300, Math.round(Number(t1s.value || 0) * 1000));
+        planEdit[role][idx].t1_ms = Math.max(v0 + TS_MIN_DUR_MS, secInputToMs(t1s.value || 0));
       }
     }
 
@@ -982,8 +1214,12 @@ function ensurePlanEventsBound() {
       return;
     }
     if (btn.classList.contains("clip-cut-sel")) {
-      const ta = card.querySelector(".clip-text-edit");
-      cutSelectedTextInClip(role, idx, ta);
+      const ta2 = card.querySelector(".clip-text-edit");
+      // re-focus textarea so selection APIs stay consistent; use cache if blur cleared it
+      try {
+        ta2?.focus?.({ preventScroll: true });
+      } catch (_) {}
+      cutSelectedTextInClip(role, idx, ta2);
       return;
     }
     if (btn.classList.contains("clip-cut-range")) {
@@ -1038,10 +1274,10 @@ function ensurePlanEventsBound() {
       const t0s = card.querySelector(".clip-t0s");
       const t1s = card.querySelector(".clip-t1s");
       if (ta) planEdit[role][idx].text = ta.value;
-      if (t0s) planEdit[role][idx].t0_ms = Math.max(0, Math.round(Number(t0s.value || 0) * 1000));
+      if (t0s) planEdit[role][idx].t0_ms = Math.max(0, secInputToMs(t0s.value || 0));
       if (t1s) {
         const v0 = planEdit[role][idx].t0_ms || 0;
-        planEdit[role][idx].t1_ms = Math.max(v0 + 300, Math.round(Number(t1s.value || 0) * 1000));
+        planEdit[role][idx].t1_ms = Math.max(v0 + TS_MIN_DUR_MS, secInputToMs(t1s.value || 0));
       }
     }
     card.classList.add("dragging");
@@ -1129,7 +1365,10 @@ function ensurePlanEventsBound() {
     if (!planEdit) {
       planEdit = { golden: [], trust: [], cta: [] };
       planOriginal = clonePlan(planEdit);
+      planSourceJobId = currentJobId;
       setPlanToolsEnabled(true);
+    } else if (!planSourceJobId) {
+      planSourceJobId = currentJobId;
     }
     if (!planEdit[toRole]) planEdit[toRole] = [];
 
@@ -1203,7 +1442,7 @@ async function applyPlanEdit() {
       .filter((s) => s && !s.removed)
       .map((s) => {
         const t0 = Math.max(0, Number(s.t0_ms || 0));
-        let t1 = Math.max(t0 + 300, Number(s.t1_ms || 0));
+        let t1 = Math.max(t0 + TS_MIN_DUR_MS, Number(s.t1_ms || 0));
         return {
           clip_id: s.clip_id,
           role: s.role,
@@ -1252,10 +1491,8 @@ async function applyPlanEdit() {
     });
     const data = await res.json().catch(() => ({}));
     if (!res.ok) throw new Error(data.detail || "应用失败");
-    // accept server result and clear dirty lock
-    planDirty = false;
-    planEdit = null;
-    planOriginal = null;
+    // accept server result and clear dirty lock so next server plan can paint
+    clearPlanEditorState();
     // force preview reload after reclip
     const video = $("preview");
     if (video) {
@@ -1340,8 +1577,8 @@ function setAsrToolsEnabled(on) {
 function windowKey(t0, t1) {
   const a = Math.max(0, Math.round(Number(t0) || 0));
   const b = Math.max(a + 1, Math.round(Number(t1) || 0));
-  // 120ms tolerance via quantization
-  return `${Math.round(a / 120)}_${Math.round(b / 120)}`;
+  // 200ms bins — slightly looser than 120ms so slight edge edits still match
+  return `${Math.round(a / 200)}_${Math.round(b / 200)}`;
 }
 
 /** Normalize text for uniqueness (ignore spaces / punctuation noise). */
@@ -1350,6 +1587,35 @@ function textKey(text) {
     .replace(/\s+/g, "")
     .replace(/[，。！？、,.!?;；:：'\"“”‘’…·\-—]/g, "")
     .toLowerCase();
+}
+
+/** Soft text containment match (plan may scrub filler so plan text ⊆ asr text). */
+function textSoftMatch(a, b) {
+  const ta = textKey(a);
+  const tb = textKey(b);
+  if (!ta || !tb) return false;
+  if (ta === tb) return true;
+  if (ta.length >= 4 && tb.length >= 4) {
+    if (ta.includes(tb) || tb.includes(ta)) return true;
+    // shared head / tail 6 chars for near-equal long lines
+    if (ta.length >= 8 && tb.length >= 8) {
+      if (ta.slice(0, 8) === tb.slice(0, 8)) return true;
+      if (ta.slice(-8) === tb.slice(-8)) return true;
+    }
+  }
+  return false;
+}
+
+/** Overlap ratio of two ms windows in [0,1] vs shorter length. */
+function windowOverlapRatio(a0, a1, b0, b1) {
+  const t0a = Math.max(0, Number(a0) || 0);
+  const t1a = Math.max(t0a + 1, Number(a1) || 0);
+  const t0b = Math.max(0, Number(b0) || 0);
+  const t1b = Math.max(t0b + 1, Number(b1) || 0);
+  const inter = Math.max(0, Math.min(t1a, t1b) - Math.max(t0a, t0b));
+  if (inter <= 0) return 0;
+  const shorter = Math.min(t1a - t0a, t1b - t0b) || 1;
+  return inter / shorter;
 }
 
 /**
@@ -1376,21 +1642,35 @@ function sameModule(a, b) {
   if (ia.asr != null && ib.asr != null && ia.asr === ib.asr) return true;
   if (ia.win && ib.win && ia.win === ib.win) return true;
   if (ia.text && ib.text && ia.text.length >= 4 && ia.text === ib.text) return true;
+  // soft: high time overlap + soft text
+  const ov = windowOverlapRatio(a.t0_ms, a.t1_ms, b.t0_ms, b.t1_ms);
+  if (ov >= 0.55 && textSoftMatch(a.text, b.text)) return true;
+  if (ov >= 0.78) return true; // strong time overlap alone
+  if (textSoftMatch(a.text, b.text) && ov >= 0.35) return true;
   return false;
+}
+
+/** Active plan slots from editable copy or readonly plan snapshot. */
+function getActivePlanSlots(plan) {
+  const src = plan || planEdit || {};
+  const out = [];
+  for (const k of ["golden", "trust", "cta"]) {
+    for (const s of src[k] || []) {
+      if (!s || s.removed) continue;
+      out.push(s);
+    }
+  }
+  return out;
 }
 
 /** Build set of active plan windows currently in logical timeline. */
 function getPlanWindowKeys(plan) {
   const keys = new Set();
-  const src = plan || planEdit || {};
-  for (const k of ["golden", "trust", "cta"]) {
-    for (const s of src[k] || []) {
-      if (!s || s.removed) continue;
-      keys.add(windowKey(s.t0_ms, s.t1_ms));
-      const tk = textKey(s.text);
-      if (tk.length >= 4) keys.add(`t:${tk}`);
-      if (s.from_asr_idx != null && s.from_asr_idx !== "") keys.add(`a:${Number(s.from_asr_idx)}`);
-    }
+  for (const s of getActivePlanSlots(plan)) {
+    keys.add(windowKey(s.t0_ms, s.t1_ms));
+    const tk = textKey(s.text);
+    if (tk.length >= 4) keys.add(`t:${tk}`);
+    if (s.from_asr_idx != null && s.from_asr_idx !== "") keys.add(`a:${Number(s.from_asr_idx)}`);
   }
   return keys;
 }
@@ -1398,31 +1678,47 @@ function getPlanWindowKeys(plan) {
 /** True if left ASR card is already represented in right plan (unique module). */
 function isAsrInPlan(u, planKeys, asrIdx = null) {
   if (!u) return false;
-  // Prefer live scan against planEdit for full identity (asr/time/text)
-  if (planEdit?.golden?.length) {
-    const probe = {
-      text: u.text,
-      t0_ms: u.t0_ms,
-      t1_ms: u.t1_ms,
-      from_asr_idx: asrIdx != null ? asrIdx : u.from_asr_idx,
-    };
-    if (findModuleIndex(probe) >= 0) return true;
-  }
+  const probe = {
+    text: u.text,
+    t0_ms: u.t0_ms,
+    t1_ms: u.t1_ms,
+    from_asr_idx: asrIdx != null ? asrIdx : u.from_asr_idx,
+  };
+  // Full identity scan on current planEdit / any plan snapshot passed via keys build
+  if (findModuleIndex(probe) >= 0) return true;
+
+  // Fallback when planEdit empty but keys set was built from readonly plan
   const keys = planKeys || getPlanWindowKeys();
+  if (asrIdx != null && keys.has(`a:${Number(asrIdx)}`)) return true;
   if (keys.has(windowKey(u.t0_ms, u.t1_ms))) return true;
   const tk = textKey(u.text);
   if (tk.length >= 4 && keys.has(`t:${tk}`)) return true;
-  if (asrIdx != null && keys.has(`a:${Number(asrIdx)}`)) return true;
+  // Soft text key: any plan key starts with t: and soft-matches
+  if (tk.length >= 4) {
+    for (const k of keys) {
+      if (typeof k === "string" && k.startsWith("t:")) {
+        const pt = k.slice(2);
+        if (textSoftMatch(tk, pt) || textSoftMatch(u.text, pt)) return true;
+      }
+    }
+  }
   return false;
 }
 
-/** Index of first matching module in golden plan, or -1. */
+/** Index of first matching module in golden (or any story track), or -1. */
 function findModuleIndex(probe, role = "golden") {
-  const arr = planEdit?.[role] || [];
-  for (let i = 0; i < arr.length; i++) {
-    const s = arr[i];
-    if (!s || s.removed) continue;
-    if (sameModule(s, probe)) return i;
+  // Prefer editable plan; also scan trust/cta for safety
+  const roles = role ? [role, "golden", "trust", "cta"] : ["golden", "trust", "cta"];
+  const seen = new Set();
+  for (const r of roles) {
+    if (seen.has(r)) continue;
+    seen.add(r);
+    const arr = planEdit?.[r] || [];
+    for (let i = 0; i < arr.length; i++) {
+      const s = arr[i];
+      if (!s || s.removed) continue;
+      if (sameModule(s, probe)) return i;
+    }
   }
   return -1;
 }
@@ -1448,7 +1744,7 @@ function enforcePlanUniqueness(role = "golden") {
   return Math.max(0, before - planEdit[role].length);
 }
 
-/** Refresh left card in-plan colors without full re-render if possible. */
+/** Refresh left card in-plan colors + button labels without full re-render. */
 function refreshAsrInPlanMarks() {
   const keys = getPlanWindowKeys();
   document.querySelectorAll(".asr-card").forEach((card) => {
@@ -1460,6 +1756,16 @@ function refreshAsrInPlanMarks() {
     card.classList.toggle("story", on);
     card.classList.toggle("trust", !on);
     card.dataset.inPlan = on ? "1" : "0";
+    // badge / buttons must update even when we don't re-render the whole list
+    const badge = card.querySelector(".clip-badge");
+    if (badge) {
+      // CSS `.asr-in-plan .clip-badge::after` appends " · 已加入" — only set base here
+      badge.textContent = `口播 #${idx + 1}`;
+    }
+    const addBtn = card.querySelector(".asr-add-golden");
+    if (addBtn) addBtn.textContent = on ? "已在成片" : "+加入成片";
+    const plus = card.querySelector(".asr-add-one");
+    if (plus) plus.title = on ? "已在逻辑成片中" : "加入逻辑成片";
   });
 }
 
@@ -1476,6 +1782,9 @@ function insertAsrUnique(aidx, toIdx = null) {
   if (!planEdit) {
     planEdit = { golden: [], trust: [], cta: [] };
     planOriginal = clonePlan(planEdit);
+    planSourceJobId = currentJobId;
+  } else if (!planSourceJobId) {
+    planSourceJobId = currentJobId;
   }
   const role = "golden";
   if (!planEdit[role]) planEdit[role] = [];
@@ -1489,15 +1798,15 @@ function insertAsrUnique(aidx, toIdx = null) {
     const t0s = leftCard.querySelector(".clip-t0s");
     const t1s = leftCard.querySelector(".clip-t1s");
     if (ta) text = ta.value;
-    if (t0s) t0 = Math.max(0, Math.round(Number(t0s.value || 0) * 1000));
-    if (t1s) t1 = Math.max(t0 + 300, Math.round(Number(t1s.value || 0) * 1000));
+    if (t0s) t0 = Math.max(0, secInputToMs(t0s.value || 0));
+    if (t1s) t1 = Math.max(t0 + TS_MIN_DUR_MS, secInputToMs(t1s.value || 0));
     item.text = text;
     item.t0_ms = t0;
     item.t1_ms = t1;
   }
   text = String(text || "").trim();
   if (!text) return { action: "empty", index: -1 };
-  t1 = Math.max(t0 + 300, t1);
+  t1 = Math.max(t0 + TS_MIN_DUR_MS, t1);
 
   const probe = { text, t0_ms: t0, t1_ms: t1, from_asr_idx: aidx };
   const existing = findModuleIndex(probe, role);
@@ -1551,6 +1860,9 @@ function addAsrToTrack(trackKey, indices) {
   if (!planEdit) {
     planEdit = { golden: [], trust: [], cta: [] };
     planOriginal = clonePlan(planEdit);
+    planSourceJobId = currentJobId;
+  } else if (!planSourceJobId) {
+    planSourceJobId = currentJobId;
   }
   setPlanToolsEnabled(true);
   const list = indices && indices.length ? indices : [...selectedAsr];
@@ -1581,7 +1893,13 @@ function addAsrToTrack(trackKey, indices) {
     planDirty = true;
     queueRenderTracks();
   }
+  // Always refresh colors (queueRenderTracks is rAF — refresh again after it)
   refreshAsrInPlanMarks();
+  requestAnimationFrame(() => {
+    try {
+      refreshAsrInPlanMarks();
+    } catch (_) {}
+  });
   if ($("plan-edit-hint")) {
     if (added > 0) {
       $("plan-edit-hint").textContent = `已加入 ${added} 段（逻辑成片内唯一 · 需保存并重剪）`;
@@ -1626,23 +1944,23 @@ function renderAsrCards() {
   const planKeys = getPlanWindowKeys();
   box.innerHTML = asrCards
     .map((u, idx) => {
-      const a = (Number(u.t0_ms || 0) / 1000).toFixed(1);
-      const b = (Number(u.t1_ms || 0) / 1000).toFixed(1);
+      const a = msToSecInput(u.t0_ms  || 0);
+      const b = msToSecInput(u.t1_ms  || 0);
       const checked = selectedAsr.has(idx) ? "checked" : "";
       const inPlan = isAsrInPlan(u, planKeys, idx);
       const tone = inPlan ? "asr-in-plan story" : "asr-source";
-      const badgeExtra = inPlan ? " · 已加入" : "";
+      // badge base only — CSS ::after adds " · 已加入" when .asr-in-plan
       return `<div class="jy-clip asr-card ${tone}" draggable="true" data-source="asr" data-idx="${idx}" data-in-plan="${inPlan ? "1" : "0"}">
         <div class="clip-top">
           <input type="checkbox" class="asr-check" ${checked} title="多选后批量加入成片" />
           <span class="clip-drag" title="按住拖到中间逻辑成片">⠿</span>
-          <span class="clip-badge">口播 #${idx + 1}${badgeExtra}</span>
+          <span class="clip-badge">口播 #${idx + 1}</span>
           <button type="button" class="clip-x asr-add-one" title="${inPlan ? "已在逻辑成片中" : "加入逻辑成片"}">＋</button>
         </div>
         <textarea class="clip-text-edit" rows="${suggestTextareaRows(u.text)}" placeholder="编辑这段口播词…">${escapeHtml(u.text || "")}</textarea>
         <div class="clip-time-row">
-          <label>开始(s)<input class="clip-t0s" type="number" step="0.1" min="0" value="${a}" /></label>
-          <label>结束(s)<input class="clip-t1s" type="number" step="0.1" min="0" value="${b}" /></label>
+          <label>开始(s)<input class="clip-t0s" type="number" step="${TS_UI_STEP}" min="0" value="${a}" /></label>
+          <label>结束(s)<input class="clip-t1s" type="number" step="${TS_UI_STEP}" min="0" value="${b}" /></label>
         </div>
         <div class="clip-tools">
           <button type="button" class="asr-add-golden">${inPlan ? "已在成片" : "+加入成片"}</button>
@@ -1689,10 +2007,10 @@ function ensureAsrEventsBound() {
       asrCards[idx].text = t.value;
       fitTextareaHeight(t, clipTextareaLimits(t));
     }
-    if (t.classList.contains("clip-t0s")) asrCards[idx].t0_ms = Math.max(0, Math.round(Number(t.value || 0) * 1000));
+    if (t.classList.contains("clip-t0s")) asrCards[idx].t0_ms = Math.max(0, secInputToMs(t.value || 0));
     if (t.classList.contains("clip-t1s")) {
       const t0 = asrCards[idx].t0_ms || 0;
-      asrCards[idx].t1_ms = Math.max(t0 + 300, Math.round(Number(t.value || 0) * 1000));
+      asrCards[idx].t1_ms = Math.max(t0 + TS_MIN_DUR_MS, secInputToMs(t.value || 0));
     }
   });
 
@@ -1722,10 +2040,10 @@ function ensureAsrEventsBound() {
     const t1s = card.querySelector(".clip-t1s");
     if (asrCards[idx]) {
       if (ta) asrCards[idx].text = ta.value;
-      if (t0s) asrCards[idx].t0_ms = Math.max(0, Math.round(Number(t0s.value || 0) * 1000));
+      if (t0s) asrCards[idx].t0_ms = Math.max(0, secInputToMs(t0s.value || 0));
       if (t1s) {
         const t0 = asrCards[idx].t0_ms || 0;
-        asrCards[idx].t1_ms = Math.max(t0 + 300, Math.round(Number(t1s.value || 0) * 1000));
+        asrCards[idx].t1_ms = Math.max(t0 + TS_MIN_DUR_MS, secInputToMs(t1s.value || 0));
       }
     }
     if (
@@ -1751,10 +2069,10 @@ function ensureAsrEventsBound() {
     const t1s = card.querySelector(".clip-t1s");
     if (asrCards[idx]) {
       if (ta) asrCards[idx].text = ta.value;
-      if (t0s) asrCards[idx].t0_ms = Math.max(0, Math.round(Number(t0s.value || 0) * 1000));
+      if (t0s) asrCards[idx].t0_ms = Math.max(0, secInputToMs(t0s.value || 0));
       if (t1s) {
         const t0 = asrCards[idx].t0_ms || 0;
-        asrCards[idx].t1_ms = Math.max(t0 + 300, Math.round(Number(t1s.value || 0) * 1000));
+        asrCards[idx].t1_ms = Math.max(t0 + TS_MIN_DUR_MS, secInputToMs(t1s.value || 0));
       }
     }
     card.classList.add("dragging");
@@ -1771,26 +2089,47 @@ function ensureAsrEventsBound() {
   });
 }
 
-async function loadTranscript(jobId) {
+async function loadTranscript(jobId, opts = {}) {
+  const force = !!opts.force;
+  const wanted = String(jobId || "");
+  if (!wanted) return;
+  // Bust browser/proxy cache when switching jobs or after ASR completes
+  const bust = force || asrTranscriptJobId !== wanted ? `?v=${Date.now()}` : "";
+  const myToken = ++asrLoadToken;
   const box = $("transcript-list");
-  $("asr-count").textContent = "—";
-  asrCards = [];
-  selectedAsr.clear();
-  setAsrToolsEnabled(false);
+  // Only blank UI if this is the active job (avoid flash when stale call finishes later)
+  if (wanted === String(currentJobId || "")) {
+    $("asr-count").textContent = "—";
+    asrCards = [];
+    asrTranscriptJobId = null;
+    selectedAsr.clear();
+    setAsrToolsEnabled(false);
+    if (box) box.innerHTML = '<div class="jy-empty">加载口播…</div>';
+  }
   try {
     // prefer full raw asr for human selection space; fallback kept
     let items = [];
-    const resRaw = await fetch(`/api/jobs/${encodeURIComponent(jobId)}/files/transcript_asr.json`);
+    const resRaw = await fetch(
+      `/api/jobs/${encodeURIComponent(wanted)}/files/transcript_asr.json${bust}`
+    );
+    // Drop stale response if user switched job or a newer load started
+    if (myToken !== asrLoadToken || wanted !== String(currentJobId || "")) return;
     if (resRaw.ok) {
       items = await resRaw.json();
     } else {
-      const resKept = await fetch(`/api/jobs/${encodeURIComponent(jobId)}/files/transcript_for_clipper.json`);
+      const resKept = await fetch(
+        `/api/jobs/${encodeURIComponent(wanted)}/files/transcript_for_clipper.json${bust}`
+      );
+      if (myToken !== asrLoadToken || wanted !== String(currentJobId || "")) return;
       if (!resKept.ok) {
-        box.innerHTML = '<div class="jy-empty">口播尚未生成</div>';
+        if (box && wanted === String(currentJobId || "")) {
+          box.innerHTML = '<div class="jy-empty">口播尚未生成</div>';
+        }
         return;
       }
       items = await resKept.json();
     }
+    if (myToken !== asrLoadToken || wanted !== String(currentJobId || "")) return;
     asrCards = (items || [])
       .filter((u) => u && String(u.text || "").trim())
       .map((u, i) => ({
@@ -1799,9 +2138,38 @@ async function loadTranscript(jobId) {
         t0_ms: Number(u.t0_ms || 0),
         t1_ms: Number(u.t1_ms || 0),
       }));
+    asrTranscriptJobId = wanted;
+    // Re-link auto plan slots -> ASR idx now that left cards exist
+    try {
+      if (planEdit?.golden?.length) {
+        for (const s of planEdit.golden) {
+          if (!s || s.removed) continue;
+          if (s.from_asr_idx != null && Number.isFinite(Number(s.from_asr_idx))) continue;
+          let best = -1;
+          let bestScore = 0;
+          for (let i = 0; i < asrCards.length; i++) {
+            const u = asrCards[i];
+            const ov = windowOverlapRatio(s.t0_ms, s.t1_ms, u.t0_ms, u.t1_ms);
+            const soft = textSoftMatch(s.text, u.text) ? 0.35 : 0;
+            const sc = ov + soft;
+            if (sc > bestScore && (ov >= 0.4 || soft > 0)) {
+              bestScore = sc;
+              best = i;
+            }
+          }
+          if (best >= 0) s.from_asr_idx = best;
+        }
+      }
+    } catch (_) {}
     renderAsrCards();
+    // Critical: colors were often wrong because plan rendered before asrCards loaded
+    try {
+      refreshAsrInPlanMarks();
+    } catch (_) {}
   } catch {
-    box.innerHTML = '<div class="jy-empty">口播加载失败</div>';
+    if (myToken === asrLoadToken && wanted === String(currentJobId || "") && box) {
+      box.innerHTML = '<div class="jy-empty">口播加载失败</div>';
+    }
   }
 }
 
@@ -1960,12 +2328,10 @@ function renderLlmStatus(data) {
 
 function renderJob(data) {
   const jobChanged = currentJobId !== data.job_id;
+  const prevStatus = window.__xm_lastJobStatus || null;
   currentJobId = data.job_id;
   if (jobChanged) {
-    planEdit = null;
-    planOriginal = null;
-    planDirty = false;
-    setPlanToolsEnabled(false);
+    clearPlanEditorState();
   }
   $("current-job-title").textContent = data.video_source || data.job_id;
   const st = data.status || "";
@@ -2027,21 +2393,56 @@ function renderJob(data) {
     video.removeAttribute("src");
   }
 
-  // tracks: never clobber while user is editing (planDirty)
+  // tracks / ASR: never clobber while user is editing (planDirty) on SAME job
+  const hasTranscriptFile = !!(files.transcript_asr || files.transcript || files.plan);
+  const serverPlanN = planSlotCount(data.plan);
+  const localPlanN = planSlotCount(planEdit);
+  const planJobMismatch = !!(planEdit && planSourceJobId && planSourceJobId !== data.job_id);
+  // Server finished / plan arrived while left empty, or plan grew after processing
+  const justFinished =
+    !processing &&
+    ["success", "success_partial"].includes(st) &&
+    prevStatus &&
+    ["queued", "processing", "starting", "claimed"].includes(prevStatus);
+  const needForcePlan =
+    jobChanged ||
+    planJobMismatch ||
+    (!planDirty &&
+      (justFinished ||
+        (serverPlanN > 0 && localPlanN === 0) ||
+        (serverPlanN > 0 && serverPlanN !== localPlanN && !planDirty && planSourceJobId === data.job_id && !processing)));
+
   if (jobChanged) {
-    planEdit = null;
-    planOriginal = null;
-    planDirty = false;
-    renderTracks(data.plan || {});
-    loadTranscript(data.job_id);
-  } else if (!planDirty) {
-    if (!planEdit) renderTracks(data.plan || {});
-    // don't reload transcript cards while typing
+    clearPlanEditorState();
+    // clear left ASR immediately so job2 never shows job1 text while loading
+    asrCards = [];
+    asrTranscriptJobId = null;
+    selectedAsr.clear();
+    setAsrToolsEnabled(false);
+    if ($("transcript-list")) {
+      $("transcript-list").innerHTML = '<div class="jy-empty">切换任务，加载口播…</div>';
+    }
+    if ($("asr-count")) $("asr-count").textContent = "—";
+    renderTracks(data.plan || {}, { forceServer: true });
+    loadTranscript(data.job_id, { force: true });
+  } else if (planDirty && planSourceJobId === data.job_id) {
+    // keep user edits for this job only
+  } else {
+    if (needForcePlan || !planEdit || planSourceJobId !== data.job_id) {
+      renderTracks(data.plan || {}, { forceServer: true });
+    }
+    // Same job: when ASR finishes after empty start, force reload left transcript
+    const asrMissingOrWrong = asrTranscriptJobId !== data.job_id || !asrCards.length;
+    if (hasTranscriptFile && (asrMissingOrWrong || justFinished)) {
+      loadTranscript(data.job_id, { force: true });
+    }
   }
+  window.__xm_lastJobStatus = st;
   // review text panel removed from UI; status shown in player bar / progress
 
-  // actions
+  // actions — primary downloads on top; plan.json / review.md folded by default
   const actions = [];
+  const devLinks = [];
   const srcName = String(data.video_source || data.job_id || "video");
   const srcStem = srcName.replace(/\.[^.\\/]+$/, "").replace(/[<>:"/\\|?*\u0000-\u001f]/g, "_").trim() || "video";
   const dlFinal = `${srcStem}final.mp4`;
@@ -2062,15 +2463,38 @@ function renderJob(data) {
     );
   }
   if (files.plan) {
-    actions.push(`<a class="jy-btn" href="/api/jobs/${encodeURIComponent(data.job_id)}/files/plan.json" target="_blank">plan.json</a>`);
+    devLinks.push(
+      `<a class="jy-btn jy-btn-dev" href="/api/jobs/${encodeURIComponent(data.job_id)}/files/plan.json" target="_blank">plan.json</a>`
+    );
   }
   if (files.review) {
-    actions.push(`<a class="jy-btn" href="/api/jobs/${encodeURIComponent(data.job_id)}/files/review.md" target="_blank">review.md</a>`);
+    devLinks.push(
+      `<a class="jy-btn jy-btn-dev" href="/api/jobs/${encodeURIComponent(data.job_id)}/files/review.md" target="_blank">review.md</a>`
+    );
   }
   if (st === "failed") {
     actions.push(`<button type="button" class="jy-btn" id="retry-btn">重试</button>`);
   }
-  $("actions").innerHTML = actions.join("") || '<span class="muted">暂无导出</span>';
+  let html = actions.join("") || '<span class="muted">暂无导出</span>';
+  if (devLinks.length) {
+    // default collapsed — expand only when user needs debug files
+    let devOpen = false;
+    try {
+      devOpen = localStorage.getItem("clipper_dev_files_open") === "1";
+    } catch (_) {}
+    html += `
+      <div class="jy-dev-files ${devOpen ? "open" : "collapsed"}" id="dev-files-box">
+        <button type="button" class="jy-dev-files-toggle" id="dev-files-toggle" aria-expanded="${devOpen ? "true" : "false"}">
+          <span class="jy-dev-caret">${devOpen ? "▾" : "▸"}</span>
+          调试文件
+          <span class="muted jy-dev-count">${devLinks.length}</span>
+        </button>
+        <div class="jy-dev-files-body" ${devOpen ? "" : "hidden"}>
+          ${devLinks.join("")}
+        </div>
+      </div>`;
+  }
+  $("actions").innerHTML = html;
   const exportFinalBtn = $("export-final-btn");
   if (exportFinalBtn) {
     exportFinalBtn.onclick = async () => {
@@ -2092,10 +2516,30 @@ function renderJob(data) {
       pollJob(data.job_id);
     };
   }
+  const devToggle = $("dev-files-toggle");
+  if (devToggle) {
+    devToggle.onclick = (e) => {
+      e.preventDefault();
+      const box = $("dev-files-box");
+      const body = box?.querySelector?.(".jy-dev-files-body");
+      if (!box || !body) return;
+      const open = box.classList.toggle("open");
+      box.classList.toggle("collapsed", !open);
+      body.hidden = !open;
+      devToggle.setAttribute("aria-expanded", open ? "true" : "false");
+      const caret = devToggle.querySelector(".jy-dev-caret");
+      if (caret) caret.textContent = open ? "▾" : "▸";
+      try {
+        localStorage.setItem("clipper_dev_files_open", open ? "1" : "0");
+      } catch (_) {}
+    };
+  }
 
-  // only load left transcript when switching jobs (or empty)
-  if (jobChanged || !asrCards.length) {
-    loadTranscript(data.job_id);
+  // leftover path: if tracks block didn't load ASR (e.g. planDirty edge), still sync
+  if (!planDirty && (jobChanged || asrTranscriptJobId !== data.job_id || !asrCards.length)) {
+    if (files.transcript_asr || files.transcript || files.plan || jobChanged) {
+      loadTranscript(data.job_id, { force: jobChanged || asrTranscriptJobId !== data.job_id });
+    }
   }
   highlightJob(data.job_id);
 }
@@ -2220,27 +2664,12 @@ function renderJobList(jobs) {
 }
 
 async function loadJobs() {
-  const hint = $("job-run-hint");
   try {
     const res = await fetch("/api/jobs?limit=12");
     const data = await res.json();
     const jobs = data.jobs || [];
     renderJobList(jobs);
-    if (hint) {
-      const queuedN = jobs.filter((j) => j.status === "queued" || String(j.stage || "").startsWith("wait_") || j.stage === "queued").length;
-      const activeN = jobs.filter((j) => j.status === "processing" || j.status === "starting" || j.status === "claimed").length;
-      let curWait = "";
-      if (currentJobId) {
-        const cur = jobs.find((j) => j.job_id === currentJobId);
-        if (cur) {
-          const w = formatQueueWaitInfo(cur);
-          if (w) curWait = ` · 当前${w}`;
-        }
-      }
-      hint.textContent = (queuedN + activeN) > 0
-        ? `队列稳定模式：排队 ${queuedN} · 处理中 ${activeN} · 听写串行${curWait}`
-        : `当前任务：${currentJobId || "无"}。下方可点历史任务查看成片。`;
-    }
+    // job-run-hint UI removed (user request): queue detail stays in job status line
     if (currentJobId) {
       const cur = jobs.find((j) => j.job_id === currentJobId);
       if (cur && ["queued", "processing", "starting", "claimed"].includes(cur.status)) {

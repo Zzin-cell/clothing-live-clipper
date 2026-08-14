@@ -627,6 +627,63 @@ body {
   align-items: center;
   min-height: 28px;
 }
+/* plan.json / review.md — default folded under 调试文件 */
+.jy-dev-files {
+  flex: 1 0 100%;
+  margin-top: 2px;
+  border: 1px dashed #dbe3ee;
+  border-radius: 12px;
+  background: #f8fafc;
+  overflow: hidden;
+}
+.jy-dev-files-toggle {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  border: 0;
+  background: transparent;
+  color: #64748b;
+  font-size: 12px;
+  font-weight: 600;
+  padding: 8px 12px;
+  cursor: pointer;
+  text-align: left;
+}
+.jy-dev-files-toggle:hover {
+  color: #0f766e;
+  background: #f0fdfa;
+}
+.jy-dev-caret {
+  width: 1em;
+  color: #94a3b8;
+  font-size: 11px;
+}
+.jy-dev-count {
+  margin-left: auto;
+  font-weight: 500;
+}
+.jy-dev-files-body {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 0 10px 10px;
+}
+.jy-dev-files.collapsed .jy-dev-files-body {
+  display: none !important;
+}
+.jy-dev-files-body .jy-btn-dev,
+.jy-actions a.jy-btn-dev {
+  font-size: 12px;
+  padding: 5px 10px;
+  color: #475569;
+  background: #fff;
+  border: 1px solid #e2e8f0;
+}
+.jy-dev-files-body .jy-btn-dev:hover {
+  border-color: #94a3b8;
+  color: #0f172a;
+}
 
 /* avoid tiny cramped buttons in toolbars */
 .jy-track-tools .jy-btn.tiny,
@@ -850,7 +907,7 @@ body {
   display: flex; align-items: center; gap: 6px; font-size: 11px; color: #64748b;
 }
 .jy-clip .clip-time-row input[type="number"] {
-  width: 84px;
+  width: 96px; /* 0.01s precision needs a bit more room */
   border: 1px solid #dbe3ee;
   background: #fff;
   border-radius: 8px;

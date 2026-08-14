@@ -604,33 +604,25 @@ def _primary_stage(c: Clip) -> int:
 
 def _naturalize_bounds(c: Clip) -> tuple[int, int]:
     """
-    Soften hard ASR cut points so modules don't end mid-breath.
-    - Prefer slightly longer tails for natural sentence close
-    - Avoid ultra-short fragments
+    Light soften of ASR cut points — keep timestamp precision high.
+
+    Previous padding (+80~220ms open/close, min 900ms) made module edges feel
+    sloppy vs source speech. Prefer authenticity; UI edits are 10ms (0.01s).
     """
     t0 = max(0, int(c.t0_ms or 0))
-    t1 = max(t0 + 280, int(c.t1_ms or 0))
-    dur = t1 - t0
+    t1 = max(t0 + 120, int(c.t1_ms or 0))
     text = (c.text or "").strip()
 
-    # open a little earlier if clip is not already long
-    if dur < 12000:
-        t0 = max(0, t0 - 80)
-    # prefer closing after a short breath, especially if text ends with punctuation
+    # minimal breath tail only
     if text.endswith(("。", "！", "？", "!", "?", "…")):
-        t1 = t1 + 220
+        t1 = t1 + 40
     elif text.endswith(("，", ",", "、")):
-        # incomplete clause: give a bit less tail, still not hard-stop
-        t1 = t1 + 120
+        t1 = t1 + 20
     else:
-        t1 = t1 + 180
+        t1 = t1 + 30
 
-    # keep reasonable module lengths
-    if t1 - t0 < 900:
-        t1 = t0 + 900
-    if t1 - t0 > 18000:
-        # too long modules feel abrupt when forced to end later; leave to splitter
-        pass
+    if t1 - t0 < 200:
+        t1 = t0 + 200
     return t0, t1
 
 

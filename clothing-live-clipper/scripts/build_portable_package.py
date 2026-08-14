@@ -32,8 +32,9 @@ SRC = Path(__file__).resolve().parents[1]
 PORTABLE_SCRIPTS = SRC / "pack" / "portable"
 CACHE = SRC / "pack" / "cache"
 DESKTOP = Path(os.environ.get("USERPROFILE", str(Path.home()))) / "Desktop"
-OUT = DESKTOP / "xiaomian"
-ZIP_PATH = DESKTOP / "xiaomian.zip"
+# V3 offline redistributable: Desktop/xiaomian-V3/ + xiaomian-V3.zip
+OUT = DESKTOP / "xiaomian-V3"
+ZIP_PATH = DESKTOP / "xiaomian-V3.zip"
 MODELS_SRC = Path(r"C:\Users\MR\AppData\grok\models")
 if not MODELS_SRC.exists():
     MODELS_SRC = SRC.parent / "models"
@@ -294,7 +295,8 @@ def copy_ffmpeg(out: Path) -> bool:
         for cand in (
             SRC / "tools" / "ffmpeg" / "bin" / "ffmpeg.exe",
             Path(r"C:\ffmpeg\bin\ffmpeg.exe"),
-            DESKTOP / "xiaomian" / "tools" / "ffmpeg" / "bin" / "ffmpeg.exe",
+            DESKTOP / "xiaomian-V3" / "tools" / "ffmpeg" / "bin" / "ffmpeg.exe",
+    DESKTOP / "xiaomian" / "tools" / "ffmpeg" / "bin" / "ffmpeg.exe",
             DESKTOP / "小面CapCut-便携版" / "tools" / "ffmpeg" / "bin" / "ffmpeg.exe",
         ):
             if cand.exists():
@@ -625,7 +627,7 @@ def write_full_readme(
         if has_vc
         else "未预置 VC++"
     )
-    text = f"""【xiaomian 离线绿色包 · 开箱即用】
+    text = f"""【xiaomian-V3 离线绿色包 · 开箱即用】
 
 预置听写模型：{model_line}
 预置工具：{ff_line}
@@ -635,16 +637,19 @@ def write_full_readme(
 预置 VC++：{vc_line}
 LLM：不预置 Key；网页右侧自己填写
 
+本包剔除：开发 .venv / web_jobs / 学习缓存 / .env / llm.json 隐私配置 / tests/docs
+
 ====================
 推荐路径
 ====================
   D:\\xiaomian
   C:\\xiaomian
+  D:\\xiaomian-V3
 
 ====================
 小白使用
 ====================
-1. 解压后进入本文件夹（能直接看到「启动小面.bat」）
+1. 解压 xiaomian-V3.zip 后进入本文件夹（能直接看到「启动小面.bat」）
 2. 双击「启动小面.bat」
    · 优先使用内置 Python + 已预装依赖
    · 若缺 VC++，自动运行 tools\\vc_redist.x64.exe（可能弹 UAC 点「是」）
@@ -706,6 +711,17 @@ def assert_clean(out: Path) -> None:
         if secret.exists() and secret.stat().st_size > 2:
             bad.append(f"must not ship user secret: {secret.relative_to(out)}")
 
+    # learning prefs / events must never ship (privacy + dirty machine state)
+    for learn_root in (
+        out / "clothing-live-clipper" / "output" / "learning",
+        out / "output" / "learning",
+    ):
+        if learn_root.exists():
+            for f in learn_root.rglob("*"):
+                if f.is_file() and f.stat().st_size > 0 and f.name != ".gitkeep":
+                    bad.append(f"must not ship learning data: {f.relative_to(out)}")
+                    break
+
     # no app/source caches (bundled python site-packages may contain its own __pycache__)
     for p in out.rglob("__pycache__"):
         rel = str(p.relative_to(out)).replace("\\", "/")
@@ -719,6 +735,12 @@ def assert_clean(out: Path) -> None:
             continue
         bad.append(f"pyc shipped: {p.relative_to(out)}")
         break
+
+    # forbid nested developer folders that bloat redistributable
+    for name in ("tests", "docs", ".pytest_cache", ".git"):
+        hit = out / "clothing-live-clipper" / name
+        if hit.exists():
+            bad.append(f"must not ship {name}/ under app tree")
 
     if bad:
         raise SystemExit("CLEAN_CHECK_FAILED:\n  - " + "\n  - ".join(bad))
@@ -760,6 +782,7 @@ def zip_dir(src: Path, zip_path: Path) -> None:
 
 def main() -> int:
     print("Building OFFLINE portable package ->", OUT)
+    print("zip target:", ZIP_PATH)
     print("models src:", MODELS_SRC)
     if not PORTABLE_SCRIPTS.exists():
         raise SystemExit(f"missing {PORTABLE_SCRIPTS}")
@@ -769,6 +792,18 @@ def main() -> int:
     if OUT.exists():
         print("removing old package folder...")
         shutil.rmtree(OUT, ignore_errors=True)
+    # stop leftover service if user left old Desktop package running
+    try:
+        stop = DESKTOP / "xiaomian" / "停止小面.bat"
+        if stop.exists():
+            subprocess.run(
+                ["cmd", "/c", str(stop)],
+                cwd=str(stop.parent),
+                timeout=60,
+                capture_output=True,
+            )
+    except Exception:
+        pass
     OUT.mkdir(parents=True)
 
     app_dst = OUT / "clothing-live-clipper"

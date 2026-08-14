@@ -1,0 +1,4 @@
+fix(pack): keep agent_clip_video runtime scripts in delivery
+
+job_worker imports agent_clip_video/asr_enhance/filter_transcript_v2 for
+local ASR. Stop stripping them from portable package and re-ship zip.

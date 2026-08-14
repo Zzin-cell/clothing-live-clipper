@@ -1,0 +1,4 @@
+chore(pack): strip tests/docs/dev scripts from user portable package
+
+Exclude unit tests, developer docs and helper scripts from delivery zip
+so end users only get runtime app + install/start launchers.

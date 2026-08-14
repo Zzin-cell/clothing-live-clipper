@@ -20,7 +20,7 @@ from typing import Any, Callable
 
 # Bump when queue/UI contract changes (frontend compares).
 QUEUE_BUILD = "20260808-abcd-pipeline"
-UI_BUILD_EXPECTED = "jy79-mid-cut-force-sides"
+UI_BUILD_EXPECTED = "jy81-plan-undo"
 
 
 def _utc_now() -> str:

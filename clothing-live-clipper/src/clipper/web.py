@@ -283,7 +283,7 @@ def create_app() -> FastAPI:
             },
             # deploy alignment for frontend hard-refresh check
             "queue_build": q.get("queue_build"),
-            "ui_build_expected": q.get("ui_build_expected") or "jy79-mid-cut-force-sides",
+            "ui_build_expected": q.get("ui_build_expected") or "jy81-plan-undo",
             "avg_job_s": q.get("avg_job_s"),
             "time": _utc_now(),
         }

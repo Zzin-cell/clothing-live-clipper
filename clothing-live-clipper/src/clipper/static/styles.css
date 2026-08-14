@@ -1150,6 +1150,27 @@ body {
   gap: 10px;
   flex-wrap: wrap;
 }
+.plan-history-btns {
+  display: inline-flex;
+  gap: 4px;
+  align-items: center;
+}
+.plan-hist-btn {
+  min-width: 30px;
+  font-size: 15px;
+  line-height: 1;
+  padding: 4px 8px !important;
+  color: #475569;
+}
+.plan-hist-btn:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+.plan-hist-btn:not(:disabled):hover {
+  color: #0f766e;
+  border-color: #99f6e4;
+  background: #f0fdfa;
+}
 .jy-head-actions-plan {
   display: flex;
   align-items: center;

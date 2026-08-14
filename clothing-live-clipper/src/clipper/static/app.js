@@ -49,6 +49,13 @@ let asrTranscriptJobId = null;
 /** Monotonic token so late loadTranscript responses are ignored. */
 let asrLoadToken = 0;
 
+/** Plan undo/redo (before 保存并重剪 only). Depth like a short Office undo stack. */
+const PLAN_HIST_MAX = 2;
+let planUndoStack = []; // snapshots before edits
+let planRedoStack = [];
+let planHistSuspended = false; // skip while applying undo/redo / server load
+let planTextHistBatch = false; // coalesce continuous typing into one undo step
+
 function planSlotCount(plan) {
   if (!plan) return 0;
   return ["golden", "trust", "cta"].reduce(
@@ -57,12 +64,125 @@ function planSlotCount(plan) {
   );
 }
 
+function snapshotPlan(plan) {
+  try {
+    return JSON.parse(JSON.stringify(plan || { golden: [], trust: [], cta: [] }));
+  } catch (_) {
+    return { golden: [], trust: [], cta: [] };
+  }
+}
+
+function clearPlanHistory() {
+  planUndoStack = [];
+  planRedoStack = [];
+  planTextHistBatch = false;
+  updatePlanHistoryButtons();
+}
+
+function updatePlanHistoryButtons() {
+  const u = $("plan-undo");
+  const r = $("plan-redo");
+  if (u) {
+    u.disabled = planUndoStack.length === 0 || !planEdit;
+    u.title =
+      planUndoStack.length > 0
+        ? `撤销 (Ctrl+Z) · 还可 ${planUndoStack.length} 步`
+        : "撤销 (Ctrl+Z) · 保存并重剪前可用";
+  }
+  if (r) {
+    r.disabled = planRedoStack.length === 0 || !planEdit;
+    r.title =
+      planRedoStack.length > 0
+        ? `恢复 (Ctrl+Y) · 还可 ${planRedoStack.length} 步`
+        : "恢复 (Ctrl+Y)";
+  }
+}
+
+/**
+ * Push current planEdit onto undo stack BEFORE a structural/text mutation.
+ * Call only when about to change planEdit; skips while history suspended.
+ */
+function pushPlanHistory(label) {
+  if (planHistSuspended || !planEdit) return;
+  try {
+    const snap = snapshotPlan(planEdit);
+    planUndoStack.push({ plan: snap, label: label || "编辑", at: Date.now() });
+    if (planUndoStack.length > PLAN_HIST_MAX) {
+      planUndoStack.splice(0, planUndoStack.length - PLAN_HIST_MAX);
+    }
+    // new branch invalidates redo
+    planRedoStack = [];
+    if (label !== "改文案") planTextHistBatch = false;
+    updatePlanHistoryButtons();
+  } catch (_) {}
+}
+
+/** Coalesce continuous typing into a single undo step. */
+function pushPlanHistoryForText() {
+  if (planTextHistBatch) return;
+  pushPlanHistory("改文案");
+  planTextHistBatch = true;
+}
+
+function undoPlanEdit() {
+  if (!planEdit || planUndoStack.length === 0) return false;
+  const prev = planUndoStack.pop();
+  if (!prev?.plan) return false;
+  try {
+    planRedoStack.push({ plan: snapshotPlan(planEdit), label: "恢复前", at: Date.now() });
+    if (planRedoStack.length > PLAN_HIST_MAX) {
+      planRedoStack.splice(0, planRedoStack.length - PLAN_HIST_MAX);
+    }
+    planHistSuspended = true;
+    planTextHistBatch = false;
+    planEdit = snapshotPlan(prev.plan);
+    planDirty = true;
+    planSourceJobId = currentJobId;
+    setPlanToolsEnabled(true);
+    queueRenderTracks();
+    if ($("plan-edit-hint")) {
+      $("plan-edit-hint").textContent = `已撤销${prev.label ? "「" + prev.label + "」" : ""}（保存并重剪前有效）`;
+    }
+  } finally {
+    planHistSuspended = false;
+    updatePlanHistoryButtons();
+  }
+  return true;
+}
+
+function redoPlanEdit() {
+  if (!planEdit || planRedoStack.length === 0) return false;
+  const next = planRedoStack.pop();
+  if (!next?.plan) return false;
+  try {
+    planUndoStack.push({ plan: snapshotPlan(planEdit), label: "撤销前", at: Date.now() });
+    if (planUndoStack.length > PLAN_HIST_MAX) {
+      planUndoStack.splice(0, planUndoStack.length - PLAN_HIST_MAX);
+    }
+    planHistSuspended = true;
+    planTextHistBatch = false;
+    planEdit = snapshotPlan(next.plan);
+    planDirty = true;
+    planSourceJobId = currentJobId;
+    setPlanToolsEnabled(true);
+    queueRenderTracks();
+    if ($("plan-edit-hint")) {
+      $("plan-edit-hint").textContent = "已恢复上一步修改（保存并重剪前有效）";
+    }
+  } finally {
+    planHistSuspended = false;
+    updatePlanHistoryButtons();
+  }
+  return true;
+}
+
 function clearPlanEditorState() {
   planEdit = null;
   planOriginal = null;
   planDirty = false;
   planSourceJobId = null;
   planRenderQueued = false;
+  clearPlanHistory();
   setPlanToolsEnabled(false);
 }
 
@@ -248,7 +368,7 @@ function formatWaitDuration(sec) {
 }
 
 /** Frontend build id; must match server ui_build_expected for version alignment. */
-const UI_BUILD = "jy79-mid-cut-force-sides";
+const UI_BUILD = "jy81-plan-undo";
 window.__XIAOMIAN_UI_BUILD__ = UI_BUILD;
 
 /** Last text selection in a plan/asr textarea (survives button mousedown blur). */
@@ -502,6 +622,7 @@ function replaceClipWithAsr(toRole, toIdx, asrIdx) {
   if (!planEdit?.[toRole]?.[toIdx]) return;
   const item = asrCards[asrIdx];
   if (!item) return;
+  pushPlanHistory("替换片段");
   const leftCard = document.querySelector(`.asr-card[data-idx="${asrIdx}"]`);
   let text = item.text;
   let t0 = Number(item.t0_ms || 0);
@@ -536,6 +657,7 @@ function replaceClipWithAsr(toRole, toIdx, asrIdx) {
 function swapClips(aRole, aIdx, bRole, bIdx) {
   if (!planEdit?.[aRole]?.[aIdx] || !planEdit?.[bRole]?.[bIdx]) return;
   if (aRole === bRole && aIdx === bIdx) return;
+  pushPlanHistory("交换位置");
   const a = planEdit[aRole][aIdx];
   const b = planEdit[bRole][bIdx];
   // swap content but keep section role labels
@@ -587,16 +709,22 @@ function _splitClipByCut(role, idx, cut0ms, cut1ms, textLeft, textRight) {
     if (c1 - c0 < 60) return false;
   }
 
+  const stamp = Date.now().toString(36);
   const base = { ...s, role: roleLabel(role), removed: false };
+  // Drop shared from_asr_idx on SPLIT parts so uniqueness won't treat L/R as one module
+  delete base.from_asr_idx;
   const parts = [];
   // LEFT
   if (leftText || (!midDelete && c0 - t0 >= 100)) {
     parts.push({
       ...base,
-      clip_id: `${s.clip_id || "c"}_L_${Date.now().toString(36)}`,
+      clip_id: `${s.clip_id || "c"}_L_${stamp}`,
       text: leftText || String(s.text || "").trim(),
       t0_ms: t0,
       t1_ms: Math.max(t0 + TS_MIN_DUR_MS, Math.min(c0, t1 - TS_MIN_DUR_MS)),
+      from_asr_idx: undefined,
+      split_from: s.clip_id || "",
+      split_side: "L",
     });
   }
   // RIGHT — for mid-delete ALWAYS keep when rightText exists
@@ -606,34 +734,50 @@ function _splitClipByCut(role, idx, cut0ms, cut1ms, textLeft, textRight) {
       : Math.min(t1 - TS_MIN_DUR_MS, c1);
     parts.push({
       ...base,
-      clip_id: `${s.clip_id || "c"}_R_${Date.now().toString(36)}`,
+      clip_id: `${s.clip_id || "c"}_R_${stamp}`,
       text: rightText || String(s.text || "").trim(),
       t0_ms: r0,
       t1_ms: t1,
+      from_asr_idx: undefined,
+      split_from: s.clip_id || "",
+      split_side: "R",
     });
   }
   // Absolute safety for mid-delete: if somehow only one part, rebuild both by thirds
   if (midDelete && parts.length < 2) {
     const third = Math.floor(dur / 3);
-    planEdit[role].splice(idx, 1, {
-      ...base,
-      clip_id: `${s.clip_id || "c"}_L_${Date.now().toString(36)}`,
-      text: leftText,
-      t0_ms: t0,
-      t1_ms: t0 + third,
-    }, {
-      ...base,
-      clip_id: `${s.clip_id || "c"}_R_${Date.now().toString(36)}`,
-      text: rightText,
-      t0_ms: t0 + 2 * third,
-      t1_ms: t1,
-    });
+    pushPlanHistory("删选中(中间)");
+    planEdit[role].splice(
+      idx,
+      1,
+      {
+        ...base,
+        clip_id: `${s.clip_id || "c"}_L_${stamp}`,
+        text: leftText,
+        t0_ms: t0,
+        t1_ms: t0 + third,
+        from_asr_idx: undefined,
+        split_side: "L",
+      },
+      {
+        ...base,
+        clip_id: `${s.clip_id || "c"}_R_${stamp}`,
+        text: rightText,
+        t0_ms: t0 + 2 * third,
+        t1_ms: t1,
+        from_asr_idx: undefined,
+        split_side: "R",
+      }
+    );
     planDirty = true;
+    updatePlanHistoryButtons();
     return true;
   }
   if (!parts.length) return false;
+  pushPlanHistory(midDelete ? "删选中(中间)" : "裁剪片段");
   planEdit[role].splice(idx, 1, ...parts);
   planDirty = true;
+  updatePlanHistoryButtons();
   return true;
 }
 
@@ -903,6 +1047,7 @@ function moveClip(fromRole, fromIdx, toRole, toIdx) {
   if (!planEdit[toRole]) planEdit[toRole] = [];
   // same track no-op
   if (fromRole === toRole && (toIdx === fromIdx || toIdx === fromIdx + 1)) return;
+  pushPlanHistory("调整顺序");
   const item = planEdit[fromRole].splice(fromIdx, 1)[0];
   if (!item) return;
   item.role = roleLabel(toRole);
@@ -920,6 +1065,7 @@ function moveClip(fromRole, fromIdx, toRole, toIdx) {
     if ($("plan-edit-hint")) {
       $("plan-edit-hint").textContent = "模块已存在，已保持唯一不重复";
     }
+    updatePlanHistoryButtons();
     return;
   }
   planEdit[toRole].splice(insertAt, 0, item);
@@ -929,6 +1075,7 @@ function moveClip(fromRole, fromIdx, toRole, toIdx) {
   if ($("plan-edit-hint")) {
     $("plan-edit-hint").textContent = "已调整模块顺序（需点「保存并重剪」才生效）";
   }
+  updatePlanHistoryButtons();
 }
 
 function syncPlanFieldsFromDom() {
@@ -978,18 +1125,25 @@ function renderTracks(plan, opts = {}) {
     forceServer ||
     (!planEdit && (plan?.golden?.length || plan?.trust?.length || plan?.cta?.length))
   ) {
-    if (plan?.golden?.length || plan?.trust?.length || plan?.cta?.length) {
-      planEdit = clonePlan(plan);
-      planOriginal = clonePlan(plan);
-      planSourceJobId = currentJobId;
-      planDirty = false;
-      setPlanToolsEnabled(true);
-    } else if (forceServer) {
-      planEdit = { golden: [], trust: [], cta: [] };
-      planOriginal = clonePlan(planEdit);
-      planSourceJobId = currentJobId;
-      planDirty = false;
-      setPlanToolsEnabled(false);
+    planHistSuspended = true;
+    try {
+      if (plan?.golden?.length || plan?.trust?.length || plan?.cta?.length) {
+        planEdit = clonePlan(plan);
+        planOriginal = clonePlan(plan);
+        planSourceJobId = currentJobId;
+        planDirty = false;
+        clearPlanHistory();
+        setPlanToolsEnabled(true);
+      } else if (forceServer) {
+        planEdit = { golden: [], trust: [], cta: [] };
+        planOriginal = clonePlan(planEdit);
+        planSourceJobId = currentJobId;
+        planDirty = false;
+        clearPlanHistory();
+        setPlanToolsEnabled(false);
+      }
+    } finally {
+      planHistSuspended = false;
     }
   } else if (planEdit && !planSourceJobId && currentJobId) {
     planSourceJobId = currentJobId;
@@ -1064,6 +1218,7 @@ function renderTracks(plan, opts = {}) {
   try {
     refreshAsrInPlanMarks();
   } catch (_) {}
+  updatePlanHistoryButtons();
 
   if (scrollBox) scrollBox.scrollTop = scrollTop;
   if (focusKey) {
@@ -1095,9 +1250,16 @@ function ensurePlanEventsBound() {
     if (!t.classList.contains("clip-text-edit") && !t.classList.contains("clip-t0s") && !t.classList.contains("clip-t1s")) return;
     const card = t.closest(".jy-clip");
     if (!card || !planEdit) return;
+    // only plan track cards (golden), not left ASR
+    if (card.classList.contains("asr-card")) return;
     const role = card.dataset.role;
     const idx = Number(card.dataset.idx);
     if (!planEdit?.[role]?.[idx]) return;
+    if (t.classList.contains("clip-text-edit")) {
+      pushPlanHistoryForText();
+    } else {
+      pushPlanHistory("改时间");
+    }
     planDirty = true;
     if (t.classList.contains("clip-text-edit")) {
       planEdit[role][idx].text = t.value;
@@ -1203,14 +1365,16 @@ function ensurePlanEventsBound() {
 
     if (btn.classList.contains("clip-x") || btn.classList.contains("clip-del-hard")) {
       if (!planEdit?.[role]?.[idx]) return;
+      pushPlanHistory("删除片段");
       // hard delete whole clip
       const removedItem = planEdit[role].splice(idx, 1)[0];
       planDirty = true;
       if ($("plan-edit-hint")) {
         const t = (removedItem?.text || "").slice(0, 18);
-        $("plan-edit-hint").textContent = `已删除整段：${t}${t.length >= 18 ? "…" : ""}（需点重剪才生效）`;
+        $("plan-edit-hint").textContent = `已删除整段：${t}${t.length >= 18 ? "…" : ""}（可撤销 · 需点重剪才出片）`;
       }
       queueRenderTracks();
+      updatePlanHistoryButtons();
       return;
     }
     if (btn.classList.contains("clip-cut-sel")) {
@@ -1492,6 +1656,7 @@ async function applyPlanEdit() {
     const data = await res.json().catch(() => ({}));
     if (!res.ok) throw new Error(data.detail || "应用失败");
     // accept server result and clear dirty lock so next server plan can paint
+    // undo stack is intentionally cleared after 保存并重剪
     clearPlanEditorState();
     // force preview reload after reclip
     const video = $("preview");
@@ -1534,15 +1699,47 @@ async function clearLearningData() {
 }
 
 function setupPlanTools() {
-  // Toolbar: 保存并重剪 + 自动学习开关（默认开）
+  // Toolbar: 撤销/恢复 + 保存并重剪 + 自动学习
   $("plan-reset")?.addEventListener?.("click", () => {
     if (!planOriginal) return;
+    pushPlanHistory("还原初始");
     planEdit = clonePlan(planOriginal);
     planDirty = true;
     queueRenderTracks();
+    updatePlanHistoryButtons();
   });
-  $("plan-balance")?.addEventListener?.("click", () => balancePlanDurations());
+  $("plan-balance")?.addEventListener?.("click", () => {
+    pushPlanHistory("均分时长");
+    balancePlanDurations();
+  });
   $("plan-apply")?.addEventListener?.("click", applyPlanEdit);
+  $("plan-undo")?.addEventListener?.("click", (e) => {
+    e.preventDefault();
+    undoPlanEdit();
+  });
+  $("plan-redo")?.addEventListener?.("click", (e) => {
+    e.preventDefault();
+    redoPlanEdit();
+  });
+  // Office-like shortcuts (only when not typing in plain inputs outside plan, or always when plan focused)
+  document.addEventListener("keydown", (e) => {
+    const mod = e.ctrlKey || e.metaKey;
+    if (!mod) return;
+    const key = String(e.key || "").toLowerCase();
+    // Ctrl+Z undo / Ctrl+Y redo / Ctrl+Shift+Z redo
+    if (key === "z" && !e.shiftKey) {
+      if (!planEdit || planUndoStack.length === 0) return;
+      // allow even inside textarea (Word-like for plan edits)
+      e.preventDefault();
+      undoPlanEdit();
+      return;
+    }
+    if (key === "y" || (key === "z" && e.shiftKey)) {
+      if (!planEdit || planRedoStack.length === 0) return;
+      e.preventDefault();
+      redoPlanEdit();
+    }
+  });
   $("learn-clear")?.addEventListener?.("click", clearLearningData);
   const learnEl = $("plan-learn");
   if (learnEl && learnEl.type === "checkbox") {
@@ -1565,6 +1762,7 @@ function setupPlanTools() {
       }
     });
   }
+  updatePlanHistoryButtons();
 }
 
 function setAsrToolsEnabled(on) {
@@ -1639,11 +1837,17 @@ function sameModule(a, b) {
   if (!a || !b) return false;
   const ia = slotIdentity(a);
   const ib = slotIdentity(b);
-  if (ia.asr != null && ib.asr != null && ia.asr === ib.asr) return true;
+  const ov = windowOverlapRatio(a.t0_ms, a.t1_ms, b.t0_ms, b.t1_ms);
+  // Same ASR origin only counts as duplicate when times still heavily overlap.
+  // Mid-cut splits re-used from_asr_idx and must NOT collapse L/R halves.
+  if (ia.asr != null && ib.asr != null && ia.asr === ib.asr) {
+    if (ov >= 0.55) return true;
+    // non-overlapping (or barely overlapping) = two different keep segments
+    if (ov < 0.25) return false;
+  }
   if (ia.win && ib.win && ia.win === ib.win) return true;
   if (ia.text && ib.text && ia.text.length >= 4 && ia.text === ib.text) return true;
   // soft: high time overlap + soft text
-  const ov = windowOverlapRatio(a.t0_ms, a.t1_ms, b.t0_ms, b.t1_ms);
   if (ov >= 0.55 && textSoftMatch(a.text, b.text)) return true;
   if (ov >= 0.78) return true; // strong time overlap alone
   if (textSoftMatch(a.text, b.text) && ov >= 0.35) return true;
@@ -1816,6 +2020,7 @@ function insertAsrUnique(aidx, toIdx = null) {
     if (toIdx == null || Number.isNaN(Number(toIdx))) {
       return { action: "skip", index: existing };
     }
+    pushPlanHistory("移动片段");
     let insertAt = Math.max(0, Math.min(Number(toIdx), planEdit[role].length));
     const [slot] = planEdit[role].splice(existing, 1);
     // fix index after removal
@@ -1832,6 +2037,7 @@ function insertAsrUnique(aidx, toIdx = null) {
     return { action: "move", index: insertAt };
   }
 
+  pushPlanHistory("加入片段");
   const slot = {
     clip_id: `asr_${aidx}_${Date.now().toString(36)}_${Math.random().toString(16).slice(2, 6)}`,
     role: roleLabel(role),

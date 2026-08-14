@@ -4,9 +4,9 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>小面 · CapCut</title>
-  <link rel="stylesheet" href="/static/styles.css?v=jy79-mid-cut-force-sides" />
+  <link rel="stylesheet" href="/static/styles.css?v=jy81-plan-undo" />
   <script>
-    window.__XIAOMIAN_UI__ = "jy79-mid-cut-force-sides";
+    window.__XIAOMIAN_UI__ = "jy81-plan-undo";
   </script>
 </head>
 <body>
@@ -102,6 +102,10 @@
             <span>逻辑成片</span>
             <div class="jy-head-actions jy-head-actions-plan">
               <span class="muted" id="plan-edit-hint"></span>
+              <div class="plan-history-btns" title="保存并重剪前可撤销/恢复最近修改">
+                <button type="button" class="jy-btn tiny plan-hist-btn" id="plan-undo" disabled title="撤销 (Ctrl+Z)">↶</button>
+                <button type="button" class="jy-btn tiny plan-hist-btn" id="plan-redo" disabled title="恢复 (Ctrl+Y)">↷</button>
+              </div>
               <label class="jy-switch jy-learn-inline" title="保存并重剪时写入全局口味偏好">
                 <input type="checkbox" id="plan-learn" checked />
                 <span>自动学习</span>
@@ -199,6 +203,6 @@
     </div>
   </div>
 
-  <script src="/static/app.js?v=jy79-mid-cut-force-sides"></script>
+  <script src="/static/app.js?v=jy81-plan-undo"></script>
 </body>
 </html>

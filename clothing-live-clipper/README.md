@@ -43,7 +43,9 @@
 | **V3.1** | 逻辑成片撤销/恢复（2 步）+ 中间删字保留后半 · [发布说明](docs/RELEASE_V3.1.md) |
 | **V3** | 离线绿包 / 队列 / 反剪学习全路径 |
 
-离线小白包构建：`python scripts/build_portable_package.py` → 桌面 `xiaomian-V3.zip`。
+- **使用指南（完整）：** [docs/使用指南.md](docs/使用指南.md)  
+- 离线小白包构建：`python scripts/build_portable_package.py` → 桌面 `xiaomian-V3.zip`  
+- 绿包内短说明：`先读我.txt` / `使用说明-操作指南.txt`
 
 ---
 

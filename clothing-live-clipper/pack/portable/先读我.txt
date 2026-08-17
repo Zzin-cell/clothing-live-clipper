@@ -1,40 +1,17 @@
-【超全量便携版】
+【小面 xiaomian-V3 / V3.1 · 离线绿包】
 
-预置听写模型：whisper-medium、whisper-small、whisper-tiny
+1. 解压到短路径：D:\xiaomian 或 C:\xiaomian
+2. 双击「启动小面.bat」
+3. 网页右侧填写 LLM API → 测试 → 保存
+4. 上传视频 → 开始服装切片
+5. 可改「逻辑成片」后点「保存并重剪」
+   - 撤销/恢复：↶↷ 或 Ctrl+Z / Ctrl+Y（保存前，最多 2 步）
+6. 不用时「停止小面.bat」
 
-预置工具：ffmpeg
+详细步骤：使用说明-操作指南.txt
+完整指南：源码 docs\使用指南.md
 
-预置 Python：tools\python\python.exe（空白机无需安装系统 Python）
-
-LLM：不预置 Key；空白电脑在网页右侧填写 Base URL + API Key，点「自动匹配」后即可使用。
-
-首次双击「启动小面.bat」会用内置 python.exe 创建虚拟环境并装依赖；模型已预置时听写可离线。
-
-
-
-只需双击「启动小面.bat」：
-
-1. 第一次会自动安装配置（需联网，可能几分钟）
-2. 超全量包已内置 tools\python\python.exe，空白电脑通常不用先装系统 Python
-3. 会自动排查修复常见问题（缺依赖/缺模型/端口占用/GPU 失败回退 CPU）
-4. 安装后自动后台启动服务并打开网页
-5. 在网页右侧填写你的 LLM API 后即可上传切片
-   （Base URL 推荐 https://api.siliconflow.cn/v1，不要填 api.openai.com）
-
-路径说明（新电脑自动生成，无需改配置）：
-- 听写模型：包内 models\
-- 用户 LLM 配置：output\user_config\llm.json（首次保存后生成）
-- 任务输出：clothing-live-clipper\output\web_jobs\
+注意：
+- 不要把用过的目录（含 Key / 任务）直接发给别人
 - 日志：tools\logs\
-- 不要把本机 C:\Users\某用户\... 路径写进包里
-
-GPU 说明（Hyper-V / 空白机）：
-- 设备管理器有 RTX ≠ 小面能用 GPU
-- 必须 nvidia-smi 正常，且 查看GPU状态.bat 显示 ctranslate2_cuda_count>=1
-- 若设备管理器正常但小面仍 CPU：双击「修复GPU.bat」，再 停止/启动小面
-- 家用 Hyper-V 常见“能显示不能算 CUDA”，最稳是宿主机直接运行便携包
-
-不用时双击「停止小面.bat」。
-
-详细见：使用说明-操作指南.txt
-注意见：注意事项.txt
+- 出片约 60 秒；去直播感与尺码价格等
